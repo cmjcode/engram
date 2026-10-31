@@ -1,0 +1,362 @@
+//! HTTP API JSON untuk UI web dan integrasi. Semua route di bawah `/api`.
+
+use std::path::PathBuf;
+
+use axum::Router;
+use axum::extract::{Multipart, Path, Query, State};
+use axum::routing::{get, post};
+use axum::Json;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use memory_core::ids::is_valid_id;
+use memory_core::model::*;
+use memory_core::time::LifeAnchors;
+use memory_extract::ingest::IngestDoc;
+use memory_extract::review::Decision;
+use memory_retrieve::RecallQuery;
+use memory_store::EpisodeFilter;
+
+use crate::{ApiError, ApiResult, AppState};
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/subjects", get(list_subjects).post(upsert_subject))
+        .route("/api/subjects/{s}/stats", get(stats))
+        .route("/api/subjects/{s}/timeline", get(timeline))
+        .route("/api/subjects/{s}/episodes/{id}", get(episode))
+        .route("/api/subjects/{s}/entities", get(entities))
+        .route("/api/subjects/{s}/entities/{id}", get(entity))
+        .route("/api/subjects/{s}/family", get(family))
+        .route("/api/subjects/{s}/principles", get(principles))
+        .route("/api/subjects/{s}/dispositions", get(dispositions))
+        .route("/api/subjects/{s}/phases", get(phases))
+        .route("/api/subjects/{s}/voice", get(voice))
+        .route("/api/subjects/{s}/recall", post(recall))
+        .route("/api/subjects/{s}/ask", post(ask))
+        .route("/api/subjects/{s}/reviews", get(reviews))
+        .route("/api/reviews/{id}", post(resolve_review))
+        .route("/api/subjects/{s}/sources", get(sources))
+        .route("/api/sources/{id}", get(source))
+        .route("/api/subjects/{s}/import", post(import))
+        .route("/api/subjects/{s}/batches", get(batches))
+        .route("/api/batches/{id}", get(batch))
+        .route("/api/jobs", get(jobs))
+        .route("/api/subjects/{s}/remember", post(remember))
+        .route("/api/subjects/{s}/interview/next", get(interview_next))
+        .route("/api/subjects/{s}/interview/answer", post(interview_answer))
+        .route("/api/subjects/{s}/maintenance/{kind}", post(maintenance))
+}
+
+fn check(s: &str) -> Result<(), ApiError> {
+    if is_valid_id(s) { Ok(()) } else { Err(ApiError::BadRequest(format!("id tidak valid: {s}"))) }
+}
+
+async fn list_subjects(State(st): State<AppState>) -> ApiResult<Value> {
+    let subjects = st.rt.store.list_subjects().await?;
+    Ok(Json(json!({"subjects": subjects, "default": st.default_subject()})))
+}
+
+#[derive(Deserialize)]
+struct SubjectIn {
+    id: String,
+    name: String,
+    #[serde(default)]
+    birth: Option<String>,
+    #[serde(default)]
+    gender: Option<memory_core::Gender>,
+    #[serde(default)]
+    events: Option<std::collections::BTreeMap<String, String>>,
+}
+
+async fn upsert_subject(State(st): State<AppState>, Json(b): Json<SubjectIn>) -> ApiResult<Subject> {
+    check(&b.id)?;
+    let mut s = st.rt.pipeline.ensure_subject(&b.id, Some(&b.name)).await?;
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| ApiError::BadRequest(format!("tanggal tidak valid: {d}")));
+    if let Some(bd) = b.birth.as_deref().filter(|d| !d.is_empty()) {
+        s.anchors.birth = Some(parse(bd)?);
+    }
+    if let Some(ev) = b.events {
+        let mut a = LifeAnchors { birth: s.anchors.birth, phases: s.anchors.phases.clone(), ..Default::default() };
+        for (k, v) in ev {
+            a.events.insert(k, parse(&v)?);
+        }
+        s.anchors = a;
+    }
+    if b.gender.is_some() {
+        s.gender = b.gender;
+    }
+    st.rt.store.put_subject(&s).await?;
+    Ok(Json(s))
+}
+
+async fn stats(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<Value> {
+    check(&s)?;
+    let stats = st.rt.store.stats(&s).await?;
+    let subject = st.rt.store.get_subject(&s).await?;
+    let pending = st.rt.store.pending_job_count().await?;
+    Ok(Json(json!({"subject": subject, "stats": stats, "pending_jobs": pending})))
+}
+
+#[derive(Deserialize, Default)]
+struct TimelineQ {
+    from: Option<String>,
+    to: Option<String>,
+    phase: Option<String>,
+    entity: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn timeline(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<TimelineQ>) -> ApiResult<memory_retrieve::Timeline> {
+    check(&s)?;
+    Ok(Json(st.rt.retriever.timeline(&s, q.entity.as_deref(), q.phase.as_deref(), q.from.as_deref(), q.to.as_deref(), q.limit.unwrap_or(500)).await?))
+}
+
+async fn episode(State(st): State<AppState>, Path((s, id)): Path<(String, String)>) -> ApiResult<Value> {
+    check(&s)?;
+    let e = st.rt.store.get_episode(&id).await?.filter(|e| e.subject == s).ok_or_else(|| ApiError::NotFound("episode tidak ada".into()))?;
+    let facts = st.rt.store.facts_by_episode(&id).await?;
+    let source = st.rt.store.get_source(&e.source_id).await?;
+    let mut entities = Vec::new();
+    for eid in &e.entity_ids {
+        if let Some(en) = st.rt.store.get_entity(eid).await? {
+            entities.push(json!({"id": en.id, "name": en.name, "kind": en.kind}));
+        }
+    }
+    let retellings = st.rt.store.rows_as::<Episode>(
+        "SELECT * OMIT embedding FROM episode WHERE retelling_of = $id ORDER BY created_at;",
+        memory_store::binds! {"id" => id},
+    ).await?;
+    Ok(Json(json!({"episode": e, "facts": facts, "source": source, "entities": entities, "retellings": retellings})))
+}
+
+#[derive(Deserialize, Default)]
+struct Page {
+    kind: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+async fn entities(State(st): State<AppState>, Path(s): Path<String>, Query(p): Query<Page>) -> ApiResult<Vec<Entity>> {
+    check(&s)?;
+    let kind = p.kind.as_deref().filter(|k| !k.is_empty()).map(EntityKind::parse);
+    Ok(Json(st.rt.store.list_entities(&s, kind, p.limit.unwrap_or(200).min(1000), p.offset.unwrap_or(0)).await?))
+}
+
+async fn entity(State(st): State<AppState>, Path((s, id)): Path<(String, String)>) -> ApiResult<memory_retrieve::WhoIs> {
+    check(&s)?;
+    st.rt.retriever.who_is_id(&s, &id).await?.map(Json).ok_or_else(|| ApiError::NotFound("entitas tidak ada".into()))
+}
+
+async fn family(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<memory_retrieve::FamilyTree> {
+    check(&s)?;
+    Ok(Json(st.rt.retriever.family_tree(&s).await?))
+}
+
+#[derive(Deserialize, Default)]
+struct SituationQ {
+    situation: Option<String>,
+}
+
+async fn principles(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<SituationQ>) -> ApiResult<Vec<memory_retrieve::PrincipleView>> {
+    check(&s)?;
+    Ok(Json(st.rt.retriever.principles(&s, q.situation.as_deref()).await?))
+}
+
+async fn dispositions(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<Vec<Disposition>> {
+    check(&s)?;
+    Ok(Json(st.rt.store.list_dispositions(&s).await?))
+}
+
+async fn phases(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<Vec<LifePhase>> {
+    check(&s)?;
+    Ok(Json(st.rt.store.list_life_phases(&s).await?))
+}
+
+async fn voice(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<Option<VoiceProfile>> {
+    check(&s)?;
+    Ok(Json(st.rt.store.get_voice_profile(&s).await?))
+}
+
+async fn recall(State(st): State<AppState>, Path(s): Path<String>, Json(mut q): Json<RecallQuery>) -> ApiResult<memory_retrieve::RecallResult> {
+    check(&s)?;
+    q.subject = s;
+    if q.query.trim().is_empty() {
+        return Err(ApiError::BadRequest("query kosong".into()));
+    }
+    Ok(Json(st.rt.retriever.recall(&q).await?))
+}
+
+#[derive(Deserialize)]
+struct AskIn {
+    question: String,
+    #[serde(default)]
+    persona: bool,
+    #[serde(default)]
+    as_of: Option<String>,
+}
+
+async fn ask(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<AskIn>) -> ApiResult<memory_retrieve::Answer> {
+    check(&s)?;
+    Ok(Json(st.rt.retriever.ask(&s, &b.question, b.persona, b.as_of.as_deref().filter(|d| !d.is_empty())).await?))
+}
+
+async fn reviews(State(st): State<AppState>, Path(s): Path<String>, Query(p): Query<Page>) -> ApiResult<Vec<ReviewItem>> {
+    check(&s)?;
+    let status = match p.status.as_deref() {
+        Some("approved") => ReviewStatus::Approved,
+        Some("rejected") => ReviewStatus::Rejected,
+        _ => ReviewStatus::Open,
+    };
+    let kind = p.kind.as_deref().and_then(|k| serde_json::from_value(json!(k)).ok());
+    Ok(Json(st.rt.store.list_reviews(&s, status, kind, p.limit.unwrap_or(100).min(500)).await?))
+}
+
+#[derive(Deserialize)]
+struct ReviewIn {
+    decision: Decision,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn resolve_review(State(st): State<AppState>, Path(id): Path<String>, Json(b): Json<ReviewIn>) -> ApiResult<ReviewItem> {
+    Ok(Json(st.rt.pipeline.resolve_review(&id, b.decision, b.note).await?))
+}
+
+async fn sources(State(st): State<AppState>, Path(s): Path<String>, Query(p): Query<Page>) -> ApiResult<Vec<Source>> {
+    check(&s)?;
+    let status = p.status.as_deref().and_then(|x| serde_json::from_value(json!(x)).ok());
+    Ok(Json(st.rt.store.list_sources(&s, status, p.limit.unwrap_or(100).min(1000), p.offset.unwrap_or(0)).await?))
+}
+
+async fn source(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let src = st.rt.store.get_source(&id).await?.ok_or_else(|| ApiError::NotFound("sumber tidak ada".into()))?;
+    let text = st.rt.vault.read_rel(&src.path).unwrap_or_default();
+    let episodes = st.rt.store.list_episodes(&src.subject, &EpisodeFilter { source_id: Some(id.clone()), limit: 1000, ..Default::default() }).await?;
+    let used_quotes: Vec<String> = {
+        let mut q = Vec::new();
+        for e in &episodes {
+            for f in st.rt.store.facts_by_episode(&e.id).await? {
+                q.extend(f.evidence.into_iter().filter(|ev| ev.episode_id == e.id).map(|ev| ev.quote));
+            }
+        }
+        q
+    };
+    Ok(Json(json!({"source": src, "text": text, "episodes": episodes, "quotes": used_quotes})))
+}
+
+async fn import(State(st): State<AppState>, Path(s): Path<String>, mut mp: Multipart) -> ApiResult<memory_import::ImportSummary> {
+    check(&s)?;
+    let upload = st.rt.vault.exports_dir().join(".uploads").join(memory_core::new_id());
+    std::fs::create_dir_all(&upload)?;
+    let mut kind: Option<SourceKind> = None;
+    let mut label = String::from("upload");
+    let mut paths: Vec<PathBuf> = Vec::new();
+    while let Some(field) = mp.next_field().await.map_err(|e| ApiError::BadRequest(e.to_string()))? {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "kind" => kind = SourceKind::parse(&field.text().await.map_err(|e| ApiError::BadRequest(e.to_string()))?),
+            "label" => label = field.text().await.map_err(|e| ApiError::BadRequest(e.to_string()))?,
+            _ => {
+                let fname = field.file_name().map(|f| {
+                    std::path::Path::new(f).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                });
+                let Some(fname) = fname.filter(|f| !f.is_empty() && !f.starts_with('.')) else { continue };
+                let bytes = field.bytes().await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                let p = upload.join(&fname);
+                std::fs::write(&p, &bytes)?;
+                paths.push(p);
+            }
+        }
+    }
+    if paths.is_empty() {
+        return Err(ApiError::BadRequest("tidak ada berkas".into()));
+    }
+    // Import seluruh folder upload sekaligus agar foto + caption berpasangan.
+    Ok(Json(st.importer.import_paths(&s, &[upload], &label, kind).await?))
+}
+
+async fn batches(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<Vec<ImportBatch>> {
+    check(&s)?;
+    Ok(Json(st.rt.store.list_batches(&s, 50).await?))
+}
+
+async fn batch(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let b = st.rt.store.get_batch(&id).await?.ok_or_else(|| ApiError::NotFound("batch tidak ada".into()))?;
+    let sources = st.rt.store.sources_for_batch(&id).await?;
+    let jobs = st.rt.store.jobs_for_batch(&id).await?;
+    Ok(Json(json!({"batch": b, "sources": sources, "jobs": jobs})))
+}
+
+async fn jobs(State(st): State<AppState>, Query(p): Query<Page>) -> ApiResult<Value> {
+    let status = p.status.as_deref().and_then(|x| serde_json::from_value(json!(x)).ok());
+    let jobs = st.rt.store.list_jobs(status, p.limit.unwrap_or(100).min(500)).await?;
+    Ok(Json(json!({"jobs": jobs, "summary": st.rt.job_summary().await?})))
+}
+
+#[derive(Deserialize)]
+struct RememberIn {
+    text: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+async fn remember(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<RememberIn>) -> ApiResult<Value> {
+    check(&s)?;
+    let out = remember_text(&st, &s, &b.text, b.source.as_deref()).await?;
+    Ok(Json(out))
+}
+
+pub(crate) async fn remember_text(st: &AppState, subject: &str, text: &str, source: Option<&str>) -> Result<Value, ApiError> {
+    if text.trim().is_empty() {
+        return Err(ApiError::BadRequest("teks kosong".into()));
+    }
+    let out = st
+        .rt
+        .pipeline
+        .ingest(IngestDoc {
+            subject: subject.to_string(),
+            kind: SourceKind::AgentConversation,
+            title: format!("Diingat agent: {}", source.unwrap_or("percakapan")),
+            text: text.to_string(),
+            occurred_from: Some(chrono::Utc::now().format("%Y-%m-%d").to_string()),
+            meta: json!({"via": "remember", "source": source}),
+            ..Default::default()
+        })
+        .await?;
+    Ok(json!({"source_id": out.source.id, "duplicate": out.duplicate, "job_id": out.job_id,
+              "note": "Disimpan sebagai sumber; pipeline akan menyaring basa-basi sebelum menjadi episode."}))
+}
+
+async fn interview_next(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<memory_extract::interview::InterviewQuestion> {
+    check(&s)?;
+    Ok(Json(st.rt.pipeline.next_question(&s).await?))
+}
+
+#[derive(Deserialize)]
+struct AnswerIn {
+    question: String,
+    answer: String,
+}
+
+async fn interview_answer(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<AnswerIn>) -> ApiResult<Value> {
+    check(&s)?;
+    if b.answer.trim().is_empty() {
+        return Err(ApiError::BadRequest("jawaban kosong".into()));
+    }
+    let out = st.rt.pipeline.answer_question(&s, &b.question, &b.answer).await?;
+    Ok(Json(json!({"source_id": out.source.id, "job_id": out.job_id, "duplicate": out.duplicate})))
+}
+
+async fn maintenance(State(st): State<AppState>, Path((s, kind)): Path<(String, String)>) -> ApiResult<Value> {
+    check(&s)?;
+    let kind = match kind.as_str() {
+        "consolidate" => memory_jobs::CONSOLIDATE,
+        "distill" => memory_jobs::DISTILL,
+        "voice" => memory_jobs::VOICE,
+        other => return Err(ApiError::BadRequest(format!("jenis tidak dikenal: {other}"))),
+    };
+    let job = st.rt.enqueue(kind, json!({"subject": s}), format!("{kind}:{s}:manual:{}", memory_core::new_id())).await?;
+    Ok(Json(json!({"job_id": job.id})))
+}

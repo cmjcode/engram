@@ -1,0 +1,17 @@
+[package]
+name = "memory-core"
+description = "Tipe domain murni platform memori: episode, entitas, fakta bitemporal, kekerabatan, TimeRef."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+whatlang.workspace = true
+unicode-normalization.workspace = true
+toml.workspace = true

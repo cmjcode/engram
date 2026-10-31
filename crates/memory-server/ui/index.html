@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memori Hidup</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" data-icon="book"></span><span>Memori Hidup</span></div>
+  <nav id="nav"></nav>
+  <div class="subject">
+    <label for="subject-select" class="sr">Subjek</label>
+    <select id="subject-select"></select>
+    <button id="new-subject" class="ghost" title="Subjek baru"><span data-icon="plus"></span></button>
+  </div>
+</header>
+<main id="view" tabindex="-1"></main>
+<aside id="drawer" class="drawer" hidden>
+  <div class="drawer-head"><strong id="drawer-title"></strong><button id="drawer-close" class="ghost" title="Tutup"><span data-icon="x"></span></button></div>
+  <div id="drawer-body"></div>
+</aside>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>

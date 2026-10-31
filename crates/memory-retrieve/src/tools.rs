@@ -1,0 +1,414 @@
+//! Tool baca tingkat tinggi untuk agent dan UI.
+
+use std::collections::{HashMap, HashSet};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use memory_core::kin::{KinEdge, infer_kin};
+use memory_core::model::*;
+use memory_core::text::truncate_chars;
+use memory_llm::{ChatRequest, Message, ModelRole, cosine};
+use memory_store::{EpisodeFilter, VectorIndex};
+
+use crate::recall::{FactView, RecallQuery, RecallResult, fact_view};
+use crate::{Result, Retriever};
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EpisodeRef {
+    pub id: String,
+    pub title: String,
+    pub time: String,
+    pub time_start: Option<String>,
+    pub excerpt: String,
+}
+
+impl From<&Episode> for EpisodeRef {
+    fn from(e: &Episode) -> Self {
+        Self {
+            id: e.id.clone(),
+            title: e.title.clone(),
+            time: e.time.label(),
+            time_start: e.time_start.clone(),
+            excerpt: if e.summary.is_empty() { e.text.chars().take(300).collect() } else { e.summary.clone() },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct KinView {
+    pub person_id: String,
+    pub name: String,
+    /// "pakde", "cucu", ... relatif terhadap entitas yang ditanyakan.
+    pub relation: String,
+    pub term: String,
+    pub inferred: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WhoIs {
+    pub entity: Entity,
+    /// Hubungan dengan subjek memori, mis. "pakde".
+    pub relation_to_subject: Option<String>,
+    pub current_facts: Vec<FactView>,
+    pub history: Vec<FactView>,
+    pub kin: Vec<KinView>,
+    pub episodes: Vec<EpisodeRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeNode {
+    pub id: String,
+    pub name: String,
+    pub gender: Option<memory_core::Gender>,
+    pub is_self: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeEdge {
+    pub from: String,
+    pub to: String,
+    pub relation: memory_core::KinRelation,
+    pub label: String,
+    pub inferred: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct FamilyTree {
+    pub nodes: Vec<TreeNode>,
+    pub edges: Vec<TreeEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TimelineItem {
+    /// episode | fact_start | fact_end
+    pub kind: String,
+    pub date: Option<String>,
+    pub label: String,
+    pub id: String,
+    pub life_phase: Option<String>,
+    pub time: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct Timeline {
+    pub items: Vec<TimelineItem>,
+    pub phases: Vec<LifePhase>,
+    /// Episode tanpa waktu yang bisa diurutkan.
+    pub undated: Vec<EpisodeRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PrincipleView {
+    pub principle: Principle,
+    pub evidence: Vec<EpisodeRef>,
+    pub relevance: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PersonaContext {
+    pub system_prompt: String,
+    pub age_at_reference: Option<u32>,
+    pub found: bool,
+    pub recall: RecallResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Answer {
+    pub answer: String,
+    pub found: bool,
+    pub citations: Vec<String>,
+    pub context: String,
+}
+
+fn rel_label(k: &Kin, reverse: bool, gender: Option<memory_core::Gender>) -> String {
+    let rel = if reverse { k.relation.inverse() } else { k.relation };
+    let older = if reverse { k.older.map(|o| !o) } else { k.older };
+    rel.label_id(gender, older).to_string()
+}
+
+/// Ambil `[ep:ID]` dari teks jawaban.
+pub fn citations(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("[ep:") {
+        let after = &rest[i + 4..];
+        if let Some(j) = after.find(']') {
+            let id = after[..j].trim().to_string();
+            if !id.is_empty() && !out.contains(&id) {
+                out.push(id);
+            }
+            rest = &after[j..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+impl Retriever {
+    pub async fn find_entity(&self, subject: &str, name: &str) -> Result<Option<Entity>> {
+        let mut c = self.store.entities_by_alias(subject, name).await?;
+        c.sort_by_key(|e| std::cmp::Reverse(e.mention_count));
+        if let Some(e) = c.into_iter().next() {
+            return Ok(Some(e));
+        }
+        let v = self.embedder.embed_one(name).await?;
+        for h in self.store.vector_index().search("entity", subject, &v, 1, "status != 'merged'").await? {
+            if h.similarity >= 0.6 {
+                return Ok(self.store.get_entity(&h.id).await?);
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn who_is(&self, subject: &str, name: &str) -> Result<Option<WhoIs>> {
+        let Some(entity) = self.find_entity(subject, name).await? else { return Ok(None) };
+        self.who_is_entity(subject, entity).await.map(Some)
+    }
+
+    pub async fn who_is_id(&self, subject: &str, entity_id: &str) -> Result<Option<WhoIs>> {
+        match self.store.resolve_entity(entity_id).await? {
+            Some(e) if e.subject == subject => self.who_is_entity(subject, e).await.map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    async fn who_is_entity(&self, subject: &str, entity: Entity) -> Result<WhoIs> {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let mut names: HashMap<String, String> = HashMap::new();
+        names.insert(entity.id.clone(), entity.name.clone());
+        let mut current = Vec::new();
+        let mut history = Vec::new();
+        for f in self.store.facts_for_entity(&entity.id).await? {
+            if matches!(f.status, FactStatus::Rejected | FactStatus::Quarantined) {
+                continue;
+            }
+            let ename = match names.get(&f.entity_id) {
+                Some(n) => n.clone(),
+                None => {
+                    let n = self.store.get_entity(&f.entity_id).await?.map(|e| e.name).unwrap_or_default();
+                    names.insert(f.entity_id.clone(), n.clone());
+                    n
+                }
+            };
+            let v = fact_view(&f, &ename, &today);
+            if v.current { current.push(v) } else { history.push(v) }
+        }
+        let tree = self.family_tree(subject).await?;
+        let self_id = tree.nodes.iter().find(|n| n.is_self).map(|n| n.id.clone());
+        let relation_to_subject = self_id.as_ref().and_then(|sid| {
+            tree.edges.iter().find(|e| e.from == entity.id && &e.to == sid).map(|e| e.label.clone())
+        });
+        let node_name: HashMap<&str, &str> = tree.nodes.iter().map(|n| (n.id.as_str(), n.name.as_str())).collect();
+        let kin = tree
+            .edges
+            .iter()
+            .filter(|e| e.to == entity.id)
+            .map(|e| KinView {
+                person_id: e.from.clone(),
+                name: node_name.get(e.from.as_str()).copied().unwrap_or("?").to_string(),
+                relation: e.label.clone(),
+                term: String::new(),
+                inferred: e.inferred,
+            })
+            .collect();
+        let episodes = self.store.episodes_mentioning(&entity.id, 20).await?.iter().map(EpisodeRef::from).collect();
+        Ok(WhoIs { entity, relation_to_subject, current_facts: current, history, kin, episodes })
+    }
+
+    /// Silsilah: edge langsung plus relasi turunan (kakek, sepupu, mertua, ...).
+    pub async fn family_tree(&self, subject: &str) -> Result<FamilyTree> {
+        let kin = self.store.kin_for_subject(subject).await?;
+        let mut ids: HashSet<String> = kin.iter().flat_map(|k| [k.from.clone(), k.to.clone()]).collect();
+        if let Some(s) = self.store.get_subject(subject).await?.and_then(|s| s.self_entity) {
+            ids.insert(s);
+        }
+        let mut nodes = Vec::new();
+        let mut gender: HashMap<String, Option<memory_core::Gender>> = HashMap::new();
+        for id in &ids {
+            if let Some(e) = self.store.resolve_entity(id).await? {
+                gender.insert(id.clone(), e.gender);
+                nodes.push(TreeNode { id: id.clone(), name: e.name, gender: e.gender, is_self: e.is_self });
+            }
+        }
+        nodes.sort_by(|a, b| b.is_self.cmp(&a.is_self).then(a.name.cmp(&b.name)));
+        let mut edges: Vec<TreeEdge> = Vec::new();
+        for k in &kin {
+            let g = gender.get(&k.from).copied().flatten().or(k.gender);
+            edges.push(TreeEdge { from: k.from.clone(), to: k.to.clone(), relation: k.relation, label: rel_label(k, false, g), inferred: false });
+            let g2 = gender.get(&k.to).copied().flatten();
+            edges.push(TreeEdge {
+                from: k.to.clone(),
+                to: k.from.clone(),
+                relation: k.relation.inverse(),
+                label: rel_label(k, true, g2),
+                inferred: false,
+            });
+        }
+        let base: Vec<KinEdge> = kin.iter().map(|k| KinEdge { from: k.from.clone(), to: k.to.clone(), relation: k.relation }).collect();
+        for e in infer_kin(&base) {
+            if edges.iter().any(|x| x.from == e.from && x.to == e.to) {
+                continue;
+            }
+            let g = gender.get(&e.from).copied().flatten();
+            edges.push(TreeEdge { label: e.relation.label_id(g, None).to_string(), from: e.from, to: e.to, relation: e.relation, inferred: true });
+        }
+        Ok(FamilyTree { nodes, edges })
+    }
+
+    pub async fn timeline(&self, subject: &str, entity: Option<&str>, phase: Option<&str>, from: Option<&str>, to: Option<&str>, limit: usize) -> Result<Timeline> {
+        let limit = limit.clamp(1, 2000);
+        let mut eps: Vec<Episode> = match entity {
+            Some(name) => match self.find_entity(subject, name).await? {
+                Some(e) => self.store.episodes_mentioning(&e.id, limit).await?,
+                None => return Ok(Timeline::default()),
+            },
+            None => {
+                self.store
+                    .list_episodes(
+                        subject,
+                        &EpisodeFilter {
+                            status: Some(EpisodeStatus::Active),
+                            life_phase: phase.map(str::to_string),
+                            from: from.map(str::to_string),
+                            to: to.map(str::to_string),
+                            limit,
+                            ..Default::default()
+                        },
+                    )
+                    .await?
+            }
+        };
+        eps.retain(|e| e.status == EpisodeStatus::Active);
+        let mut items = Vec::new();
+        let mut undated = Vec::new();
+        for e in &eps {
+            if e.time_start.is_none() && e.time_end.is_none() {
+                undated.push(EpisodeRef::from(e));
+                continue;
+            }
+            items.push(TimelineItem {
+                kind: "episode".into(),
+                date: e.time_start.clone().or(e.time_end.clone()),
+                label: if e.title.is_empty() { e.text.chars().take(80).collect() } else { e.title.clone() },
+                id: e.id.clone(),
+                life_phase: e.life_phase.clone(),
+                time: e.time.label(),
+            });
+        }
+        if let Some(name) = entity
+            && let Some(ent) = self.find_entity(subject, name).await? {
+                for f in self.store.facts_for_entity(&ent.id).await? {
+                    if f.status != FactStatus::Active {
+                        continue;
+                    }
+                    let st = f.statement(&ent.name);
+                    if let Some(d) = &f.valid_from {
+                        items.push(TimelineItem { kind: "fact_start".into(), date: Some(d.clone()), label: format!("mulai: {st}"), id: f.id.clone(), life_phase: None, time: f.time.label() });
+                    }
+                    if let Some(d) = &f.valid_to {
+                        items.push(TimelineItem { kind: "fact_end".into(), date: Some(d.clone()), label: format!("berakhir: {st}"), id: f.id.clone(), life_phase: None, time: f.time.label() });
+                    }
+                }
+            }
+        items.sort_by(|a, b| a.date.cmp(&b.date));
+        Ok(Timeline { items, phases: self.store.list_life_phases(subject).await?, undated })
+    }
+
+    pub async fn principles(&self, subject: &str, situation: Option<&str>) -> Result<Vec<PrincipleView>> {
+        let all = self.store.list_principles(subject, Some(ReflectiveStatus::Active)).await?;
+        let rel: Vec<f32> = match situation.filter(|s| !s.trim().is_empty()) {
+            Some(s) if !all.is_empty() => {
+                let q = self.embedder.embed_one(s).await?;
+                let vs = self.embedder.embed(&all.iter().map(|p| p.statement.clone()).collect::<Vec<_>>()).await?;
+                vs.iter().map(|v| cosine(v, &q)).collect()
+            }
+            _ => all.iter().map(|p| p.confidence).collect(),
+        };
+        let mut out = Vec::new();
+        for (p, r) in all.into_iter().zip(rel) {
+            let ids: Vec<String> = p.evidence.iter().map(|e| e.episode_id.clone()).collect();
+            let evidence = self.store.episodes_by_ids(&ids).await?.iter().map(EpisodeRef::from).collect();
+            out.push(PrincipleView { principle: p, evidence, relevance: r });
+        }
+        out.sort_by(|a, b| b.relevance.total_cmp(&a.relevance));
+        Ok(out)
+    }
+
+    /// System prompt persona: gaya tutur + prinsip + memori relevan + guardrail.
+    pub async fn persona_context(&self, subject: &str, question: &str, as_of: Option<&str>) -> Result<PersonaContext> {
+        let subj = self.store.get_subject(subject).await?;
+        let name = subj.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| subject.to_string());
+        let reference = as_of.map(str::to_string).unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+        let age = subj.as_ref().and_then(|s| chrono::NaiveDate::parse_from_str(&reference, "%Y-%m-%d").ok().and_then(|d| s.anchors.age_at(d)));
+        let recall = self.recall(&RecallQuery { as_of: as_of.map(str::to_string), ..RecallQuery::new(subject, question) }).await?;
+        let voice = self.store.get_voice_profile(subject).await?.unwrap_or_default();
+        let mut p = format!("Kamu berbicara sebagai {name}");
+        match (as_of, age) {
+            (Some(d), Some(a)) => p.push_str(&format!(", versi dirinya pada {d} (umur {a})")),
+            (Some(d), None) => p.push_str(&format!(", versi dirinya pada {d}")),
+            (None, Some(a)) => p.push_str(&format!(" (umur {a})")),
+            _ => {}
+        }
+        p.push_str(". Gunakan sudut pandang orang pertama.\n");
+        if !voice.style.is_empty() {
+            p.push_str(&format!("Gaya bertutur: {}\n", voice.style));
+        }
+        if !voice.idioms.is_empty() {
+            let id: Vec<String> = voice.idioms.iter().take(8).map(|(k, _)| format!("\"{k}\"")).collect();
+            p.push_str(&format!("Ungkapan khas (pakai secukupnya, jangan dipaksakan): {}\n", id.join(", ")));
+        }
+        if !voice.language_mix.is_empty() {
+            let mix: Vec<String> = voice.language_mix.iter().map(|(k, v)| format!("{k} {:.0}%", v * 100.0)).collect();
+            p.push_str(&format!("Campuran bahasa: {}\n", mix.join(", ")));
+        }
+        p.push_str("\nATURAN:\n");
+        p.push_str("1. Jawab HANYA berdasarkan MEMORI di bawah. Jangan mengarang peristiwa, pendapat, atau nama.\n");
+        p.push_str("2. Bila memori tidak memuat jawabannya, katakan terus terang bahwa kamu tidak ingat atau tidak ada catatannya.\n");
+        p.push_str("3. Bedakan yang dulu dan yang sekarang sesuai status fakta; jangan mencampur keduanya.\n");
+        p.push_str("4. Fakta berstatus BERTENTANGAN disampaikan sebagai hal yang belum pasti.\n");
+        if let Some(d) = as_of {
+            p.push_str(&format!("5. Kamu TIDAK tahu apa pun yang terjadi setelah {d}.\n"));
+        }
+        p.push_str("6. Akhiri kalimat yang memakai memori dengan sitasi [ep:ID].\n\nMEMORI:\n");
+        p.push_str(if recall.found { &recall.context } else { "(tidak ada memori yang relevan)" });
+        Ok(PersonaContext { system_prompt: p, age_at_reference: age, found: recall.found, recall })
+    }
+
+    /// Jawab pertanyaan memakai memori (mode biasa atau persona).
+    pub async fn ask(&self, subject: &str, question: &str, persona: bool, as_of: Option<&str>) -> Result<Answer> {
+        let (system, recall) = if persona {
+            let pc = self.persona_context(subject, question, as_of).await?;
+            (pc.system_prompt, pc.recall)
+        } else {
+            let r = self.recall(&RecallQuery { as_of: as_of.map(str::to_string), ..RecallQuery::new(subject, question) }).await?;
+            let sys = format!(
+                "Kamu asisten arsip memori keluarga. Jawab dalam bahasa Indonesia HANYA dari MEMORI berikut, bedakan fakta yang masih berlaku dan riwayat, dan cantumkan sitasi [ep:ID]. Bila tidak ada, katakan tidak ada catatan.\n\nMEMORI:\n{}",
+                r.context
+            );
+            (sys, r)
+        };
+        if !recall.found {
+            return Ok(Answer { answer: recall.note.clone().unwrap_or_else(|| "Tidak ada catatan.".into()), found: false, citations: vec![], context: recall.context });
+        }
+        let raw = self
+            .llm
+            .chat(ChatRequest {
+                role: ModelRole::Extract,
+                messages: vec![Message::system(system), Message::user(question)],
+                json_schema: None,
+                temperature: Some(0.3),
+                max_tokens: Some(1200),
+                task: "ask".into(),
+            })
+            .await?;
+        let answer = match raw.rfind("</think>") {
+            Some(i) => raw[i + 8..].trim().to_string(),
+            None => raw.trim().to_string(),
+        };
+        let known: HashSet<&str> = recall.episodes.iter().map(|e| e.id.as_str()).chain(recall.facts.iter().flat_map(|f| f.evidence.iter().map(String::as_str))).collect();
+        let cites = citations(&answer).into_iter().filter(|c| known.contains(c.as_str())).collect();
+        Ok(Answer { answer, found: true, citations: cites, context: truncate_chars(&recall.context, 20_000) })
+    }
+}

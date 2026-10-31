@@ -1,0 +1,20 @@
+[package]
+name = "memory-store"
+description = "Penyimpanan SurrealDB embedded: skema berversi, repository, index vektor & full-text."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memory-core.workspace = true
+surrealdb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

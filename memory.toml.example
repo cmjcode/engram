@@ -1,0 +1,86 @@
+# Konfigurasi platform memori hidup. Salin ke memory.toml lalu sesuaikan.
+# Semua kunci opsional; nilai di bawah adalah default.
+
+[vault]
+path = "vault"              # satu folder = seluruh memori (db, sumber asli, inbox, ekspor)
+default_subject = "bapak"
+engine = "rocksdb"          # "rocksdb" (produksi) | "mem" (uji)
+
+[llm]                        # endpoint OpenAI-compatible (vLLM lokal)
+base_url = "http://localhost:5211/v1"
+extract_model = "/models/Qwen3.6-35B-A3B-FP8"   # ekstraksi, distilasi, verifikasi, jawaban
+light_model = "/models/gemma-4-12B-it"          # segmentasi, klasifikasi, adjudikasi
+# light_base_url = "http://localhost:5212/v1"   # bila model ringan di server lain
+# api_key_env = "OPENAI_API_KEY"
+json_mode = "json_schema"   # guided decoding vLLM; "json_object" atau "none" untuk server lain
+disable_thinking = true     # kirim enable_thinking=false (Qwen3)
+temperature = 0.1
+max_tokens = 4096
+timeout_secs = 180
+max_retries = 2
+
+[embedding]                  # TEI bge-m3 (OpenAI-compatible /v1/embeddings)
+base_url = "http://localhost:8081/v1"
+model = "BAAI/bge-m3"
+dimension = 1024            # ganti model/dimensi -> jalankan `memory reembed`
+batch_size = 32
+provider = "openai"         # "hash" = tanpa server (uji/offline, kualitas rendah)
+
+[index]
+vector = "hnsw"             # "hnsw" (memori, cepat) | "diskann" (disk, untuk jutaan episode)
+hnsw_m = 16
+hnsw_efc = 150
+ef_search = 80
+
+[pipeline]
+max_window_chars = 6000
+merge_similarity = 0.92     # >= ini: penceritaan ulang, ditautkan ke cerita asli
+entity_auto_merge = 0.9
+entity_review = 0.75        # zona ragu -> adjudikasi LLM / review manusia
+min_fact_confidence = 0.5   # di bawah ini fakta dikarantina
+retelling_confidence_factor = 0.8
+few_shot_examples = 6
+workers = 2
+
+[score]                      # penyaring data sampah
+promote_threshold = 0.55    # chat/lifelog harus >= ini untuk jadi episode
+gray_threshold = 0.42       # di antara -> antrean review
+biographic_threshold = 0.2  # wawancara/memoar
+max_noise_ratio = 0.6
+min_chars = 40
+stream_ttl_days = 90        # working memory luruh setelah ini (sumber asli tetap ada)
+half_life_days = 30.0
+
+[distill]                    # Wisdom Layer
+min_evidence = 3            # minimal episode bukti
+min_distinct_periods = 2    # tersebar di minimal 2 tahun/fase hidup
+cluster_similarity = 0.72
+auto_accept_confidence = 0.75
+
+[retrieval]
+rrf_k = 60.0
+top_k = 8
+candidate_k = 40
+context_budget_tokens = 3000
+min_similarity = 0.35
+graph_hops = 2
+
+[schedule]
+consolidate_hours = 24
+distill_hours = 24
+voice_hours = 168
+export_hours = 24
+inbox_poll_secs = 10
+
+[server]
+bind = "127.0.0.1:7878"
+token_env = "MEMORY_TOKEN"  # bila env ini diisi, API & MCP wajib Bearer token
+max_upload_mb = 512
+
+[transcription]              # opsional: Whisper OpenAI-compatible untuk audio
+# base_url = "http://localhost:8000/v1"
+model = "whisper-large-v3"
+language = "id"
+
+[backup]
+# age_recipient = "age1..."  # enkripsi backup; simpan kunci privat di tempat aman

@@ -1,0 +1,21 @@
+[package]
+name = "memory-llm"
+description = "Abstraksi LLM & embedder: OpenAI-compatible (vLLM), TEI, Whisper, dan provider tiruan untuk uji."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memory-core.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true

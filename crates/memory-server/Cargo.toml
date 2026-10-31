@@ -1,0 +1,27 @@
+[package]
+name = "memory-server"
+description = "HTTP API, server MCP (stdio & HTTP), dan UI web lokal."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memory-core.workspace = true
+memory-store.workspace = true
+memory-llm.workspace = true
+memory-extract.workspace = true
+memory-retrieve.workspace = true
+memory-jobs.workspace = true
+memory-import.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+reqwest.workspace = true
