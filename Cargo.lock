@@ -3797,7 +3797,7 @@ dependencies = [
 
 [[package]]
 name = "memory-cli"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3821,7 +3821,7 @@ dependencies = [
 
 [[package]]
 name = "memory-core"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "chrono",
  "schemars 1.2.3",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "memory-desktop"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "memory-core",
@@ -3857,7 +3857,7 @@ dependencies = [
 
 [[package]]
 name = "memory-extract"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "blake3",
  "chrono",
@@ -3876,7 +3876,7 @@ dependencies = [
 
 [[package]]
 name = "memory-import"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "chrono",
  "memory-core",
@@ -3893,7 +3893,7 @@ dependencies = [
 
 [[package]]
 name = "memory-jobs"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "age",
  "chrono",
@@ -3914,7 +3914,7 @@ dependencies = [
 
 [[package]]
 name = "memory-llm"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -3931,7 +3931,7 @@ dependencies = [
 
 [[package]]
 name = "memory-retrieve"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "chrono",
  "memory-core",
@@ -3949,7 +3949,7 @@ dependencies = [
 
 [[package]]
 name = "memory-server"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "axum",
  "chrono",
@@ -3972,7 +3972,7 @@ dependencies = [
 
 [[package]]
 name = "memory-store"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "async-trait",
  "chrono",
