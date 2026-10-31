@@ -10,7 +10,7 @@
 set -euo pipefail
 
 TAG="${1:?pemakaian: updater-manifest.sh <tag> [owner/repo]}"
-REPO="${2:-${GITHUB_REPOSITORY:-cmjcode/mnemonic-memory}}"
+REPO="${2:-${GITHUB_REPOSITORY:-cmjcode/engram}}"
 VERSION="${TAG#v}"
 
 command -v jq >/dev/null || { echo "jq belum terpasang" >&2; exit 1; }

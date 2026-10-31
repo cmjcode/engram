@@ -57,7 +57,7 @@ async fn http_api_and_mcp_end_to_end() {
     let (base, st, _d) = spawn(None).await;
     let c = reqwest::Client::new();
     let html = c.get(format!("{base}/")).send().await.unwrap().text().await.unwrap();
-    assert!(html.contains("mnemonic-memory"));
+    assert!(html.contains("engram"));
     post(&c, format!("{base}/api/subjects"), json!({"id": "budi", "name": "Budi", "birth": "1979-03-10"})).await;
     let r = post(&c, format!("{base}/api/subjects/budi/remember"), json!({"text": "Pakde Karno membuka toko batik di Solo waktu saya kecil.", "source": "uji"})).await;
     assert!(r["job_id"].is_string());

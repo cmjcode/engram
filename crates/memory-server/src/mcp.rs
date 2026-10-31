@@ -31,7 +31,7 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "recall",
-            "description": "Cari memori hidup subjek (cerita, fakta, prinsip, sifat) dengan pencarian hybrid vektor+kata kunci+graph. Fakta diberi status 'berlaku sekarang' atau 'dulu' dengan rentang waktunya. Pakai from/to untuk periode tertentu, as_of untuk melihat memori sebagaimana pada tanggal itu.",
+            "description": "Cari memori subjek di engram (cerita, fakta, prinsip, sifat) dengan pencarian hybrid vektor+kata kunci+graph. Fakta diberi status 'berlaku sekarang' atau 'dulu' dengan rentang waktunya. Pakai from/to untuk periode tertentu, as_of untuk melihat memori sebagaimana pada tanggal itu.",
             "inputSchema": schema(json!({
                 "query": {"type": "string", "description": "Pertanyaan atau topik"},
                 "subject": subject_prop(),
@@ -220,8 +220,8 @@ pub async fn handle(st: &AppState, msg: Value) -> Option<Value> {
             json!({
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "mnemonic-memory", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Memori hidup seseorang. Panggil recall/who_is/timeline sebelum menjawab tentang hidupnya; selalu bedakan fakta yang masih berlaku dan riwayat; bila tool menjawab 'tidak ada catatan', jangan mengarang. Untuk berbicara sebagai orang itu, pakai persona_context."
+                "serverInfo": {"name": "engram", "version": env!("CARGO_PKG_VERSION")},
+                "instructions": "Engram — memori seseorang. Panggil recall/who_is/timeline sebelum menjawab tentang hidupnya; selalu bedakan fakta yang masih berlaku dan riwayat; bila tool menjawab 'tidak ada catatan', jangan mengarang. Untuk berbicara sebagai orang itu, pakai persona_context."
             })
         }
         "ping" => json!({}),

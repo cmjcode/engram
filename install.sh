@@ -1,7 +1,7 @@
 #!/bin/sh
-# Installer mnemonic-memory: CLI `memory` + aplikasi desktop.
+# Installer engram: CLI `memory` + aplikasi desktop.
 #
-#   curl -fsSL https://raw.githubusercontent.com/cmjcode/mnemonic-memory/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/cmjcode/engram/main/install.sh | sh
 #
 # Opsi (lewat `sh -s -- <opsi>`):
 #   curl -fsSL .../install.sh | sh -s -- --cli-only
@@ -13,20 +13,20 @@
 #   --bin-dir PATH    folder CLI (bawaan: ~/.local/bin)
 #   --appimage        Linux: pakai AppImage walau ada dpkg/rpm
 #
-# Variabel lingkungan: MNEMONIC_VERSION, MNEMONIC_BIN_DIR, GITHUB_TOKEN (opsional,
+# Variabel lingkungan: ENGRAM_VERSION, ENGRAM_BIN_DIR, GITHUB_TOKEN (opsional,
 # menghindari batas rate API GitHub).
 set -eu
 
-REPO="cmjcode/mnemonic-memory"
-APP_NAME="mnemonic-memory"
+REPO="cmjcode/engram"
+APP_NAME="engram"
 CLI_NAME="memory"
 
 WANT_CLI=1
 WANT_DESKTOP=1
 FORCE_APPIMAGE=0
 INSTALLED=""
-VERSION="${MNEMONIC_VERSION:-}"
-BIN_DIR="${MNEMONIC_BIN_DIR:-$HOME/.local/bin}"
+VERSION="${ENGRAM_VERSION:-}"
+BIN_DIR="${ENGRAM_BIN_DIR:-$HOME/.local/bin}"
 
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mPeringatan:\033[0m %s\n' "$*" >&2; }
@@ -34,9 +34,9 @@ die()  { printf '\033[1;31mGagal:\033[0m %s\n' "$*" >&2; exit 1; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 
 usage() { cat <<'EOF'
-Installer mnemonic-memory: CLI `memory` + aplikasi desktop.
+Installer engram: CLI `memory` + aplikasi desktop.
 
-  curl -fsSL https://raw.githubusercontent.com/cmjcode/mnemonic-memory/main/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/cmjcode/engram/main/install.sh | sh
   curl -fsSL .../install.sh | sh -s -- [opsi]
 
   --cli-only        pasang CLI saja
@@ -212,7 +212,7 @@ install_appimage() {
 [Desktop Entry]
 Type=Application
 Name=$APP_NAME
-Comment=Arsip memori hidup pribadi
+Comment=Arsip memori pribadi engram
 Exec=$BIN_DIR/$APP_NAME
 Terminal=false
 Categories=Office;Utility;

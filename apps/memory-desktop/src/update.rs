@@ -20,7 +20,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 const FIRST_CHECK: Duration = Duration::from_secs(30);
 const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
-const TITLE: &str = "Update mnemonic-memory";
+const TITLE: &str = "Update engram";
 
 /// Hanya satu pemeriksaan/pemasangan yang boleh berjalan.
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -126,8 +126,8 @@ async fn check_inner(app: &AppHandle, manual: bool) -> Result<()> {
 fn set_tooltip(app: &AppHandle, status: Option<&str>) {
     if let Some(tray) = app.tray_by_id("main") {
         let text = match status {
-            Some(s) => format!("mnemonic-memory - {s}"),
-            None => "mnemonic-memory".to_string(),
+            Some(s) => format!("engram - {s}"),
+            None => "engram".to_string(),
         };
         let _ = tray.set_tooltip(Some(text));
     }

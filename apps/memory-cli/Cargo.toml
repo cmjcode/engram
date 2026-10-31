@@ -1,6 +1,6 @@
 [package]
 name = "memory-cli"
-description = "CLI platform memori hidup: import, worker, server UI/API/MCP, query, review, backup, benchmark."
+description = "CLI platform engram: import, worker, server UI/API/MCP, query, review, backup, benchmark."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

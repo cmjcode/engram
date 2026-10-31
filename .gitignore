@@ -10,3 +10,5 @@
 # Konfigurasi lokal
 /memory.toml
 .claude
+__pycache__/
+*.pyc

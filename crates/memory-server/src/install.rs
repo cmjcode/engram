@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 /// Nama entri server di config client.
-pub const SERVER_NAME: &str = "memori";
+pub const SERVER_NAME: &str = "engram";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Client {
@@ -58,7 +58,7 @@ impl Client {
     fn after_install(self) -> &'static str {
         match self {
             Client::Antigravity => "Di Antigravity: panel Agent > ... > MCP Servers > Manage MCP Servers > Refresh.",
-            Client::Vscode => "VS Code memuat ulang mcp.json otomatis. Aktifkan tool 'memori' di mode Agent pada Chat.",
+            Client::Vscode => "VS Code memuat ulang mcp.json otomatis. Aktifkan tool 'engram' di mode Agent pada Chat.",
             Client::ClaudeCode => "Mulai sesi Claude Code baru; cek dengan perintah /mcp.",
         }
     }
@@ -324,8 +324,8 @@ mod tests {
         let doc: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert_eq!(doc["servers"]["lain"]["command"], "x");
         assert_eq!(doc["inputs"], json!([]));
-        assert_eq!(doc["servers"]["memori"]["url"], "http://127.0.0.1:7878/mcp");
-        assert_eq!(doc["servers"]["memori"]["headers"]["Authorization"], "Bearer tk");
+        assert_eq!(doc["servers"]["engram"]["url"], "http://127.0.0.1:7878/mcp");
+        assert_eq!(doc["servers"]["engram"]["headers"]["Authorization"], "Bearer tk");
         assert!(p.with_extension("json.bak").exists());
         // Kunci asli tetap di urutan semula.
         let keys: Vec<_> = doc.as_object().unwrap().keys().cloned().collect();
@@ -336,7 +336,7 @@ mod tests {
 
         edit_config(&p, "servers", None).unwrap();
         let doc: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-        assert!(doc["servers"].get("memori").is_none());
+        assert!(doc["servers"].get("engram").is_none());
         assert_eq!(doc["servers"]["lain"]["command"], "x");
     }
 
@@ -347,7 +347,7 @@ mod tests {
         let p = d.config_file(Client::Antigravity);
         edit_config(&p, "mcpServers", Some(entry(Client::Antigravity, "http://h/mcp", None))).unwrap();
         let doc: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-        assert_eq!(doc, json!({"mcpServers": {"memori": {"serverUrl": "http://h/mcp", "disabled": false}}}));
+        assert_eq!(doc, json!({"mcpServers": {"engram": {"serverUrl": "http://h/mcp", "disabled": false}}}));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -1,4 +1,4 @@
-# Konfigurasi platform memori hidup. Salin ke memory.toml lalu sesuaikan.
+# Konfigurasi platform engram. Salin ke memory.toml lalu sesuaikan.
 # Semua kunci opsional; nilai di bawah adalah default.
 
 [vault]

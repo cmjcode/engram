@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pasang server MCP Memori Hidup ke agent AI (Antigravity, Claude Code, Cursor).
+# Pasang server MCP engram ke agent AI (Antigravity, Claude Code, Cursor).
 #
 # Mode http (bawaan): agent tersambung ke aplikasi desktop / `memory serve`
 #   lewat http://127.0.0.1:7878/mcp dengan token tetap (MEMORY_TOKEN).
@@ -13,7 +13,7 @@
 #   scripts/install-mcp.sh --uninstall --client all
 set -euo pipefail
 
-NAME="memori"
+NAME="engram"
 CLIENT="antigravity"
 MODE="http"
 TOKEN=""
@@ -21,11 +21,11 @@ UNINSTALL=0
 DRY_RUN=0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DATA_DIR="$HOME/Library/Application Support/id.memorihidup.desktop"
+DATA_DIR="$HOME/Library/Application Support/id.engram.ai"
 CONFIG="$DATA_DIR/memory.toml"
 BIN="$ROOT/target/release/memory"
 TOKEN_FILE="$DATA_DIR/mcp_token"
-AGENT_LABEL="id.memorihidup.token"
+AGENT_LABEL="id.engram.ai.token"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 DEFAULT_URL="http://127.0.0.1:7878/mcp"
 
@@ -35,7 +35,7 @@ Pemakaian: $(basename "$0") [opsi]
 
   --client NAMA   antigravity | gemini | claude | cursor | all   (bawaan: antigravity)
   --mode MODE     http | stdio                          (bawaan: http)
-  --name NAMA     nama server MCP                       (bawaan: memori)
+  --name NAMA     nama server MCP                       (bawaan: engram)
   --token TOKEN   pakai token ini (mode http); bila kosong, pakai yang ada atau buat baru
   --config PATH   memory.toml untuk mode stdio          (bawaan: config aplikasi desktop)
   --bin PATH      binary memory untuk mode stdio        (bawaan: target/release/memory)
@@ -182,7 +182,7 @@ PY
 }
 
 HOOK_SRC="$ROOT/scripts/auto-remember-hook.py"
-HOOK_BIN="$HOME/.local/bin/mnemonic-auto-remember"
+HOOK_BIN="$HOME/.local/bin/engram-auto-remember"
 
 ensure_hook_bin() {
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -197,20 +197,20 @@ ensure_hook_bin() {
 upsert_rule_section() {
   local file="$1"
   if [[ $DRY_RUN -eq 1 ]]; then
-    info "[dry-run] perbarui rule memori di $file"
+    info "[dry-run] perbarui rule engram di $file"
     return
   fi
   mkdir -p "$(dirname "$file")"
   python3 - "$file" "$UNINSTALL" <<'PY'
 import os, re, sys
 path, uninstall = sys.argv[1], sys.argv[2] == "1"
-marker_start = "<!-- MNEMONIC_MEMORY_START -->"
-marker_end = "<!-- MNEMONIC_MEMORY_END -->"
+marker_start = "<!-- ENGRAM_START -->"
+marker_end = "<!-- ENGRAM_END -->"
 block = f"""{marker_start}
-## Memori Hidup (`memori` MCP)
+## Engram (`engram` MCP)
 
-- **Simpan Otomatis (`remember`)**: Saat pengguna menceritakan kisah hidup, fakta pribadi/keluarga, pengalaman masa lalu, preferensi, atau keputusan penting (termasuk keputusan arsitektur/teknis di project), panggil tool MCP `remember` (dari server `memori`) untuk menyimpannya tanpa perlu diminta. Isi parameter `source` dengan format `<client>:<nama-project>` (misal `antigravity:LLM-MEMORY`) dan sebutkan nama project di dalam `text` bila konteksnya spesifik pada project tersebut.
-- **Ambil Konteks (`recall`, `who_is`, `timeline`, `principles`, `family_tree`)**: Saat pengguna bertanya tentang masa lalu, anggota keluarga, relasi seseorang, kronologi peristiwa, prinsip hidup, atau konteks project sebelumnya, panggil tool MCP `memori` yang relevan terlebih dahulu sebelum menjawab. Untuk mencari memori spesifik project saat ini, sertakan nama project di `query` pada `recall` atau `entity` pada `timeline`. Selalu bedakan fakta yang masih berlaku sekarang dengan riwayat masa lalu.
+- **Simpan Otomatis (`remember`)**: Saat pengguna menceritakan kisah hidup, fakta pribadi/keluarga, pengalaman masa lalu, preferensi, atau keputusan penting (termasuk keputusan arsitektur/teknis di project), panggil tool MCP `remember` (dari server `engram`) untuk menyimpannya tanpa perlu diminta. Isi parameter `source` dengan format `<client>:<nama-project>` (misal `antigravity:LLM-MEMORY`) dan sebutkan nama project di dalam `text` bila konteksnya spesifik pada project tersebut.
+- **Ambil Konteks (`recall`, `who_is`, `timeline`, `principles`, `family_tree`)**: Saat pengguna bertanya tentang masa lalu, anggota keluarga, relasi seseorang, kronologi peristiwa, prinsip hidup, atau konteks project sebelumnya, panggil tool MCP `engram` yang relevan terlebih dahulu sebelum menjawab. Untuk mencari memori spesifik project saat ini, sertakan nama project di `query` pada `recall` atau `entity` pada `timeline`. Selalu bedakan fakta yang masih berlaku sekarang dengan riwayat masa lalu.
 {marker_end}"""
 
 text = ""
@@ -254,7 +254,7 @@ do_antigravity() {
 import json, os, sys
 p = sys.argv[1]
 d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
-d.pop("mnemonic-auto-remember", None)
+d.pop("engram-auto-remember", None)
 json.dump(d, open(p, "w"), indent=2)
 PY
     fi
@@ -280,7 +280,7 @@ d = {}
 if os.path.exists(p) and os.path.getsize(p) > 0:
     with open(p) as f:
         d = json.load(f)
-d["mnemonic-auto-remember"] = {
+d["engram-auto-remember"] = {
     "enabled": True,
     "Stop": [
         {
@@ -312,7 +312,7 @@ p = sys.argv[1]
 d = json.load(open(p))
 hooks = d.get("hooks", {})
 if "AfterAgent" in hooks:
-    hooks["AfterAgent"] = [x for x in hooks["AfterAgent"] if not any(h.get("name") == "mnemonic-auto-remember" for h in x.get("hooks", []))]
+    hooks["AfterAgent"] = [x for x in hooks["AfterAgent"] if not any(h.get("name") == "engram-auto-remember" for h in x.get("hooks", []))]
 json.dump(d, open(p, "w"), indent=2)
 PY
     fi
@@ -330,15 +330,15 @@ p, hook_bin = sys.argv[1], sys.argv[2]
 d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
 hooks = d.setdefault("hooks", {})
 after_agent = hooks.setdefault("AfterAgent", [])
-after_agent = [x for x in after_agent if not any(h.get("name") == "mnemonic-auto-remember" for h in x.get("hooks", []))]
+after_agent = [x for x in after_agent if not any(h.get("name") == "engram-auto-remember" for h in x.get("hooks", []))]
 after_agent.append({
     "matcher": "*",
     "hooks": [
         {
-            "name": "mnemonic-auto-remember",
+            "name": "engram-auto-remember",
             "type": "command",
             "command": hook_bin,
-            "description": "Simpan percakapan otomatis ke Memori Hidup",
+            "description": "Simpan percakapan otomatis ke engram",
             "timeout": 10000
         }
     ]
@@ -402,8 +402,8 @@ p, hook_bin = sys.argv[1], sys.argv[2]
 os.makedirs(os.path.dirname(p), exist_ok=True)
 d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
 perms = d.setdefault("permissions", {}).setdefault("allow", [])
-if "mcp__memori__*" not in perms:
-    perms.append("mcp__memori__*")
+if "mcp__engram__*" not in perms:
+    perms.append("mcp__engram__*")
 hooks = d.setdefault("hooks", {})
 stop_hooks = hooks.setdefault("Stop", [])
 stop_hooks = [x for x in stop_hooks if not any(h.get("command") == hook_bin for h in x.get("hooks", []))]
@@ -437,7 +437,7 @@ verify_http() {
     n="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["result"]["tools"]))' "$body" 2>/dev/null || echo "?")"
     info "OK: server menjawab, $n tool tersedia."
   elif [[ -z "$body" ]]; then
-    info "Server belum jalan. Buka aplikasi Memori Hidup (atau 'memory serve'), lalu jalankan script ini lagi untuk cek."
+    info "Server belum jalan. Buka aplikasi engram (atau 'memory serve'), lalu jalankan script ini lagi untuk cek."
   else
     info "Server jalan tapi token ditolak. Keluar dari aplikasi lewat ikon menu bar > Keluar,"
     info "lalu buka lagi agar aplikasi memakai MEMORY_TOKEN yang baru."

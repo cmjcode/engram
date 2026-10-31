@@ -1,6 +1,6 @@
-# Panduan mnemonic-memory
+# Panduan engram
 
-Orkestrator memori hidup berbasis Rust + SurrealDB embedded. Semua data ada di
+Orkestrator memori berbasis Rust + SurrealDB embedded. Semua data ada di
 satu folder `vault/` di komputer Anda.
 
 ## Mulai
@@ -20,19 +20,19 @@ cp memory.toml.example memory.toml          # sesuaikan endpoint vLLM/TEI
 
 ```bash
 cargo install tauri-cli --version "^2" --locked   # sekali saja
-cd apps/memory-desktop && cargo tauri build       # hasil: target/release/bundle/macos/mnemonic-memory.app (+ .dmg)
+cd apps/memory-desktop && cargo tauri build       # hasil: target/release/bundle/macos/engram.app (+ .dmg)
 ```
 
 Untuk mencoba tanpa membuat bundle: `cargo run -p memory-desktop`.
 
 - Aplikasi berisi seluruh mesin (vault, worker, scheduler, inbox, server MCP). Tidak perlu `memory serve`.
-- Data ada di `~/Library/Application Support/id.memorihidup.desktop/`: `memory.toml`, `vault/`, dan `connection.json`.
+- Data ada di `~/Library/Application Support/id.engram.ai/`: `memory.toml`, `vault/`, dan `connection.json`.
 - Menutup jendela hanya menyembunyikannya; pemrosesan tetap jalan. Keluar lewat ikon di menu bar, lalu **Keluar**.
 - Menu bar juga punya **Buka folder inbox** (seret berkas ke sana) dan **Buka folder data**.
 - Agent AI bisa terhubung ke `mcp_url` di `connection.json` dengan header `Authorization: Bearer <token>`.
   Token dibuat sekali lalu disimpan di `mcp_token` (atau pakai env `MEMORY_TOKEN`).
 - Aplikasi dan `memory serve` tidak bisa membuka vault yang sama bersamaan. Untuk memakai CLI pada data aplikasi,
-  tutup aplikasi dulu lalu jalankan `memory --config ~/Library/Application\ Support/id.memorihidup.desktop/memory.toml ...`.
+  tutup aplikasi dulu lalu jalankan `memory --config ~/Library/Application\ Support/id.engram.ai/memory.toml ...`.
 
 ## Menambah memori
 
@@ -54,7 +54,7 @@ Teks yang sama tidak pernah diproses dua kali. Basa-basi chat ("oke sip",
 ## Menghubungkan agent AI (MCP)
 
 Paling mudah: di aplikasi desktop, klik tombol **Agent AI** di kanan atas, lalu **Pasang** pada
-Antigravity, VS Code, atau Claude Code. Aplikasi menambah server `memori` ke config client itu
+Antigravity, VS Code, atau Claude Code. Aplikasi menambah server `engram` ke config client itu
 (`~/.gemini/antigravity/mcp_config.json`, `mcp.json` di folder User VS Code, atau `claude mcp add -s user`),
 tanpa mengubah server lain, dan menyimpan cadangan `.bak`. Tombol yang sama ada di `memory serve` bila
 server berjalan di 127.0.0.1.
@@ -68,19 +68,19 @@ scripts/install-mcp.sh --mode stdio         # tanpa aplikasi desktop (jalankan b
 scripts/install-mcp.sh --uninstall --client all
 ```
 
-Selain mendaftarkan server MCP `memori`, script ini juga memasang:
+Selain mendaftarkan server MCP `engram`, script ini juga memasang:
 - **Global Rule** (`~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, `~/.claude/CLAUDE.md`) agar agent otomatis menyimpan fakta/cerita hidup lewat `remember` dan mengambil konteks lewat `recall`/`who_is`/`timeline`/`principles`.
-- **Hook Otomatis** (`~/.local/bin/mnemonic-auto-remember` dari `scripts/auto-remember-hook.py`) pada event `Stop` (Antigravity & Claude Code) dan `AfterAgent` (Gemini CLI) yang mengirim percakapan baru ke MCP `remember` (atau ke `vault/inbox/` bila server sedang mati).
+- **Hook Otomatis** (`~/.local/bin/engram-auto-remember` dari `scripts/auto-remember-hook.py`) pada event `Stop` (Antigravity & Claude Code) dan `AfterAgent` (Gemini CLI) yang mengirim percakapan baru ke MCP `remember` (atau ke `vault/inbox/` bila server sedang mati).
 
 Mode HTTP membuat token tetap `MEMORY_TOKEN` (disimpan di `mcp_token` dan LaunchAgent
-`id.memorihidup.token`, jadi tetap ada setelah reboot). Setelah pertama kali dijalankan, keluar
+`id.engram.ai.token`, jadi tetap ada setelah reboot). Setelah pertama kali dijalankan, keluar
 dari aplikasi lewat menu bar lalu buka lagi. Config lama selalu dibackup (`*.bak.<waktu>`).
 `--dry-run` menampilkan rencana tanpa mengubah apa pun.
 
 Manual, Claude Code:
 
 ```bash
-claude mcp add memori -- /path/ke/memory --config /path/ke/memory.toml mcp
+claude mcp add engram -- /path/ke/memory --config /path/ke/memory.toml mcp
 ```
 
 Atau lewat HTTP: `POST http://127.0.0.1:7878/mcp` (pakai header

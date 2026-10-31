@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hook otomatis untuk menyimpan percakapan dari Antigravity, Gemini CLI, dan Claude Code
-ke platform Memori Hidup (mnemonic-memory).
+ke platform engram.
 
 Cara kerja:
 1. Membaca payload JSON dari stdin (kontrak Stop / AfterAgent).
@@ -160,7 +160,7 @@ def extract_project_name(payload: dict) -> str:
 
 def load_connection() -> tuple[str, str, Path]:
     home = Path.home()
-    data_dir = home / "Library" / "Application Support" / "id.memorihidup.desktop"
+    data_dir = home / "Library" / "Application Support" / "id.engram.ai"
     conn_file = data_dir / "connection.json"
     token_file = data_dir / "mcp_token"
 
@@ -188,7 +188,7 @@ def load_connection() -> tuple[str, str, Path]:
 
 
 def is_duplicate(turn_hash: str) -> bool:
-    cache_dir = Path.home() / ".cache" / "mnemonic-memory"
+    cache_dir = Path.home() / ".cache" / "engram"
     cache_file = cache_dir / "seen_turns.txt"
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)

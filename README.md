@@ -1,27 +1,27 @@
-# Platform Memory Ai
+# engram
 
 ## Instalasi
 
-macOS / Linux — memasang CLI `memory` dan aplikasi desktop `mnemonic-memory`:
+macOS / Linux — memasang CLI `memory` dan aplikasi desktop `engram`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/cmjcode/mnemonic-memory/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/cmjcode/engram/main/install.sh | sh
 ```
 
 Opsi: `--cli-only`, `--desktop-only`, `--version 0.0.2`, `--bin-dir ~/bin`, `--appimage` (Linux), misalnya
 `curl -fsSL .../install.sh | sh -s -- --cli-only`. CLI dipasang ke `~/.local/bin`; aplikasi macOS ke `/Applications`,
 Linux lewat `.deb`/`.rpm` (atau AppImage bila tanpa sudo). Windows: unduh `.exe`/`.msi` dari
-[Releases](https://github.com/cmjcode/mnemonic-memory/releases).
+[Releases](https://github.com/cmjcode/engram/releases).
 
 **Update otomatis.** Aplikasi desktop memeriksa rilis baru tak lama setelah dibuka dan setiap 6 jam, atau
 lewat menu tray **Periksa update**. Update dipasang setelah disetujui, lalu aplikasi dibuka ulang. Paket update
-ditandatangani; kunci privatnya `~/.tauri/mnemonic-memory.key` (dipakai `build.sh`, dan harus disimpan juga
+ditandatangani; kunci privatnya `~/.tauri/engram.key` (dipakai `build.sh`, dan harus disimpan juga
 sebagai secret GitHub `TAURI_SIGNING_PRIVATE_KEY`). Manifest `latest.json` disusun oleh
 `scripts/updater-manifest.sh`. CLI `memory` belum ikut update otomatis; jalankan ulang `install.sh`.
 
 ## Integrasi Agent AI (MCP, Rule & Hook Otomatis)
 
-`mnemonic-memory` dapat dihubungkan ke **Antigravity (IDE & CLI)**, **Gemini CLI**, **Claude Code**, dan **Cursor** sehingga setiap percakapan penting otomatis tersimpan ke memori hidup dan konteks masa lalu dapat diambil kapan saja:
+`engram` dapat dihubungkan ke **Antigravity (IDE & CLI)**, **Gemini CLI**, **Claude Code**, dan **Cursor** sehingga setiap percakapan penting otomatis tersimpan ke engram dan konteks masa lalu dapat diambil kapan saja:
 
 ```sh
 # Pasang MCP server, Global Rule, dan Hook otomatis ke semua client yang terinstal
@@ -36,9 +36,9 @@ sebagai secret GitHub `TAURI_SIGNING_PRIVATE_KEY`). Manifest `latest.json` disus
 
 Apa saja yang dipasang oleh `scripts/install-mcp.sh`:
 
-1. **Server MCP (`memori`)**: Menyediakan tool `remember`, `recall`, `who_is`, `timeline`, `principles`, `persona_context`, `family_tree`, `memory_gaps`, dan `list_subjects` lewat HTTP (`http://127.0.0.1:7878/mcp`) dengan token tetap `MEMORY_TOKEN` (`LaunchAgent` `id.memorihidup.token`).
+1. **Server MCP (`engram`)**: Menyediakan tool `remember`, `recall`, `who_is`, `timeline`, `principles`, `persona_context`, `family_tree`, `memory_gaps`, dan `list_subjects` lewat HTTP (`http://127.0.0.1:7878/mcp`) dengan token tetap `MEMORY_TOKEN` (`LaunchAgent` `id.engram.ai.token`).
 2. **Global Rule (`GEMINI.md` & `CLAUDE.md`)**: Menginstruksikan agent di `~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, dan `~/.claude/CLAUDE.md` agar proaktif memanggil `remember` saat pengguna menceritakan kisah/fakta/prinsip hidup, serta memanggil `recall`/`who_is`/`timeline`/`principles` saat menjawab pertanyaan tentang masa lalu.
-3. **Hook Otomatis (`~/.local/bin/mnemonic-auto-remember`)**:
+3. **Hook Otomatis (`~/.local/bin/engram-auto-remember`)**:
    * Dipasang pada event `Stop` di Antigravity (`~/.gemini/config/hooks.json`) dan Claude Code (`~/.claude/settings.json`), serta `AfterAgent` di Gemini CLI (`~/.gemini/settings.json`).
    * Setiap giliran percakapan selesai, script `scripts/auto-remember-hook.py` otomatis mengekstrak pesan pengguna & balasan asisten dari transkrip, menyaring duplikat, lalu mengirimnya ke pipeline `remember` (yang akan menyaring obrolan basa-basi lewat konfigurasi `[score]`).
    * **Fallback Offline**: Bila aplikasi desktop / `memory serve` sedang tidak aktif, percakapan otomatis disimpan sebagai berkas `.md` ke `vault/inbox/` untuk diimpor otomatis begitu aplikasi dibuka kembali.
@@ -63,7 +63,7 @@ Apa saja yang dipasang oleh `scripts/install-mcp.sh`:
 
 Jika kamu ingin membangun ini sendiri, kamu tidak sedang membuat ulang roda—kamu justru bisa mengisi lubang besar yang belum disentuh pemain di atas:
 
-> 1. **Kedaulatan Data (*Self-Hosted & Sovereign* untuk 50+ Tahun):** Kisah hidup dan warisan pemikiran keluarga adalah data paling sensitif. Menyimpannya di *startup SaaS* luar negeri sangat berisiko (kalau *startup*\-nya bangkrut 5 tahun lagi, memori hidup itu hilang). Sistem *local-first* atau *self-hosted* dengan format penyimpanan terbuka adalah keharusan untuk *legacy system*.  
+> 1. **Kedaulatan Data (*Self-Hosted & Sovereign* untuk 50+ Tahun):** Kisah hidup dan warisan pemikiran keluarga adalah data paling sensitif. Menyimpannya di *startup SaaS* luar negeri sangat berisiko (kalau *startup*\-nya bangkrut 5 tahun lagi, arsip memori itu hilang). Sistem *local-first* atau *self-hosted* dengan format penyimpanan terbuka adalah keharusan untuk *legacy system*.  
 > 2. **Pemodelan Karakter & Prinsip Hidup (*Wisdom Layer*):** Platform yang ada sekarang baru sebatas menyimpan **Fakta** (*"Dia pernah merintis usaha di Jogja tahun 2015"*). Belum ada yang secara khusus mengekstrak **Pola Keputusan/Prinsip** (*"Setiap kali menghadapi krisis bisnis, orang ini selalu memprioritaskan kesejahteraan timnya dulu baru menghitung rugi materi, karena dipengaruhi didikan ibunya"*).  
 > 3. **Konteks Budaya & Bahasa Lokal:** Orang Indonesia bercerita dengan struktur yang unik—banyak kiasan, percampuran bahasa daerah (Jawa/Sunda/dll), dan struktur silsilah keluarga besar yang rumit. Platform Barat sering gagal menangkap nuansa emosional dan relasi kekerabatan ini.
 

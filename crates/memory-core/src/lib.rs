@@ -1,4 +1,4 @@
-//! Tipe domain murni untuk platform memori hidup.
+//! Tipe domain murni untuk platform engram.
 //!
 //! Crate ini sengaja tidak bergantung pada database maupun LLM, sehingga
 //! aturan inti (waktu kabur, kekerabatan, skor kepentingan, verifikasi kutipan)
