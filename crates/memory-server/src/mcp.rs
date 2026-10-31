@@ -220,7 +220,7 @@ pub async fn handle(st: &AppState, msg: Value) -> Option<Value> {
             json!({
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "llm-memory", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "mnemonic-memory", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": "Memori hidup seseorang. Panggil recall/who_is/timeline sebelum menjawab tentang hidupnya; selalu bedakan fakta yang masih berlaku dan riwayat; bila tool menjawab 'tidak ada catatan', jangan mengarang. Untuk berbicara sebagai orang itu, pakai persona_context."
             })
         }

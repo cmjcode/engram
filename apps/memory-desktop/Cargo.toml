@@ -1,6 +1,6 @@
 [package]
 name = "memory-desktop"
-description = "Aplikasi desktop Memori Hidup (Tauri): mesin memori, worker, dan server MCP dalam satu aplikasi."
+description = "Aplikasi desktop mnemonic-memory (Tauri): mesin memori, worker, dan server MCP dalam satu aplikasi."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

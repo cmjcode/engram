@@ -1,4 +1,4 @@
-# Panduan Memori Hidup
+# Panduan mnemonic-memory
 
 Orkestrator memori hidup berbasis Rust + SurrealDB embedded. Semua data ada di
 satu folder `vault/` di komputer Anda.
@@ -20,7 +20,7 @@ cp memory.toml.example memory.toml          # sesuaikan endpoint vLLM/TEI
 
 ```bash
 cargo install tauri-cli --version "^2" --locked   # sekali saja
-cd apps/memory-desktop && cargo tauri build       # hasil: target/release/bundle/macos/Memori Hidup.app (+ .dmg)
+cd apps/memory-desktop && cargo tauri build       # hasil: target/release/bundle/macos/mnemonic-memory.app (+ .dmg)
 ```
 
 Untuk mencoba tanpa membuat bundle: `cargo run -p memory-desktop`.
@@ -53,7 +53,21 @@ Teks yang sama tidak pernah diproses dua kali. Basa-basi chat ("oke sip",
 
 ## Menghubungkan agent AI (MCP)
 
-Claude Code:
+Cara cepat (Antigravity, Claude Code, Cursor):
+
+```bash
+scripts/install-mcp.sh                      # Antigravity, lewat HTTP ke aplikasi desktop
+scripts/install-mcp.sh --client all         # semua client
+scripts/install-mcp.sh --mode stdio         # tanpa aplikasi desktop (jalankan binary memory)
+scripts/install-mcp.sh --uninstall --client all
+```
+
+Mode HTTP membuat token tetap `MEMORY_TOKEN` (disimpan di `mcp_token` dan LaunchAgent
+`id.memorihidup.token`, jadi tetap ada setelah reboot). Setelah pertama kali dijalankan, keluar
+dari aplikasi lewat menu bar lalu buka lagi. Config lama selalu dibackup (`*.bak.<waktu>`).
+`--dry-run` menampilkan rencana tanpa mengubah apa pun.
+
+Manual, Claude Code:
 
 ```bash
 claude mcp add memori -- /path/ke/memory --config /path/ke/memory.toml mcp

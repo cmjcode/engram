@@ -1,4 +1,4 @@
-// UI web lokal Memori Hidup. Tanpa framework/build step; data selalu di-escape.
+// UI web lokal mnemonic-memory. Tanpa framework/build step; data selalu di-escape.
 "use strict";
 
 // Ikon SVG inline (stroke). Jangan pakai glyph Unicode sebagai ikon.

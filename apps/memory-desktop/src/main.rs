@@ -1,4 +1,4 @@
-//! Aplikasi desktop Memori Hidup.
+//! Aplikasi desktop mnemonic-memory.
 //!
 //! Satu proses berisi seluruh mesin: vault SurrealDB, worker job, scheduler,
 //! pemantau inbox, dan server HTTP lokal (UI + API + MCP). Jendela aplikasi
@@ -143,7 +143,7 @@ fn build_main_window(app: &AppHandle, started: &Result<Started>) -> tauri::Resul
             WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into())).initialization_script(&init)
         }
     };
-    builder.title("Memori Hidup").inner_size(1200.0, 820.0).min_inner_size(720.0, 520.0).build()?;
+    builder.title("mnemonic-memory").inner_size(1200.0, 820.0).min_inner_size(720.0, 520.0).build()?;
     Ok(())
 }
 
@@ -168,13 +168,13 @@ fn open_in_file_manager(path: &Path) {
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Buka Memori Hidup", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Buka mnemonic-memory", true, None::<&str>)?;
     let inbox = MenuItem::with_id(app, "inbox", "Buka folder inbox", true, None::<&str>)?;
     let data = MenuItem::with_id(app, "data", "Buka folder data", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Keluar", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&open, &inbox, &data, &sep, &quit])?;
-    let mut tray = TrayIconBuilder::with_id("main").tooltip("Memori Hidup").menu(&menu).show_menu_on_left_click(true);
+    let mut tray = TrayIconBuilder::with_id("main").tooltip("mnemonic-memory").menu(&menu).show_menu_on_left_click(true);
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
