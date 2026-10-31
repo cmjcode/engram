@@ -1,5 +1,18 @@
 # Platform Memory Ai
 
+## Instalasi
+
+macOS / Linux — memasang CLI `memory` dan aplikasi desktop `mnemonic-memory`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cmjcode/mnemonic-memory/main/install.sh | sh
+```
+
+Opsi: `--cli-only`, `--desktop-only`, `--version 0.0.2`, `--bin-dir ~/bin`, `--appimage` (Linux), misalnya
+`curl -fsSL .../install.sh | sh -s -- --cli-only`. CLI dipasang ke `~/.local/bin`; aplikasi macOS ke `/Applications`,
+Linux lewat `.deb`/`.rpm` (atau AppImage bila tanpa sudo). Windows: unduh `.exe`/`.msi` dari
+[Releases](https://github.com/cmjcode/mnemonic-memory/releases).
+
 **1\. Kategori "AI Legacy & Biographer" (Fokus ke Konsumen/Keluarga)** Platform ini memang dibuat khusus untuk merekam kisah hidup, suara, dan kenangan seseorang untuk diwariskan ke anak-cucu.
 
 > * **HereAfter AI & StoryFile:** Mengambil pendekatan wawancara interaktif. Pengguna menjawab ratusan pertanyaan tentang hidup mereka (via audio/video). Nantinya, keluarga bisa "mengobrol" dengan rekaman tersebut. *Kelemahannya:* Arsitektur di belakangnya masih sangat kaku (mirip sistem pencocokan Q\&A berbasis RAG sederhana), belum menjadi *cognitive engine* yang benar-benar bisa berpikir dengan pola pikir orang tersebut.  
