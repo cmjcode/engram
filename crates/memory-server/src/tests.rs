@@ -117,6 +117,18 @@ async fn token_is_enforced_for_api_and_mcp_but_not_ui() {
     assert_eq!(ok.status(), 200);
 }
 
+#[tokio::test]
+async fn mcp_install_disabled_without_local_url() {
+    let (base, _st, _d) = spawn(None).await;
+    let c = reqwest::Client::new();
+    let r: Value = c.get(format!("{base}/api/mcp/clients")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["enabled"], false);
+    let res = c.post(format!("{base}/api/mcp/clients/vscode/install")).send().await.unwrap();
+    assert_eq!(res.status(), 400);
+    let res = c.post(format!("{base}/api/mcp/clients/nope/install")).send().await.unwrap();
+    assert_eq!(res.status(), 404);
+}
+
 /// Penjaga: UI tidak boleh memakai glyph/emoji sebagai ikon (font sering tidak
 /// punya glyph-nya dan tampil sebagai kotak). Hanya tanda baca tipografis yang
 /// tersedia di semua font yang diizinkan; ikon wajib SVG inline.

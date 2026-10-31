@@ -30,7 +30,7 @@ Untuk mencoba tanpa membuat bundle: `cargo run -p memory-desktop`.
 - Menutup jendela hanya menyembunyikannya; pemrosesan tetap jalan. Keluar lewat ikon di menu bar, lalu **Keluar**.
 - Menu bar juga punya **Buka folder inbox** (seret berkas ke sana) dan **Buka folder data**.
 - Agent AI bisa terhubung ke `mcp_url` di `connection.json` dengan header `Authorization: Bearer <token>`.
-  Token dibuat acak setiap aplikasi dibuka (atau pakai env `MEMORY_TOKEN` agar tetap).
+  Token dibuat sekali lalu disimpan di `mcp_token` (atau pakai env `MEMORY_TOKEN`).
 - Aplikasi dan `memory serve` tidak bisa membuka vault yang sama bersamaan. Untuk memakai CLI pada data aplikasi,
   tutup aplikasi dulu lalu jalankan `memory --config ~/Library/Application\ Support/id.memorihidup.desktop/memory.toml ...`.
 
@@ -53,7 +53,13 @@ Teks yang sama tidak pernah diproses dua kali. Basa-basi chat ("oke sip",
 
 ## Menghubungkan agent AI (MCP)
 
-Cara cepat (Antigravity, Claude Code, Cursor):
+Paling mudah: di aplikasi desktop, klik tombol **Agent AI** di kanan atas, lalu **Pasang** pada
+Antigravity, VS Code, atau Claude Code. Aplikasi menambah server `memori` ke config client itu
+(`~/.gemini/antigravity/mcp_config.json`, `mcp.json` di folder User VS Code, atau `claude mcp add -s user`),
+tanpa mengubah server lain, dan menyimpan cadangan `.bak`. Tombol yang sama ada di `memory serve` bila
+server berjalan di 127.0.0.1.
+
+Lewat terminal (Antigravity, Claude Code, Cursor):
 
 ```bash
 scripts/install-mcp.sh                      # Antigravity, lewat HTTP ke aplikasi desktop

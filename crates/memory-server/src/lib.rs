@@ -4,6 +4,7 @@
 //! `MEMORY_TOKEN`) diisi, semua `/api` dan `/mcp` wajib `Authorization: Bearer`.
 
 pub mod api;
+pub mod install;
 pub mod mcp;
 
 use std::sync::Arc;
@@ -24,12 +25,15 @@ pub struct AppState {
     pub rt: Runtime,
     pub importer: Importer,
     pub token: Option<Arc<String>>,
+    /// Alamat MCP HTTP server ini (mis. `http://127.0.0.1:7878/mcp`). Bila diisi, UI bisa
+    /// memasang server ke config agent AI di komputer ini (lihat [`install`]).
+    pub mcp_url: Option<String>,
 }
 
 impl AppState {
     pub fn new(rt: Runtime, importer: Importer) -> Self {
         let token = rt.cfg.server.token_env.as_deref().and_then(|k| std::env::var(k).ok()).filter(|t| !t.is_empty()).map(Arc::new);
-        Self { rt, importer, token }
+        Self { rt, importer, token, mcp_url: None }
     }
 
     pub fn default_subject(&self) -> String {

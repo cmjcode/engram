@@ -16,6 +16,7 @@ const ICONS = {
   upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v4h16v-4"/>',
   flag: '<path d="M5 21V4h11l-1.5 4L16 12H5"/>',
   home: '<path d="M4 11 12 4l8 7v9H4z"/><path d="M10 20v-5h4v5"/>',
+  plug: '<path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.5-4.5L4 8M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.5 4.5L20 16M20 20v-4h-4"/>',
 };
 const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
@@ -434,6 +435,61 @@ async function pollBatch(id) {
 // ---------------------------------------------------------------- boot
 $("#subject-select").onchange = (e) => { state.subject = e.target.value; localStorage.setItem("subject", state.subject); route(); };
 $("#new-subject").onclick = () => newSubjectForm();
+$("#connect-agents").onclick = () => connectAgents();
+
+// Pasang server MCP ke agent AI (Antigravity, VS Code, Claude Code) dengan satu klik.
+const MCP_STATE = {
+  installed: ["now", "Terpasang"],
+  outdated: ["warn", "Perlu diperbarui"],
+  missing: ["", "Belum terpasang"],
+  unreadable: ["conflict", "Config tidak terbaca"],
+};
+async function connectAgents() {
+  openDrawer("Hubungkan agent AI", `<div class="empty">Memuat...</div>`);
+  let r;
+  try { r = await api("/api/mcp/clients"); }
+  catch (e) { $("#drawer-body").innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; return; }
+  if (!r.enabled) {
+    $("#drawer-body").innerHTML = `<div class="card"><p>Pemasangan otomatis hanya tersedia di aplikasi desktop atau <code>memory serve</code> di 127.0.0.1.</p>
+      <p class="small muted">Pakai <code>scripts/install-mcp.sh</code> untuk server lain.</p></div>`;
+    return;
+  }
+  $("#drawer-body").innerHTML = `
+    <p class="muted small">Daftarkan memori ini sebagai server MCP <b>${esc(r.name)}</b> agar agent AI bisa mengingat dan mencari cerita.
+      Alamat: <code>${esc(r.url)}</code></p>
+    ${r.clients.map((c) => {
+      const [cls, label] = MCP_STATE[c.state] || ["", c.state];
+      const has = c.state === "installed" || c.state === "outdated";
+      return `<div class="card" data-client="${esc(c.id)}">
+        <div class="row" style="justify-content:space-between">
+          <div><b>${esc(c.label)}</b> <span class="badge ${cls}">${esc(label)}</span>${c.detected ? "" : ' <span class="small muted">(tidak terdeteksi)</span>'}</div>
+          <div class="row">
+            ${has ? `<button data-act="uninstall" class="ghost" title="Hapus dari ${esc(c.label)}">${icon("x")}</button>` : ""}
+            <button data-act="install" class="${c.state === "installed" ? "" : "primary"}">${icon(c.state === "installed" ? "refresh" : "plug")} ${c.state === "installed" ? "Pasang ulang" : c.state === "outdated" ? "Perbarui" : "Pasang"}</button>
+          </div>
+        </div>
+        <div class="small muted">${esc(c.config_path)}</div>
+        <div class="small msg"></div>
+      </div>`;
+    }).join("")}
+    <p class="small muted">Token akses ikut ditulis ke config tersebut. Cadangan berkas lama disimpan sebagai <code>.bak</code>.</p>`;
+  $("#drawer-body").querySelectorAll("[data-act]").forEach((b) => {
+    b.onclick = async () => {
+      const card = b.closest("[data-client]");
+      card.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+      try {
+        const res = await api(`/api/mcp/clients/${encodeURIComponent(card.dataset.client)}/${b.dataset.act}`, { method: "POST" });
+        toast(b.dataset.act === "install" ? "MCP terpasang" : "MCP dihapus");
+        await connectAgents();
+        const msg = $(`[data-client="${CSS.escape(card.dataset.client)}"] .msg`);
+        if (msg) msg.textContent = res.message;
+      } catch (e) {
+        card.querySelector(".msg").innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`;
+        card.querySelectorAll("button").forEach((x) => { x.disabled = false; });
+      }
+    };
+  });
+}
 
 // Formulir di dalam halaman; jangan pakai prompt()/confirm(): WebView aplikasi
 // desktop tidak menampilkan dialog browser.

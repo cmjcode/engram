@@ -46,6 +46,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects/{s}/interview/next", get(interview_next))
         .route("/api/subjects/{s}/interview/answer", post(interview_answer))
         .route("/api/subjects/{s}/maintenance/{kind}", post(maintenance))
+        .route("/api/mcp/clients", get(mcp_clients))
+        .route("/api/mcp/clients/{id}/install", post(mcp_install))
+        .route("/api/mcp/clients/{id}/uninstall", post(mcp_uninstall))
 }
 
 fn check(s: &str) -> Result<(), ApiError> {
@@ -359,4 +362,42 @@ async fn maintenance(State(st): State<AppState>, Path((s, kind)): Path<(String, 
     };
     let job = st.rt.enqueue(kind, json!({"subject": s}), format!("{kind}:{s}:manual:{}", memory_core::new_id())).await?;
     Ok(Json(json!({"job_id": job.id})))
+}
+
+// ---------------------------------------------------------------- pasang MCP ke agent AI
+
+/// Alamat MCP & folder pengguna; error bila fitur tidak aktif di server ini.
+fn mcp_target(st: &AppState) -> Result<(String, crate::install::Dirs), ApiError> {
+    let url = st.mcp_url.clone().ok_or_else(|| ApiError::BadRequest("pemasangan otomatis hanya tersedia di aplikasi desktop atau server lokal".into()))?;
+    let dirs = crate::install::Dirs::from_env().ok_or_else(|| ApiError::Internal("folder home pengguna tidak diketahui".into()))?;
+    Ok((url, dirs))
+}
+
+fn mcp_client(id: &str) -> Result<crate::install::Client, ApiError> {
+    crate::install::Client::parse(id).ok_or_else(|| ApiError::NotFound(format!("client tidak dikenal: {id}")))
+}
+
+async fn mcp_clients(State(st): State<AppState>) -> ApiResult<Value> {
+    let Ok((url, dirs)) = mcp_target(&st) else {
+        return Ok(Json(json!({"enabled": false, "clients": []})));
+    };
+    let token = st.token.as_deref().map(String::as_str);
+    let clients: Vec<_> = crate::install::Client::ALL.into_iter().map(|c| crate::install::status(&dirs, c, &url, token)).collect();
+    Ok(Json(json!({"enabled": true, "url": url, "name": crate::install::SERVER_NAME, "clients": clients})))
+}
+
+async fn mcp_install(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let c = mcp_client(&id)?;
+    let (url, dirs) = mcp_target(&st)?;
+    let token = st.token.as_deref().map(String::as_str);
+    let msg = crate::install::install(&dirs, c, &url, token).await.map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true, "message": msg, "status": crate::install::status(&dirs, c, &url, token)})))
+}
+
+async fn mcp_uninstall(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let c = mcp_client(&id)?;
+    let (url, dirs) = mcp_target(&st)?;
+    let token = st.token.as_deref().map(String::as_str);
+    let msg = crate::install::uninstall(&dirs, c).await.map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true, "message": msg, "status": crate::install::status(&dirs, c, &url, token)})))
 }

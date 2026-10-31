@@ -367,11 +367,15 @@ async fn main() -> Result<()> {
         Cmd::Serve { bind, no_worker } => {
             let stop = shutdown_signal();
             let hs = if no_worker { vec![] } else { background(&rt, &stop, true).await };
-            let st = memory_server::AppState::new(rt.clone(), importer(&rt));
+            let mut st = memory_server::AppState::new(rt.clone(), importer(&rt));
+            let addr = bind.clone().unwrap_or_else(|| rt.cfg.server.bind.clone());
+            // Pemasangan MCP ke agent AI hanya untuk server di komputer ini sendiri.
+            if addr.starts_with("127.") || addr.starts_with("localhost") {
+                st.mcp_url = Some(format!("http://{addr}/mcp"));
+            }
             if st.token.is_none() && bind.as_deref().is_some_and(|b| !b.starts_with("127.") && !b.starts_with("localhost")) {
                 tracing::warn!("server terbuka ke jaringan tanpa token; set env MEMORY_TOKEN");
             }
-            let addr = bind.unwrap_or_else(|| rt.cfg.server.bind.clone());
             memory_server::serve(st, &addr, stop).await?;
             for h in hs {
                 let _ = h.await;

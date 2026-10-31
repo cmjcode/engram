@@ -7,6 +7,7 @@
 //! - Data ada di folder data aplikasi (macOS: `~/Library/Application Support/id.memorihidup.desktop/`).
 //! - Menutup jendela hanya menyembunyikannya; worker tetap jalan dari ikon menu bar.
 //! - Alamat & token MCP ditulis ke `connection.json` di folder data, untuk agent AI.
+//!   Tombol "Hubungkan agent AI" di UI mendaftarkannya ke Antigravity, VS Code, atau Claude Code.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -61,6 +62,20 @@ fn random_token() -> String {
     (0..32).map(|_| format!("{:x}", rng.random_range(0..16u8))).collect()
 }
 
+/// Token akses tetap di `mcp_token` (berkas yang sama dipakai `scripts/install-mcp.sh`).
+fn load_or_create_token(data_dir: &Path) -> Result<String> {
+    let path = data_dir.join("mcp_token");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        let t = s.trim();
+        if !t.is_empty() {
+            return Ok(t.to_string());
+        }
+    }
+    let t = random_token();
+    write_private(&path, &format!("{t}\n")).with_context(|| format!("menulis {}", path.display()))?;
+    Ok(t)
+}
+
 /// Tulis berkas hanya-pemilik (token akses tidak boleh terbaca pengguna lain).
 fn write_private(path: &Path, body: &str) -> Result<()> {
     std::fs::write(path, body)?;
@@ -81,10 +96,11 @@ fn start_engine(desktop: &Desktop) -> Result<Started> {
         let importer = Importer::new(rt.pipeline.clone(), transcriber);
         let mut state = AppState::new(rt.clone(), importer.clone());
         // Token wajib: server lokal tidak boleh bisa dipakai situs web lain di browser.
+        // Token disimpan agar config MCP di agent AI tetap berlaku setelah aplikasi dibuka ulang.
         let token = match &state.token {
             Some(t) => t.to_string(),
             None => {
-                let t = random_token();
+                let t = load_or_create_token(&desktop.data_dir)?;
                 state.token = Some(Arc::new(t.clone()));
                 t
             }
@@ -98,6 +114,7 @@ fn start_engine(desktop: &Desktop) -> Result<Started> {
             }
         };
         let url = format!("http://{}/", listener.local_addr()?);
+        state.mcp_url = Some(format!("{url}mcp"));
         write_private(
             &desktop.data_dir.join("connection.json"),
             &serde_json::to_string_pretty(&serde_json::json!({
