@@ -123,6 +123,41 @@ def extract_gemini_turn(payload: dict) -> tuple[str, str]:
     return user_text, assistant_text
 
 
+def extract_project_name(payload: dict) -> str:
+    home = Path.home().resolve()
+    ignored_dirs = {
+        home,
+        (home / ".gemini").resolve(),
+        (home / ".gemini" / "config").resolve(),
+        (home / ".claude").resolve(),
+    }
+
+    candidates: list[str] = []
+    ws_paths = payload.get("workspacePaths")
+    if isinstance(ws_paths, list):
+        for p in ws_paths:
+            if isinstance(p, str) and p.strip():
+                candidates.append(p.strip())
+
+    for key in ("cwd", "workspaceRoot", "projectDir"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            candidates.append(val.strip())
+
+    for raw_path in candidates:
+        try:
+            resolved = Path(raw_path).expanduser().resolve()
+            if resolved in ignored_dirs or resolved.parent == Path("/"):
+                continue
+            name = resolved.name.strip()
+            if name and not name.startswith("."):
+                return name
+        except Exception:
+            continue
+
+    return ""
+
+
 def load_connection() -> tuple[str, str, Path]:
     home = Path.home()
     data_dir = home / "Library" / "Application Support" / "id.memorihidup.desktop"
@@ -204,7 +239,8 @@ def send_to_memory(text: str, source: str) -> None:
         inbox_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         short_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
-        fname = inbox_dir / f"chat-{source}-{ts}-{short_hash}.md"
+        safe_source = re.sub(r"[^A-Za-z0-9._-]+", "-", source).strip("-") or "chat"
+        fname = inbox_dir / f"chat-{safe_source}-{ts}-{short_hash}.md"
         fname.write_text(text + "\n", encoding="utf-8")
     except Exception:
         pass
@@ -223,18 +259,25 @@ def main() -> None:
 
     try:
         if is_antigravity:
-            source = "antigravity"
+            client = "antigravity"
             user_text, assistant_text = extract_antigravity_turn(payload)
         elif event_name == "AfterAgent" or "prompt_response" in payload:
-            source = "gemini-cli"
+            client = "gemini-cli"
             user_text, assistant_text = extract_gemini_turn(payload)
         else:
-            source = "claude-code"
+            client = "claude-code"
             user_text, assistant_text = extract_claude_turn(payload)
+
+        project = extract_project_name(payload)
+        source = f"{client}:{project}" if project else client
 
         if user_text and len(user_text.strip()) >= 10:
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-            combined = f"[{source} {now_str}]\nPengguna: {user_text.strip()}"
+            if project:
+                header = f"[{client} | project: {project} | {now_str}]"
+            else:
+                header = f"[{client} | {now_str}]"
+            combined = f"{header}\nPengguna: {user_text.strip()}"
             if assistant_text:
                 # Batasi panjang balasan asisten agar ringkas dan fokus pada konteks
                 trimmed_ast = assistant_text.strip()

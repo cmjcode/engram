@@ -209,8 +209,8 @@ marker_end = "<!-- MNEMONIC_MEMORY_END -->"
 block = f"""{marker_start}
 ## Memori Hidup (`memori` MCP)
 
-- **Simpan Otomatis (`remember`)**: Saat pengguna menceritakan kisah hidup, fakta pribadi/keluarga, pengalaman masa lalu, preferensi, atau prinsip keputusan penting, panggil tool MCP `remember` (dari server `memori`) untuk menyimpannya tanpa perlu diminta.
-- **Ambil Konteks (`recall`, `who_is`, `timeline`, `principles`, `family_tree`)**: Saat pengguna bertanya tentang masa lalu, anggota keluarga, relasi seseorang, kronologi peristiwa, atau prinsip hidup, panggil tool MCP `memori` yang relevan terlebih dahulu sebelum menjawab. Selalu bedakan fakta yang masih berlaku sekarang dengan riwayat masa lalu.
+- **Simpan Otomatis (`remember`)**: Saat pengguna menceritakan kisah hidup, fakta pribadi/keluarga, pengalaman masa lalu, preferensi, atau keputusan penting (termasuk keputusan arsitektur/teknis di project), panggil tool MCP `remember` (dari server `memori`) untuk menyimpannya tanpa perlu diminta. Isi parameter `source` dengan format `<client>:<nama-project>` (misal `antigravity:LLM-MEMORY`) dan sebutkan nama project di dalam `text` bila konteksnya spesifik pada project tersebut.
+- **Ambil Konteks (`recall`, `who_is`, `timeline`, `principles`, `family_tree`)**: Saat pengguna bertanya tentang masa lalu, anggota keluarga, relasi seseorang, kronologi peristiwa, prinsip hidup, atau konteks project sebelumnya, panggil tool MCP `memori` yang relevan terlebih dahulu sebelum menjawab. Untuk mencari memori spesifik project saat ini, sertakan nama project di `query` pada `recall` atau `entity` pada `timeline`. Selalu bedakan fakta yang masih berlaku sekarang dengan riwayat masa lalu.
 {marker_end}"""
 
 text = ""
