@@ -4,10 +4,10 @@
 //! (`POST /mcp`, respons JSON). Logika temporal & guardrail ada di sisi
 //! server, sehingga LLM klien mana pun mendapat konteks yang sama jujurnya.
 
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -100,20 +100,11 @@ fn text_result(text: String, structured: Option<Value>) -> Value {
 }
 
 async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, String> {
-    let subject = args["subject"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| st.default_subject());
+    let subject = args["subject"].as_str().filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| st.default_subject());
     if !memory_core::ids::is_valid_id(&subject) {
         return Err(format!("subjek tidak valid: {subject}"));
     }
-    let s = |k: &str| {
-        args[k]
-            .as_str()
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-    };
+    let s = |k: &str| args[k].as_str().filter(|v| !v.is_empty()).map(str::to_string);
     let r = &st.rt.retriever;
     let e = |e: memory_retrieve::RetrieveError| e.to_string();
     match name {
@@ -124,14 +115,7 @@ async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, Str
                 from: s("from"),
                 to: s("to"),
                 as_of: s("as_of"),
-                kinds: args["kinds"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                kinds: args["kinds"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default(),
                 limit: args["limit"].as_u64().map(|x| x as usize),
             };
             let res = r.recall(&q).await.map_err(e)?;
@@ -152,184 +136,66 @@ async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, Str
                         t.push_str(&format!("\n- {} (berlaku sekarang)", f.statement));
                     }
                     for f in &w.history {
-                        t.push_str(&format!(
-                            "\n- {} (dulu, {}–{})",
-                            f.statement,
-                            f.valid_from.as_deref().unwrap_or("?"),
-                            f.valid_to.as_deref().unwrap_or("?")
-                        ));
+                        t.push_str(&format!("\n- {} (dulu, {}–{})", f.statement, f.valid_from.as_deref().unwrap_or("?"), f.valid_to.as_deref().unwrap_or("?")));
                     }
                     for k in &w.kin {
-                        t.push_str(&format!(
-                            "\n- {}: {}{}",
-                            k.relation,
-                            k.name,
-                            if k.inferred { " (turunan)" } else { "" }
-                        ));
+                        t.push_str(&format!("\n- {}: {}{}", k.relation, k.name, if k.inferred { " (turunan)" } else { "" }));
                     }
                     for ep in w.episodes.iter().take(10) {
                         t.push_str(&format!("\n- [ep:{}] ({}) {}", ep.id, ep.time, ep.title));
                     }
                     Ok(text_result(t, Some(json!(w))))
                 }
-                None => Ok(text_result(
-                    format!("Tidak ada catatan tentang '{name}'."),
-                    None,
-                )),
+                None => Ok(text_result(format!("Tidak ada catatan tentang '{name}'."), None)),
             }
         }
         "timeline" => {
             let tl = r
-                .timeline(
-                    &subject,
-                    s("entity").as_deref(),
-                    s("phase").as_deref(),
-                    s("from").as_deref(),
-                    s("to").as_deref(),
-                    args["limit"].as_u64().unwrap_or(100) as usize,
-                )
+                .timeline(&subject, s("entity").as_deref(), s("phase").as_deref(), s("from").as_deref(), s("to").as_deref(), args["limit"].as_u64().unwrap_or(100) as usize)
                 .await
                 .map_err(e)?;
-            let t = tl
-                .items
-                .iter()
-                .map(|i| {
-                    format!(
-                        "- {} [{}] {} ({})",
-                        i.date.as_deref().unwrap_or("?"),
-                        i.kind,
-                        i.label,
-                        i.id
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Ok(text_result(
-                if t.is_empty() {
-                    "Tidak ada catatan.".into()
-                } else {
-                    t
-                },
-                Some(json!(tl)),
-            ))
+            let t = tl.items.iter().map(|i| format!("- {} [{}] {} ({})", i.date.as_deref().unwrap_or("?"), i.kind, i.label, i.id)).collect::<Vec<_>>().join("\n");
+            Ok(text_result(if t.is_empty() { "Tidak ada catatan.".into() } else { t }, Some(json!(tl))))
         }
         "principles" => {
-            let ps = r
-                .principles(&subject, s("situation").as_deref())
-                .await
-                .map_err(e)?;
+            let ps = r.principles(&subject, s("situation").as_deref()).await.map_err(e)?;
             let t = ps
                 .iter()
                 .take(10)
-                .map(|p| {
-                    format!(
-                        "- {} (keyakinan {:.2}; bukti: {})",
-                        p.principle.statement,
-                        p.principle.confidence,
-                        p.evidence
-                            .iter()
-                            .map(|e| format!("[ep:{}]", e.id))
-                            .collect::<Vec<_>>()
-                            .join("")
-                    )
-                })
+                .map(|p| format!("- {} (keyakinan {:.2}; bukti: {})", p.principle.statement, p.principle.confidence, p.evidence.iter().map(|e| format!("[ep:{}]", e.id)).collect::<Vec<_>>().join("")))
                 .collect::<Vec<_>>()
                 .join("\n");
-            Ok(text_result(
-                if t.is_empty() {
-                    "Belum ada prinsip yang cukup bukti.".into()
-                } else {
-                    t
-                },
-                Some(json!(ps)),
-            ))
+            Ok(text_result(if t.is_empty() { "Belum ada prinsip yang cukup bukti.".into() } else { t }, Some(json!(ps))))
         }
         "persona_context" => {
-            let pc = r
-                .persona_context(
-                    &subject,
-                    &s("question").ok_or("question wajib diisi")?,
-                    s("as_of").as_deref(),
-                )
-                .await
-                .map_err(e)?;
-            Ok(text_result(
-                pc.system_prompt.clone(),
-                Some(json!({"found": pc.found, "age_at_reference": pc.age_at_reference})),
-            ))
+            let pc = r.persona_context(&subject, &s("question").ok_or("question wajib diisi")?, s("as_of").as_deref()).await.map_err(e)?;
+            Ok(text_result(pc.system_prompt.clone(), Some(json!({"found": pc.found, "age_at_reference": pc.age_at_reference}))))
         }
         "family_tree" => {
             let tree = r.family_tree(&subject).await.map_err(e)?;
-            let names: std::collections::HashMap<&str, &str> = tree
-                .nodes
-                .iter()
-                .map(|n| (n.id.as_str(), n.name.as_str()))
-                .collect();
+            let names: std::collections::HashMap<&str, &str> = tree.nodes.iter().map(|n| (n.id.as_str(), n.name.as_str())).collect();
             let self_id = tree.nodes.iter().find(|n| n.is_self).map(|n| n.id.as_str());
             let t = tree
                 .edges
                 .iter()
                 .filter(|e| Some(e.to.as_str()) == self_id)
-                .map(|e| {
-                    format!(
-                        "- {}: {}{}",
-                        e.label,
-                        names.get(e.from.as_str()).unwrap_or(&"?"),
-                        if e.inferred { " (turunan)" } else { "" }
-                    )
-                })
+                .map(|e| format!("- {}: {}{}", e.label, names.get(e.from.as_str()).unwrap_or(&"?"), if e.inferred { " (turunan)" } else { "" }))
                 .collect::<Vec<_>>()
                 .join("\n");
-            Ok(text_result(
-                if t.is_empty() {
-                    "Belum ada data kekerabatan.".into()
-                } else {
-                    t
-                },
-                Some(json!(tree)),
-            ))
+            Ok(text_result(if t.is_empty() { "Belum ada data kekerabatan.".into() } else { t }, Some(json!(tree))))
         }
         "remember" => {
-            let v = crate::api::remember_text(
-                st,
-                &subject,
-                &s("text").ok_or("text wajib diisi")?,
-                s("source").as_deref(),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            Ok(text_result(
-                "Tersimpan; akan diproses pipeline memori.".into(),
-                Some(v),
-            ))
+            let v = crate::api::remember_text(st, &subject, &s("text").ok_or("text wajib diisi")?, s("source").as_deref()).await.map_err(|e| e.to_string())?;
+            Ok(text_result("Tersimpan; akan diproses pipeline memori.".into(), Some(v)))
         }
         "memory_gaps" => {
-            let gaps = st
-                .rt
-                .pipeline
-                .memory_gaps(&subject)
-                .await
-                .map_err(|e| e.to_string())?;
-            let t = gaps
-                .iter()
-                .take(10)
-                .map(|g| format!("- {}", g.description))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let gaps = st.rt.pipeline.memory_gaps(&subject).await.map_err(|e| e.to_string())?;
+            let t = gaps.iter().take(10).map(|g| format!("- {}", g.description)).collect::<Vec<_>>().join("\n");
             Ok(text_result(t, Some(json!({"gaps": gaps}))))
         }
         "list_subjects" => {
-            let subs = st
-                .rt
-                .store
-                .list_subjects()
-                .await
-                .map_err(|e| e.to_string())?;
-            let t = subs
-                .iter()
-                .map(|s| format!("- {} ({})", s.name, s.id))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let subs = st.rt.store.list_subjects().await.map_err(|e| e.to_string())?;
+            let t = subs.iter().map(|s| format!("- {} ({})", s.name, s.id)).collect::<Vec<_>>().join("\n");
             Ok(text_result(t, Some(json!({"subjects": subs}))))
         }
         other => Err(format!("tool tidak dikenal: {other}")),
@@ -349,14 +215,8 @@ pub async fn handle(st: &AppState, msg: Value) -> Option<Value> {
     };
     let result = match method {
         "initialize" => {
-            let requested = msg["params"]["protocolVersion"]
-                .as_str()
-                .unwrap_or(PROTOCOL_VERSION);
-            let version = if SUPPORTED.contains(&requested) {
-                requested
-            } else {
-                PROTOCOL_VERSION
-            };
+            let requested = msg["params"]["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION);
+            let version = if SUPPORTED.contains(&requested) { requested } else { PROTOCOL_VERSION };
             json!({
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
@@ -375,13 +235,7 @@ pub async fn handle(st: &AppState, msg: Value) -> Option<Value> {
             }
         }
         "" => return Some(rpc_error(id, -32600, "permintaan tidak valid")),
-        _ => {
-            return Some(rpc_error(
-                id,
-                -32601,
-                &format!("metode tidak dikenal: {method}"),
-            ));
-        }
+        _ => return Some(rpc_error(id, -32601, &format!("metode tidak dikenal: {method}"))),
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
@@ -395,11 +249,7 @@ pub async fn http_handler(State(st): State<AppState>, Json(body): Json<Value>) -
                     out.push(r);
                 }
             }
-            if out.is_empty() {
-                StatusCode::ACCEPTED.into_response()
-            } else {
-                Json(Value::Array(out)).into_response()
-            }
+            if out.is_empty() { StatusCode::ACCEPTED.into_response() } else { Json(Value::Array(out)).into_response() }
         }
         m => match handle(&st, m).await {
             Some(r) => Json(r).into_response(),
@@ -425,15 +275,10 @@ pub async fn serve_stdio(st: AppState) -> std::io::Result<()> {
                 (!v.is_empty()).then_some(Value::Array(v))
             }
             Ok(m) => handle(&st, m).await,
-            Err(e) => Some(rpc_error(
-                Value::Null,
-                -32700,
-                &format!("JSON tidak valid: {e}"),
-            )),
+            Err(e) => Some(rpc_error(Value::Null, -32700, &format!("JSON tidak valid: {e}"))),
         };
         if let Some(r) = resp {
-            out.write_all(serde_json::to_string(&r).unwrap_or_default().as_bytes())
-                .await?;
+            out.write_all(serde_json::to_string(&r).unwrap_or_default().as_bytes()).await?;
             out.write_all(b"\n").await?;
             out.flush().await?;
         }
