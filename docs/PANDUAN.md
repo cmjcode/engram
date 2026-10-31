@@ -59,14 +59,18 @@ Antigravity, VS Code, atau Claude Code. Aplikasi menambah server `memori` ke con
 tanpa mengubah server lain, dan menyimpan cadangan `.bak`. Tombol yang sama ada di `memory serve` bila
 server berjalan di 127.0.0.1.
 
-Lewat terminal (Antigravity, Claude Code, Cursor):
+Lewat terminal (Antigravity, Gemini CLI, Claude Code, Cursor):
 
 ```bash
 scripts/install-mcp.sh                      # Antigravity, lewat HTTP ke aplikasi desktop
-scripts/install-mcp.sh --client all         # semua client
+scripts/install-mcp.sh --client all         # semua client (MCP + Global Rule + Hook otomatis)
 scripts/install-mcp.sh --mode stdio         # tanpa aplikasi desktop (jalankan binary memory)
 scripts/install-mcp.sh --uninstall --client all
 ```
+
+Selain mendaftarkan server MCP `memori`, script ini juga memasang:
+- **Global Rule** (`~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, `~/.claude/CLAUDE.md`) agar agent otomatis menyimpan fakta/cerita hidup lewat `remember` dan mengambil konteks lewat `recall`/`who_is`/`timeline`/`principles`.
+- **Hook Otomatis** (`~/.local/bin/mnemonic-auto-remember` dari `scripts/auto-remember-hook.py`) pada event `Stop` (Antigravity & Claude Code) dan `AfterAgent` (Gemini CLI) yang mengirim percakapan baru ke MCP `remember` (atau ke `vault/inbox/` bila server sedang mati).
 
 Mode HTTP membuat token tetap `MEMORY_TOKEN` (disimpan di `mcp_token` dan LaunchAgent
 `id.memorihidup.token`, jadi tetap ada setelah reboot). Setelah pertama kali dijalankan, keluar

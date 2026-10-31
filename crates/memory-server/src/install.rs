@@ -190,6 +190,8 @@ fn same_entry(cur: &Value, want: &Value) -> bool {
 
 /// Tambah/ganti (`Some`) atau hapus (`None`) entri server di berkas config JSON.
 pub fn edit_config(path: &Path, servers_key: &str, value: Option<Value>) -> Result<(), String> {
+    let real_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = real_path.as_path();
     let mut doc = read_json(path)?.unwrap_or_else(|| json!({}));
     let root = doc.as_object_mut().ok_or_else(|| format!("{} bukan objek JSON", path.display()))?;
     let servers = root.entry(servers_key).or_insert_with(|| json!({}));

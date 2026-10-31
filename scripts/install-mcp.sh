@@ -33,7 +33,7 @@ usage() {
   cat <<EOF
 Pemakaian: $(basename "$0") [opsi]
 
-  --client NAMA   antigravity | claude | cursor | all   (bawaan: antigravity)
+  --client NAMA   antigravity | gemini | claude | cursor | all   (bawaan: antigravity)
   --mode MODE     http | stdio                          (bawaan: http)
   --name NAMA     nama server MCP                       (bawaan: memori)
   --token TOKEN   pakai token ini (mode http); bila kosong, pakai yang ada atau buat baru
@@ -61,8 +61,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$CLIENT" in
-  antigravity|claude|cursor) CLIENTS=("$CLIENT") ;;
-  all) CLIENTS=(antigravity claude cursor) ;;
+  antigravity|gemini|claude|cursor) CLIENTS=("$CLIENT") ;;
+  all) CLIENTS=(antigravity gemini claude cursor) ;;
   *) echo "Client tidak dikenal: $CLIENT" >&2; exit 2 ;;
 esac
 case "$MODE" in http|stdio) ;; *) echo "Mode tidak dikenal: $MODE" >&2; exit 2 ;; esac
@@ -138,7 +138,8 @@ edit_json() {
   [[ -f "$file" ]] && cp -p "$file" "$file.bak.$(date +%Y%m%d%H%M%S)"
   python3 - "$file" "$name" "$entry" <<'PY'
 import json, os, sys
-path, name, entry = sys.argv[1], sys.argv[2], sys.argv[3]
+path = os.path.realpath(sys.argv[1])
+name, entry = sys.argv[2], sys.argv[3]
 data = {}
 if os.path.exists(path) and os.path.getsize(path) > 0:
     with open(path) as f:
@@ -158,30 +159,197 @@ PY
   info "Diperbarui: $file"
 }
 
-# entry_json STYLE -> JSON entri server untuk gaya client (antigravity | cursor)
+# entry_json STYLE -> JSON entri server untuk gaya client (antigravity | gemini | cursor)
 entry_json() {
   python3 - "$1" "$MODE" "$URL" "$TOKEN" "$BIN" "$CONFIG" <<'PY'
 import json, sys
 style, mode, url, token, bin_, cfg = sys.argv[1:]
 if mode == "http":
-    key = "serverUrl" if style == "antigravity" else "url"
-    e = {key: url, "headers": {"Authorization": f"Bearer {token}"}}
+    if style == "antigravity":
+        e = {"serverUrl": url, "headers": {"Authorization": f"Bearer {token}"}, "disabled": False}
+    elif style == "gemini":
+        e = {"httpUrl": url, "headers": {"Authorization": f"Bearer {token}"}, "trust": True}
+    else:
+        e = {"url": url, "headers": {"Authorization": f"Bearer {token}"}}
 else:
     e = {"command": bin_, "args": ["--config", cfg, "mcp"]}
-if style == "antigravity":
-    e["disabled"] = False
+    if style == "antigravity":
+        e["disabled"] = False
+    elif style == "gemini":
+        e["trust"] = True
 print(json.dumps(e))
 PY
+}
+
+HOOK_SRC="$ROOT/scripts/auto-remember-hook.py"
+HOOK_BIN="$HOME/.local/bin/mnemonic-auto-remember"
+
+ensure_hook_bin() {
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "[dry-run] pasang $HOOK_BIN"
+    return
+  fi
+  mkdir -p "$(dirname "$HOOK_BIN")"
+  cp "$HOOK_SRC" "$HOOK_BIN"
+  chmod 755 "$HOOK_BIN"
+}
+
+upsert_rule_section() {
+  local file="$1"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "[dry-run] perbarui rule memori di $file"
+    return
+  fi
+  mkdir -p "$(dirname "$file")"
+  python3 - "$file" "$UNINSTALL" <<'PY'
+import os, re, sys
+path, uninstall = sys.argv[1], sys.argv[2] == "1"
+marker_start = "<!-- MNEMONIC_MEMORY_START -->"
+marker_end = "<!-- MNEMONIC_MEMORY_END -->"
+block = f"""{marker_start}
+## Memori Hidup (`memori` MCP)
+
+- **Simpan Otomatis (`remember`)**: Saat pengguna menceritakan kisah hidup, fakta pribadi/keluarga, pengalaman masa lalu, preferensi, atau prinsip keputusan penting, panggil tool MCP `remember` (dari server `memori`) untuk menyimpannya tanpa perlu diminta.
+- **Ambil Konteks (`recall`, `who_is`, `timeline`, `principles`, `family_tree`)**: Saat pengguna bertanya tentang masa lalu, anggota keluarga, relasi seseorang, kronologi peristiwa, atau prinsip hidup, panggil tool MCP `memori` yang relevan terlebih dahulu sebelum menjawab. Selalu bedakan fakta yang masih berlaku sekarang dengan riwayat masa lalu.
+{marker_end}"""
+
+text = ""
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+pattern = re.compile(re.escape(marker_start) + r".*?" + re.escape(marker_end) + r"\n?", re.DOTALL)
+if uninstall:
+    new_text = pattern.sub("", text).rstrip()
+    if new_text:
+        new_text += "\n"
+else:
+    if pattern.search(text):
+        new_text = pattern.sub(block + "\n", text)
+    else:
+        sep = "\n\n" if text.strip() else ""
+        new_text = text.rstrip() + sep + block + "\n"
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(new_text)
+PY
+  info "Rule diperbarui: $file"
 }
 
 # ---------- per client ----------
 
 do_antigravity() {
   step "Antigravity"
-  local f="$HOME/.gemini/antigravity/mcp_config.json"
-  if [[ $UNINSTALL -eq 1 ]]; then edit_json "$f" "$NAME" ""; return; fi
-  edit_json "$f" "$NAME" "$(entry_json antigravity)"
+  local cfg_main="$HOME/.gemini/config/mcp_config.json"
+  local cfg_agy="$HOME/.gemini/antigravity/mcp_config.json"
+  local hooks_f="$HOME/.gemini/config/hooks.json"
+
+  if [[ $UNINSTALL -eq 1 ]]; then
+    edit_json "$cfg_main" "$NAME" ""
+    [[ -f "$cfg_agy" && ! -L "$cfg_agy" ]] && edit_json "$cfg_agy" "$NAME" ""
+    upsert_rule_section "$HOME/.gemini/GEMINI.md"
+    upsert_rule_section "$HOME/.gemini/config/GEMINI.md"
+    if [[ $DRY_RUN -eq 0 && -f "$hooks_f" ]]; then
+      python3 - "$hooks_f" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
+d.pop("mnemonic-auto-remember", None)
+json.dump(d, open(p, "w"), indent=2)
+PY
+    fi
+    return
+  fi
+
+  ensure_hook_bin
+  edit_json "$cfg_main" "$NAME" "$(entry_json antigravity)"
+  # Pastikan ~/.gemini/antigravity/mcp_config.json menunjuk ke ~/.gemini/config/mcp_config.json
+  if [[ $DRY_RUN -eq 0 ]]; then
+    mkdir -p "$(dirname "$cfg_agy")"
+    ln -sf "$cfg_main" "$cfg_agy"
+  fi
+  upsert_rule_section "$HOME/.gemini/GEMINI.md"
+  upsert_rule_section "$HOME/.gemini/config/GEMINI.md"
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    python3 - "$hooks_f" "$HOOK_BIN" <<'PY'
+import json, os, sys
+p, hook_bin = sys.argv[1], sys.argv[2]
+os.makedirs(os.path.dirname(p), exist_ok=True)
+d = {}
+if os.path.exists(p) and os.path.getsize(p) > 0:
+    with open(p) as f:
+        d = json.load(f)
+d["mnemonic-auto-remember"] = {
+    "enabled": True,
+    "Stop": [
+        {
+            "type": "command",
+            "command": hook_bin,
+            "timeout": 10
+        }
+    ]
+}
+with open(p, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+PY
+    info "Hook Stop dipasang: $hooks_f"
+  fi
   info "Di Antigravity: panel Agent > ... > MCP Servers > Manage MCP Servers > Refresh."
+}
+
+do_gemini() {
+  step "Gemini CLI"
+  local f="$HOME/.gemini/settings.json"
+  if [[ $UNINSTALL -eq 1 ]]; then
+    edit_json "$f" "$NAME" ""
+    upsert_rule_section "$HOME/.gemini/GEMINI.md"
+    if [[ $DRY_RUN -eq 0 && -f "$f" ]]; then
+      python3 - "$f" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+d = json.load(open(p))
+hooks = d.get("hooks", {})
+if "AfterAgent" in hooks:
+    hooks["AfterAgent"] = [x for x in hooks["AfterAgent"] if not any(h.get("name") == "mnemonic-auto-remember" for h in x.get("hooks", []))]
+json.dump(d, open(p, "w"), indent=2)
+PY
+    fi
+    return
+  fi
+
+  ensure_hook_bin
+  edit_json "$f" "$NAME" "$(entry_json gemini)"
+  upsert_rule_section "$HOME/.gemini/GEMINI.md"
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    python3 - "$f" "$HOOK_BIN" <<'PY'
+import json, os, sys
+p, hook_bin = sys.argv[1], sys.argv[2]
+d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
+hooks = d.setdefault("hooks", {})
+after_agent = hooks.setdefault("AfterAgent", [])
+after_agent = [x for x in after_agent if not any(h.get("name") == "mnemonic-auto-remember" for h in x.get("hooks", []))]
+after_agent.append({
+    "matcher": "*",
+    "hooks": [
+        {
+            "name": "mnemonic-auto-remember",
+            "type": "command",
+            "command": hook_bin,
+            "description": "Simpan percakapan otomatis ke Memori Hidup",
+            "timeout": 10000
+        }
+    ]
+})
+hooks["AfterAgent"] = after_agent
+with open(p, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+PY
+    info "Hook AfterAgent dipasang: $f"
+  fi
 }
 
 do_cursor() {
@@ -193,13 +361,67 @@ do_cursor() {
 
 do_claude() {
   step "Claude Code"
-  if ! command -v claude >/dev/null; then info "CLI 'claude' tidak ditemukan, dilewati."; return; fi
-  run claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
-  if [[ $UNINSTALL -eq 1 ]]; then info "Dihapus (scope user)."; return; fi
-  if [[ "$MODE" == "http" ]]; then
-    run claude mcp add -s user --transport http "$NAME" "$URL" --header "Authorization: Bearer $TOKEN"
+  local settings_f="$HOME/.claude/settings.json"
+  upsert_rule_section "$HOME/.claude/CLAUDE.md"
+
+  if [[ $UNINSTALL -eq 1 ]]; then
+    if command -v claude >/dev/null; then
+      run claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ $DRY_RUN -eq 0 && -f "$settings_f" ]]; then
+      python3 - "$settings_f" "$HOOK_BIN" <<'PY'
+import json, os, sys
+p, hook_bin = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+hooks = d.get("hooks", {})
+if "Stop" in hooks:
+    hooks["Stop"] = [x for x in hooks["Stop"] if not any(h.get("command") == hook_bin for h in x.get("hooks", []))]
+json.dump(d, open(p, "w"), indent=2)
+PY
+    fi
+    info "Dihapus (scope user)."
+    return
+  fi
+
+  ensure_hook_bin
+  if command -v claude >/dev/null; then
+    run claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
+    if [[ "$MODE" == "http" ]]; then
+      run claude mcp add -s user --transport http "$NAME" "$URL" --header "Authorization: Bearer $TOKEN"
+    else
+      run claude mcp add -s user "$NAME" -- "$BIN" --config "$CONFIG" mcp
+    fi
   else
-    run claude mcp add -s user "$NAME" -- "$BIN" --config "$CONFIG" mcp
+    info "CLI 'claude' tidak ditemukan, konfigurasi MCP dilewati."
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    python3 - "$settings_f" "$HOOK_BIN" <<'PY'
+import json, os, sys
+p, hook_bin = sys.argv[1], sys.argv[2]
+os.makedirs(os.path.dirname(p), exist_ok=True)
+d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
+perms = d.setdefault("permissions", {}).setdefault("allow", [])
+if "mcp__memori__*" not in perms:
+    perms.append("mcp__memori__*")
+hooks = d.setdefault("hooks", {})
+stop_hooks = hooks.setdefault("Stop", [])
+stop_hooks = [x for x in stop_hooks if not any(h.get("command") == hook_bin for h in x.get("hooks", []))]
+stop_hooks.append({
+    "hooks": [
+        {
+            "type": "command",
+            "command": hook_bin,
+            "timeout": 10
+        }
+    ]
+})
+hooks["Stop"] = stop_hooks
+with open(p, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+PY
+    info "Hook Stop & izin MCP dipasang: $settings_f"
   fi
 }
 

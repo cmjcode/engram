@@ -19,6 +19,30 @@ ditandatangani; kunci privatnya `~/.tauri/mnemonic-memory.key` (dipakai `build.s
 sebagai secret GitHub `TAURI_SIGNING_PRIVATE_KEY`). Manifest `latest.json` disusun oleh
 `scripts/updater-manifest.sh`. CLI `memory` belum ikut update otomatis; jalankan ulang `install.sh`.
 
+## Integrasi Agent AI (MCP, Rule & Hook Otomatis)
+
+`mnemonic-memory` dapat dihubungkan ke **Antigravity (IDE & CLI)**, **Gemini CLI**, **Claude Code**, dan **Cursor** sehingga setiap percakapan penting otomatis tersimpan ke memori hidup dan konteks masa lalu dapat diambil kapan saja:
+
+```sh
+# Pasang MCP server, Global Rule, dan Hook otomatis ke semua client yang terinstal
+./scripts/install-mcp.sh --client all
+
+# Atau pilih client tertentu: antigravity | gemini | claude | cursor
+./scripts/install-mcp.sh --client antigravity
+
+# Hapus integrasi dari semua client
+./scripts/install-mcp.sh --uninstall --client all
+```
+
+Apa saja yang dipasang oleh `scripts/install-mcp.sh`:
+
+1. **Server MCP (`memori`)**: Menyediakan tool `remember`, `recall`, `who_is`, `timeline`, `principles`, `persona_context`, `family_tree`, `memory_gaps`, dan `list_subjects` lewat HTTP (`http://127.0.0.1:7878/mcp`) dengan token tetap `MEMORY_TOKEN` (`LaunchAgent` `id.memorihidup.token`).
+2. **Global Rule (`GEMINI.md` & `CLAUDE.md`)**: Menginstruksikan agent di `~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, dan `~/.claude/CLAUDE.md` agar proaktif memanggil `remember` saat pengguna menceritakan kisah/fakta/prinsip hidup, serta memanggil `recall`/`who_is`/`timeline`/`principles` saat menjawab pertanyaan tentang masa lalu.
+3. **Hook Otomatis (`~/.local/bin/mnemonic-auto-remember`)**:
+   * Dipasang pada event `Stop` di Antigravity (`~/.gemini/config/hooks.json`) dan Claude Code (`~/.claude/settings.json`), serta `AfterAgent` di Gemini CLI (`~/.gemini/settings.json`).
+   * Setiap giliran percakapan selesai, script `scripts/auto-remember-hook.py` otomatis mengekstrak pesan pengguna & balasan asisten dari transkrip, menyaring duplikat, lalu mengirimnya ke pipeline `remember` (yang akan menyaring obrolan basa-basi lewat konfigurasi `[score]`).
+   * **Fallback Offline**: Bila aplikasi desktop / `memory serve` sedang tidak aktif, percakapan otomatis disimpan sebagai berkas `.md` ke `vault/inbox/` untuk diimpor otomatis begitu aplikasi dibuka kembali.
+
 **1\. Kategori "AI Legacy & Biographer" (Fokus ke Konsumen/Keluarga)** Platform ini memang dibuat khusus untuk merekam kisah hidup, suara, dan kenangan seseorang untuk diwariskan ke anak-cucu.
 
 > * **HereAfter AI & StoryFile:** Mengambil pendekatan wawancara interaktif. Pengguna menjawab ratusan pertanyaan tentang hidup mereka (via audio/video). Nantinya, keluarga bisa "mengobrol" dengan rekaman tersebut. *Kelemahannya:* Arsitektur di belakangnya masih sangat kaku (mirip sistem pencocokan Q\&A berbasis RAG sederhana), belum menjadi *cognitive engine* yang benar-benar bisa berpikir dengan pola pikir orang tersebut.  
