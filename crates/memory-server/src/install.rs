@@ -6,7 +6,7 @@
 //! hanya-pemilik (entri berisi token akses).
 //!
 //! Fitur ini hanya aktif bila server tahu alamat MCP-nya sendiri ([`crate::AppState::mcp_url`]),
-//! yaitu saat dijalankan aplikasi desktop atau `memory serve` di 127.0.0.1.
+//! yaitu saat dijalankan aplikasi desktop atau `engram serve` di 127.0.0.1.
 
 use std::path::{Path, PathBuf};
 

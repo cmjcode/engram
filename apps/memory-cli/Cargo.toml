@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "memory"
+name = "engram"
 path = "src/main.rs"
 
 [dependencies]

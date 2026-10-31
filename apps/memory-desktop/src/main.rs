@@ -2,7 +2,7 @@
 //!
 //! Satu proses berisi seluruh mesin: vault SurrealDB, worker job, scheduler,
 //! pemantau inbox, dan server HTTP lokal (UI + API + MCP). Jendela aplikasi
-//! menampilkan UI web yang sama dengan `memory serve`.
+//! menampilkan UI web yang sama dengan `engram serve`.
 //!
 //! - Data ada di folder data aplikasi (macOS: `~/Library/Application Support/id.engram.ai/`).
 //! - Menutup jendela hanya menyembunyikannya; worker tetap jalan dari ikon menu bar.

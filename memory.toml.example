@@ -22,7 +22,7 @@ max_retries = 2
 [embedding]                  # TEI bge-m3 (OpenAI-compatible /v1/embeddings)
 base_url = "http://localhost:8081/v1"
 model = "BAAI/bge-m3"
-dimension = 1024            # ganti model/dimensi -> jalankan `memory reembed`
+dimension = 1024            # ganti model/dimensi -> jalankan `engram reembed`
 batch_size = 32
 provider = "openai"         # "hash" = tanpa server (uji/offline, kualitas rendah)
 

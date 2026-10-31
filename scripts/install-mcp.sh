@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Pasang server MCP engram ke agent AI (Antigravity, Claude Code, Cursor).
 #
-# Mode http (bawaan): agent tersambung ke aplikasi desktop / `memory serve`
+# Mode http (bawaan): agent tersambung ke aplikasi desktop / `engram serve`
 #   lewat http://127.0.0.1:7878/mcp dengan token tetap (MEMORY_TOKEN).
-# Mode stdio: agent menjalankan binary `memory ... mcp` sendiri.
+# Mode stdio: agent menjalankan binary `engram ... mcp` sendiri.
 #   Hanya bisa dipakai saat aplikasi desktop TIDAK jalan (vault dikunci satu proses).
 #
 # Contoh:
@@ -23,7 +23,7 @@ DRY_RUN=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_DIR="$HOME/Library/Application Support/id.engram.ai"
 CONFIG="$DATA_DIR/memory.toml"
-BIN="$ROOT/target/release/memory"
+BIN="$ROOT/target/release/engram"
 TOKEN_FILE="$DATA_DIR/mcp_token"
 AGENT_LABEL="id.engram.ai.token"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
@@ -38,7 +38,7 @@ Pemakaian: $(basename "$0") [opsi]
   --name NAMA     nama server MCP                       (bawaan: engram)
   --token TOKEN   pakai token ini (mode http); bila kosong, pakai yang ada atau buat baru
   --config PATH   memory.toml untuk mode stdio          (bawaan: config aplikasi desktop)
-  --bin PATH      binary memory untuk mode stdio        (bawaan: target/release/memory)
+  --bin PATH      binary engram untuk mode stdio        (bawaan: target/release/engram)
   --uninstall     hapus server dari client terpilih
   --dry-run       tampilkan rencana tanpa mengubah apa pun
   -h, --help      bantuan ini
@@ -437,7 +437,7 @@ verify_http() {
     n="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["result"]["tools"]))' "$body" 2>/dev/null || echo "?")"
     info "OK: server menjawab, $n tool tersedia."
   elif [[ -z "$body" ]]; then
-    info "Server belum jalan. Buka aplikasi engram (atau 'memory serve'), lalu jalankan script ini lagi untuk cek."
+    info "Server belum jalan. Buka aplikasi engram (atau 'engram serve'), lalu jalankan script ini lagi untuk cek."
   else
     info "Server jalan tapi token ditolak. Keluar dari aplikasi lewat ikon menu bar > Keluar,"
     info "lalu buka lagi agar aplikasi memakai MEMORY_TOKEN yang baru."
@@ -456,7 +456,7 @@ if [[ $UNINSTALL -eq 0 ]]; then
     fi
   else
     if [[ ! -x "$BIN" ]]; then
-      step "Membangun binary memory"
+      step "Membangun binary engram"
       run cargo build --release -p memory-cli --manifest-path "$ROOT/Cargo.toml"
     fi
     [[ -f "$CONFIG" ]] || info "Peringatan: config $CONFIG belum ada."
@@ -472,7 +472,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   info "  launchctl bootout gui/$(id -u)/$AGENT_LABEL; rm \"$AGENT_PLIST\" \"$TOKEN_FILE\"; launchctl unsetenv MEMORY_TOKEN"
 elif [[ "$MODE" == "http" && $DRY_RUN -eq 0 ]]; then
   verify_http
-  info "Untuk 'memory serve' dari terminal: export MEMORY_TOKEN=\$(cat \"$TOKEN_FILE\")"
+  info "Untuk 'engram serve' dari terminal: export MEMORY_TOKEN=\$(cat \"$TOKEN_FILE\")"
 fi
 
 printf '\nSelesai.\n'

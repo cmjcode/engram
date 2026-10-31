@@ -450,7 +450,7 @@ async function connectAgents() {
   try { r = await api("/api/mcp/clients"); }
   catch (e) { $("#drawer-body").innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; return; }
   if (!r.enabled) {
-    $("#drawer-body").innerHTML = `<div class="card"><p>Pemasangan otomatis hanya tersedia di aplikasi desktop atau <code>memory serve</code> di 127.0.0.1.</p>
+    $("#drawer-body").innerHTML = `<div class="card"><p>Pemasangan otomatis hanya tersedia di aplikasi desktop atau <code>engram serve</code> di 127.0.0.1.</p>
       <p class="small muted">Pakai <code>scripts/install-mcp.sh</code> untuk server lain.</p></div>`;
     return;
   }

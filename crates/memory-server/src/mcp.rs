@@ -1,6 +1,6 @@
 //! Server MCP (Model Context Protocol): agent AI mengambil memori lewat tool.
 //!
-//! Transport: stdio (`memory mcp`, satu pesan JSON per baris) dan HTTP
+//! Transport: stdio (`engram mcp`, satu pesan JSON per baris) dan HTTP
 //! (`POST /mcp`, respons JSON). Logika temporal & guardrail ada di sisi
 //! server, sehingga LLM klien mana pun mendapat konteks yang sama jujurnya.
 

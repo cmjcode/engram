@@ -1,4 +1,4 @@
-//! `memory`: CLI platform engram.
+//! `engram`: CLI platform engram.
 
 mod bench;
 
@@ -17,7 +17,7 @@ use memory_jobs::Runtime;
 use memory_retrieve::RecallQuery;
 
 #[derive(Parser)]
-#[command(name = "memory", version, about = "Orkestrator memori engram (Rust + SurrealDB embedded)")]
+#[command(name = "engram", version, about = "Orkestrator memori engram (Rust + SurrealDB embedded)")]
 struct Cli {
     /// Berkas konfigurasi (default: ./memory.toml).
     #[arg(long, global = true, env = "MEMORY_CONFIG", default_value = "memory.toml")]

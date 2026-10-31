@@ -2,7 +2,7 @@
 
 ## Instalasi
 
-macOS / Linux — memasang CLI `memory` dan aplikasi desktop `engram`:
+macOS / Linux — memasang CLI `engram` dan aplikasi desktop `engram`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cmjcode/engram/main/install.sh | sh
@@ -17,7 +17,7 @@ Linux lewat `.deb`/`.rpm` (atau AppImage bila tanpa sudo). Windows: unduh `.exe`
 lewat menu tray **Periksa update**. Update dipasang setelah disetujui, lalu aplikasi dibuka ulang. Paket update
 ditandatangani; kunci privatnya `~/.tauri/engram.key` (dipakai `build.sh`, dan harus disimpan juga
 sebagai secret GitHub `TAURI_SIGNING_PRIVATE_KEY`). Manifest `latest.json` disusun oleh
-`scripts/updater-manifest.sh`. CLI `memory` belum ikut update otomatis; jalankan ulang `install.sh`.
+`scripts/updater-manifest.sh`. CLI `engram` belum ikut update otomatis; jalankan ulang `install.sh`.
 
 ## Integrasi Agent AI (MCP, Rule & Hook Otomatis)
 
@@ -41,7 +41,7 @@ Apa saja yang dipasang oleh `scripts/install-mcp.sh`:
 3. **Hook Otomatis (`~/.local/bin/engram-auto-remember`)**:
    * Dipasang pada event `Stop` di Antigravity (`~/.gemini/config/hooks.json`) dan Claude Code (`~/.claude/settings.json`), serta `AfterAgent` di Gemini CLI (`~/.gemini/settings.json`).
    * Setiap giliran percakapan selesai, script `scripts/auto-remember-hook.py` otomatis mengekstrak pesan pengguna & balasan asisten dari transkrip, menyaring duplikat, lalu mengirimnya ke pipeline `remember` (yang akan menyaring obrolan basa-basi lewat konfigurasi `[score]`).
-   * **Fallback Offline**: Bila aplikasi desktop / `memory serve` sedang tidak aktif, percakapan otomatis disimpan sebagai berkas `.md` ke `vault/inbox/` untuk diimpor otomatis begitu aplikasi dibuka kembali.
+   * **Fallback Offline**: Bila aplikasi desktop / `engram serve` sedang tidak aktif, percakapan otomatis disimpan sebagai berkas `.md` ke `vault/inbox/` untuk diimpor otomatis begitu aplikasi dibuka kembali.
 
 **1\. Kategori "AI Legacy & Biographer" (Fokus ke Konsumen/Keluarga)** Platform ini memang dibuat khusus untuk merekam kisah hidup, suara, dan kenangan seseorang untuk diwariskan ke anak-cucu.
 

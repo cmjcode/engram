@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installer engram: CLI `memory` + aplikasi desktop.
+# Installer engram: CLI `engram` + aplikasi desktop.
 #
 #   curl -fsSL https://raw.githubusercontent.com/cmjcode/engram/main/install.sh | sh
 #
@@ -19,7 +19,7 @@ set -eu
 
 REPO="cmjcode/engram"
 APP_NAME="engram"
-CLI_NAME="memory"
+CLI_NAME="engram"
 
 WANT_CLI=1
 WANT_DESKTOP=1
@@ -34,7 +34,7 @@ die()  { printf '\033[1;31mGagal:\033[0m %s\n' "$*" >&2; exit 1; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 
 usage() { cat <<'EOF'
-Installer engram: CLI `memory` + aplikasi desktop.
+Installer engram: CLI `engram` + aplikasi desktop.
 
   curl -fsSL https://raw.githubusercontent.com/cmjcode/engram/main/install.sh | sh
   curl -fsSL .../install.sh | sh -s -- [opsi]
@@ -179,7 +179,7 @@ install_desktop_macos() {
   dest="/Applications"
   [ -w "$dest" ] || { dest="$HOME/Applications"; mkdir -p "$dest"; }
   target="$dest/$(basename "$app")"
-  if pgrep -xq "$APP_NAME"; then
+  if pgrep -xq "$APP_NAME" || pgrep -xq "${APP_NAME}-desktop"; then
     warn "$APP_NAME sedang berjalan; tutup lalu buka lagi agar versi baru dipakai"
   fi
   rm -rf "$target"
@@ -203,8 +203,8 @@ install_appimage() {
   mkdir -p "$BIN_DIR"
   download "$url" "$TMP/app.AppImage"
   verify "$TMP/app.AppImage" "$url"
-  cp "$TMP/app.AppImage" "$BIN_DIR/$APP_NAME"
-  chmod 755 "$BIN_DIR/$APP_NAME"
+  cp "$TMP/app.AppImage" "$BIN_DIR/${APP_NAME}-desktop"
+  chmod 755 "$BIN_DIR/${APP_NAME}-desktop"
 
   apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
   mkdir -p "$apps"
@@ -213,11 +213,11 @@ install_appimage() {
 Type=Application
 Name=$APP_NAME
 Comment=Arsip memori pribadi engram
-Exec=$BIN_DIR/$APP_NAME
+Exec=$BIN_DIR/${APP_NAME}-desktop
 Terminal=false
 Categories=Office;Utility;
 EOF
-  info "Aplikasi terpasang (AppImage): $BIN_DIR/$APP_NAME"
+  info "Aplikasi terpasang (AppImage): $BIN_DIR/${APP_NAME}-desktop"
   INSTALLED="$INSTALLED desktop"
   has fusermount || has fusermount3 || warn "AppImage butuh FUSE (mis. sudo apt install libfuse2)"
 }

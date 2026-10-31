@@ -98,11 +98,11 @@ jobs:
           target="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p dist
           if [ "$RUNNER_OS" = "Windows" ]; then
-            name="memory-$ver-$target.zip"
-            7z a "dist/$name" ./target/release/memory.exe
+            name="engram-$ver-$target.zip"
+            7z a "dist/$name" ./target/release/engram.exe
           else
-            name="memory-$ver-$target.tar.gz"
-            tar -czf "dist/$name" -C target/release memory
+            name="engram-$ver-$target.tar.gz"
+            tar -czf "dist/$name" -C target/release engram
           fi
           (cd dist && sha256sum "$name" > "$name.sha256")
           ls -la dist
