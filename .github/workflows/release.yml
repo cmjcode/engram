@@ -47,9 +47,11 @@ jobs:
           - os: windows-latest
             bundles: nsis,msi
             files: target/release/bundle/nsis/*.exe target/release/bundle/msi/*.msi
+            sigs: target/release/bundle/nsis/*.sig target/release/bundle/msi/*.sig
           - os: ubuntu-22.04
             bundles: deb,rpm,appimage
             files: target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm target/release/bundle/appimage/*.AppImage
+            sigs: target/release/bundle/deb/*.sig target/release/bundle/rpm/*.sig target/release/bundle/appimage/*.sig
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +82,10 @@ jobs:
 
       - name: Build bundle
         working-directory: apps/memory-desktop
+        env:
+          # Kunci penandatanganan paket update (createUpdaterArtifacts).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --bundles ${{ matrix.bundles }}
 
       - name: Build CLI
@@ -106,5 +112,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls -la ${{ matrix.files }}
-          gh release upload "$TAG" ${{ matrix.files }} dist/* -R "$GITHUB_REPOSITORY" --clobber
+          shopt -s nullglob
+          sigs=(${{ matrix.sigs }})
+          ls -la ${{ matrix.files }} "${sigs[@]}"
+          [ ${#sigs[@]} -gt 0 ] || { echo "::error::tanda tangan update (.sig) tidak ditemukan"; exit 1; }
+          gh release upload "$TAG" ${{ matrix.files }} "${sigs[@]}" dist/* -R "$GITHUB_REPOSITORY" --clobber
+
+  # latest.json untuk auto update. build.sh (macOS) juga menjalankannya;
+  # yang terakhir selesai menghasilkan manifest lengkap.
+  updater-manifest:
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Susun & unggah latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/updater-manifest.sh "$TAG" "$GITHUB_REPOSITORY"

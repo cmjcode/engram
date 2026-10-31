@@ -13,6 +13,12 @@ Opsi: `--cli-only`, `--desktop-only`, `--version 0.0.2`, `--bin-dir ~/bin`, `--a
 Linux lewat `.deb`/`.rpm` (atau AppImage bila tanpa sudo). Windows: unduh `.exe`/`.msi` dari
 [Releases](https://github.com/cmjcode/mnemonic-memory/releases).
 
+**Update otomatis.** Aplikasi desktop memeriksa rilis baru tak lama setelah dibuka dan setiap 6 jam, atau
+lewat menu tray **Periksa update**. Update dipasang setelah disetujui, lalu aplikasi dibuka ulang. Paket update
+ditandatangani; kunci privatnya `~/.tauri/mnemonic-memory.key` (dipakai `build.sh`, dan harus disimpan juga
+sebagai secret GitHub `TAURI_SIGNING_PRIVATE_KEY`). Manifest `latest.json` disusun oleh
+`scripts/updater-manifest.sh`. CLI `memory` belum ikut update otomatis; jalankan ulang `install.sh`.
+
 **1\. Kategori "AI Legacy & Biographer" (Fokus ke Konsumen/Keluarga)** Platform ini memang dibuat khusus untuk merekam kisah hidup, suara, dan kenangan seseorang untuk diwariskan ke anak-cucu.
 
 > * **HereAfter AI & StoryFile:** Mengambil pendekatan wawancara interaktif. Pengguna menjawab ratusan pertanyaan tentang hidup mereka (via audio/video). Nantinya, keluarga bisa "mengobrol" dengan rekaman tersebut. *Kelemahannya:* Arsitektur di belakangnya masih sangat kaku (mirip sistem pencocokan Q\&A berbasis RAG sederhana), belum menjadi *cognitive engine* yang benar-benar bisa berpikir dengan pola pikir orang tersebut.  

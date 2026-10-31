@@ -8,8 +8,11 @@
 //! - Menutup jendela hanya menyembunyikannya; worker tetap jalan dari ikon menu bar.
 //! - Alamat & token MCP ditulis ke `connection.json` di folder data, untuk agent AI.
 //!   Tombol "Hubungkan agent AI" di UI mendaftarkannya ke Antigravity, VS Code, atau Claude Code.
+//! - Update otomatis dari GitHub Release (lihat `update.rs`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod update;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -188,9 +191,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Buka mnemonic-memory", true, None::<&str>)?;
     let inbox = MenuItem::with_id(app, "inbox", "Buka folder inbox", true, None::<&str>)?;
     let data = MenuItem::with_id(app, "data", "Buka folder data", true, None::<&str>)?;
+    let version = format!("Versi {}", app.package_info().version);
+    let version = MenuItem::with_id(app, "version", version, false, None::<&str>)?;
+    let check_update = MenuItem::with_id(app, "check_update", "Periksa update", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Keluar", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &inbox, &data, &sep, &quit])?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&open, &inbox, &data, &sep, &version, &check_update, &sep2, &quit])?;
     let mut tray = TrayIconBuilder::with_id("main").tooltip("mnemonic-memory").menu(&menu).show_menu_on_left_click(true);
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
@@ -205,6 +212,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 open_in_file_manager(&dir);
             }
             "data" => open_in_file_manager(&desktop.data_dir),
+            "check_update" => {
+                tauri::async_runtime::spawn(update::check(app.clone(), true));
+            }
             "quit" => app.exit(0),
             _ => {}
         }
@@ -214,6 +224,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// Hentikan worker & server dengan rapi agar database tertutup bersih.
+/// Aman dipanggil lebih dari sekali (panggilan berikutnya tidak berbuat apa-apa).
 fn stop_engine(app: &AppHandle) {
     let desktop = app.state::<Desktop>();
     let _ = desktop.shutdown.send(true);
@@ -235,6 +246,8 @@ fn main() {
         .init();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -246,6 +259,10 @@ fn main() {
             }
             build_main_window(app.handle(), &started)?;
             build_tray(app.handle())?;
+            // Tidak dimasukkan ke `tasks`: tidak memegang database, dan stop_engine
+            // bisa dipanggil dari dalam proses update itu sendiri.
+            let stop = app.state::<Desktop>().shutdown.subscribe();
+            tauri::async_runtime::spawn(update::run_background(app.handle().clone(), stop));
             Ok(())
         })
         .on_window_event(|window, event| {
