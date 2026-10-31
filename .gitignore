@@ -1,0 +1,11 @@
+/target
+.DS_Store
+
+# Skrip rilis lokal (berisi kredensial notarisasi)
+/build.sh
+
+# File hasil generate tauri-build
+/apps/memory-desktop/gen/schemas
+
+# Konfigurasi lokal
+/memory.toml
