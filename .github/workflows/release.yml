@@ -82,10 +82,29 @@ jobs:
         working-directory: apps/memory-desktop
         run: cargo tauri build --bundles ${{ matrix.bundles }}
 
+      - name: Build CLI
+        run: cargo build --release --locked -p memory-cli
+
+      - name: Paket CLI (+ sha256)
+        shell: bash
+        run: |
+          ver="${TAG#v}"
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            name="memory-$ver-$target.zip"
+            7z a "dist/$name" ./target/release/memory.exe
+          else
+            name="memory-$ver-$target.tar.gz"
+            tar -czf "dist/$name" -C target/release memory
+          fi
+          (cd dist && sha256sum "$name" > "$name.sha256")
+          ls -la dist
+
       - name: Upload ke GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -la ${{ matrix.files }}
-          gh release upload "$TAG" ${{ matrix.files }} -R "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" ${{ matrix.files }} dist/* -R "$GITHUB_REPOSITORY" --clobber

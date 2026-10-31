@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "memori-hidup"
+name = "mnemonic-memory"
 path = "src/main.rs"
 
 [build-dependencies]
