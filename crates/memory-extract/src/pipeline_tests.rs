@@ -199,7 +199,7 @@ async fn decisions_and_trait_signals_keep_only_supported_quotes() {
 
 #[tokio::test]
 async fn offline_llm_falls_back_and_commits_episode() {
-    let (p, _d) = pipeline_with(|_req| Err(memory_llm::LlmError::Invalid("llm offline".into()))).await;
+    let (p, _d) = pipeline_with(|_req| Err(memory_llm::LlmError::Other("llm offline".into()))).await;
     p.ensure_subject("budi", Some("Budi")).await.unwrap();
     let src = ingest(
         &p,
