@@ -198,6 +198,7 @@ pub fn edit_config(path: &Path, servers_key: &str, value: Option<Value>) -> Resu
     let servers = servers.as_object_mut().ok_or_else(|| format!("'{servers_key}' di {} bukan objek", path.display()))?;
     match value {
         Some(v) => {
+            servers.remove("memori");
             servers.insert(SERVER_NAME.into(), v);
         }
         None => {
@@ -279,8 +280,72 @@ async fn claude_cli(dirs: &Dirs, url: Option<(&str, Option<&str>)>) -> Result<()
     }
 }
 
+const RULE_START: &str = "<!-- ENGRAM_START -->";
+const RULE_END: &str = "<!-- ENGRAM_END -->";
+const LEGACY_RULE_START: &str = "<!-- MNEMONIC_MEMORY_START -->";
+const LEGACY_RULE_END: &str = "<!-- MNEMONIC_MEMORY_END -->";
+
+const RULE_BLOCK: &str = "<!-- ENGRAM_START -->
+## Engram (`engram` MCP)
+
+- **Simpan Otomatis (`remember`)**: Saat pengguna menceritakan kisah hidup, fakta pribadi/keluarga, pengalaman masa lalu, preferensi, atau keputusan penting (termasuk keputusan arsitektur/teknis di project), panggil tool MCP `remember` (dari server `engram`) untuk menyimpannya tanpa perlu diminta. Isi parameter `source` dengan format `<client>:<nama-project>` (misal `antigravity:LLM-MEMORY`) dan sebutkan nama project di dalam `text` bila konteksnya spesifik pada project tersebut.
+- **Ambil Konteks (`recall`, `who_is`, `timeline`, `principles`, `family_tree`)**: Saat pengguna bertanya tentang masa lalu, anggota keluarga, relasi seseorang, kronologi peristiwa, prinsip hidup, atau konteks project sebelumnya, panggil tool MCP `engram` yang relevan terlebih dahulu sebelum menjawab. Untuk mencari memori spesifik project saat ini, sertakan nama project di `query` pada `recall` atau `entity` pada `timeline`. Selalu bedakan fakta yang masih berlaku sekarang dengan riwayat masa lalu.
+<!-- ENGRAM_END -->";
+
+fn strip_marker_block(text: &str, start: &str, end: &str) -> String {
+    let Some(s) = text.find(start) else { return text.to_string() };
+    let Some(e_rel) = text[s..].find(end) else { return text.to_string() };
+    let mut e = s + e_rel + end.len();
+    if text[e..].starts_with('\n') {
+        e += 1;
+    }
+    format!("{}{}", &text[..s], &text[e..])
+}
+
+fn upsert_rule_file(path: &Path, uninstall: bool) -> Result<(), String> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("membaca {}: {e}", path.display())),
+    };
+    let cleaned = strip_marker_block(&existing, LEGACY_RULE_START, LEGACY_RULE_END);
+    let without_engram = strip_marker_block(&cleaned, RULE_START, RULE_END);
+    let new_text = if uninstall {
+        let trimmed = without_engram.trim_end();
+        if trimmed.is_empty() { String::new() } else { format!("{trimmed}\n") }
+    } else {
+        let trimmed = without_engram.trim_end();
+        if trimmed.is_empty() {
+            format!("{RULE_BLOCK}\n")
+        } else {
+            format!("{trimmed}\n\n{RULE_BLOCK}\n")
+        }
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("membuat {}: {e}", dir.display()))?;
+    }
+    std::fs::write(path, new_text).map_err(|e| format!("menulis {}: {e}", path.display()))
+}
+
+fn sync_client_rules(dirs: &Dirs, c: Client, uninstall: bool) {
+    let files: Vec<PathBuf> = match c {
+        Client::Antigravity => vec![
+            dirs.home.join(".gemini").join("GEMINI.md"),
+            dirs.home.join(".gemini").join("config").join("GEMINI.md"),
+        ],
+        Client::ClaudeCode => vec![dirs.home.join(".claude").join("CLAUDE.md")],
+        Client::Vscode => vec![],
+    };
+    for f in files {
+        if let Err(e) = upsert_rule_file(&f, uninstall) {
+            tracing::warn!(error = %e, path = %f.display(), "gagal memperbarui rule client");
+        }
+    }
+}
+
 /// Pasang server ke client. Mengembalikan pesan untuk pengguna.
 pub async fn install(dirs: &Dirs, c: Client, url: &str, token: Option<&str>) -> Result<String, String> {
+    sync_client_rules(dirs, c, false);
     let path = dirs.config_file(c);
     if c == Client::ClaudeCode {
         match claude_cli(dirs, Some((url, token))).await {
@@ -295,6 +360,7 @@ pub async fn install(dirs: &Dirs, c: Client, url: &str, token: Option<&str>) -> 
 
 /// Hapus server dari client.
 pub async fn uninstall(dirs: &Dirs, c: Client) -> Result<String, String> {
+    sync_client_rules(dirs, c, true);
     if c == Client::ClaudeCode {
         let _ = claude_cli(dirs, None).await;
     }

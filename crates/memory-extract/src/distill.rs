@@ -122,12 +122,18 @@ impl Pipeline {
             .iter()
             .map(|(_, d)| format!("situasi: {} | tindakan: {} | alasan: {}", d.situation, d.action, d.reason.clone().unwrap_or_default()))
             .collect();
-        let vecs = self.embedder.embed(&texts).await?;
+        let vecs = match self.embedder.embed(&texts).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding distilasi prinsip gagal; dilewati");
+                return Ok(());
+            }
+        };
         let existing = self.store.list_principles(subject, None).await?;
         let existing_vecs = if existing.is_empty() {
             vec![]
         } else {
-            self.embedder.embed(&existing.iter().map(|p| p.statement.clone()).collect::<Vec<_>>()).await?
+            self.embedder.embed(&existing.iter().map(|p| p.statement.clone()).collect::<Vec<_>>()).await.unwrap_or_default()
         };
         for members in greedy_clusters(&vecs, dc.cluster_similarity) {
             let cluster_eps: Vec<&Episode> = members.iter().map(|&i| items[i].0).collect();
@@ -174,8 +180,10 @@ impl Pipeline {
                 .collect();
             let confidence = v.confidence.clamp(0.0, 1.0);
             let status = if confidence >= dc.auto_accept_confidence { ReflectiveStatus::Active } else { ReflectiveStatus::PendingReview };
-            let stmt_vec = self.embedder.embed_one(&proposal.statement).await?;
-            let dup = existing.iter().zip(&existing_vecs).find(|(_, ev)| cosine(ev, &stmt_vec) >= 0.85).map(|(p, _)| p.clone());
+            let stmt_vec = self.embedder.embed_one(&proposal.statement).await.ok();
+            let dup = stmt_vec
+                .as_ref()
+                .and_then(|sv| existing.iter().zip(&existing_vecs).find(|(_, ev)| cosine(ev, sv) >= 0.85).map(|(p, _)| p.clone()));
             let principle = match dup {
                 Some(mut p) => {
                     for ev in evidence {
@@ -224,12 +232,13 @@ impl Pipeline {
         let mut labels: Vec<String> = signals.iter().map(|(_, t)| normalize(&t.label)).collect();
         labels.sort();
         labels.dedup();
-        let lvecs = self.embedder.embed(&labels).await?;
         let mut canon: BTreeMap<String, String> = BTreeMap::new();
-        for g in greedy_clusters(&lvecs, 0.88) {
-            let head = labels[g[0]].clone();
-            for i in g {
-                canon.insert(labels[i].clone(), head.clone());
+        if let Ok(lvecs) = self.embedder.embed(&labels).await {
+            for g in greedy_clusters(&lvecs, 0.88) {
+                let head = labels[g[0]].clone();
+                for i in g {
+                    canon.insert(labels[i].clone(), head.clone());
+                }
             }
         }
         let mut by_label: BTreeMap<String, Vec<(&Episode, &TraitSignal)>> = BTreeMap::new();

@@ -57,7 +57,8 @@ fn check(s: &str) -> Result<(), ApiError> {
 
 async fn list_subjects(State(st): State<AppState>) -> ApiResult<Value> {
     let subjects = st.rt.store.list_subjects().await?;
-    Ok(Json(json!({"subjects": subjects, "default": st.default_subject()})))
+    let def = st.resolve_subject(None).await;
+    Ok(Json(json!({"subjects": subjects, "default": def})))
 }
 
 #[derive(Deserialize)]

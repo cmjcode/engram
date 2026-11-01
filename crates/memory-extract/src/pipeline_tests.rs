@@ -196,3 +196,20 @@ async fn decisions_and_trait_signals_keep_only_supported_quotes() {
     assert_eq!(eps[0].trait_signals.len(), 1);
     assert!(eps[0].emotions.is_empty());
 }
+
+#[tokio::test]
+async fn offline_llm_falls_back_and_commits_episode() {
+    let (p, _d) = pipeline_with(|_req| Err(memory_llm::LlmError::Invalid("llm offline".into()))).await;
+    p.ensure_subject("budi", Some("Budi")).await.unwrap();
+    let src = ingest(
+        &p,
+        SourceKind::AgentConversation,
+        "Untuk project LLM-MEMORY, kita memutuskan memakai RocksDB sebagai storage engine utama dan BAAI/bge-m3 untuk embedding.",
+    )
+    .await;
+    assert_eq!(src.status, SourceStatus::Done);
+    assert_eq!(src.stats.episodes, 1);
+    let eps = p.store.list_episodes("budi", &Default::default()).await.unwrap();
+    assert_eq!(eps.len(), 1);
+    assert!(eps[0].text.contains("RocksDB"));
+}

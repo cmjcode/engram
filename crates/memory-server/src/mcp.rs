@@ -100,7 +100,7 @@ fn text_result(text: String, structured: Option<Value>) -> Value {
 }
 
 async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, String> {
-    let subject = args["subject"].as_str().filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| st.default_subject());
+    let subject = st.resolve_subject(args["subject"].as_str()).await;
     if !memory_core::ids::is_valid_id(&subject) {
         return Err(format!("subjek tidak valid: {subject}"));
     }

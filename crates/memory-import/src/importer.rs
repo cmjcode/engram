@@ -201,7 +201,15 @@ impl Importer {
                 collect_files(&p, &mut files)?;
                 candidates.extend(files.into_iter().map(|f| (n.clone(), f)));
             } else if p.is_file() {
-                candidates.push((default_subject.to_string(), p));
+                let mut subj = default_subject.to_string();
+                if subj == "default"
+                    && let Ok(subs) = self.pipeline.store.list_subjects().await
+                    && !subs.iter().any(|s| s.id == "default")
+                    && let Some(first) = subs.first()
+                {
+                    subj = first.id.clone();
+                }
+                candidates.push((subj, p));
             }
         }
         let now = std::time::SystemTime::now();

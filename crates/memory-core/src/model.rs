@@ -47,10 +47,19 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    /// Sumber biografis (wawancara, memoar, catatan) diperlakukan sebagai
+    /// Sumber biografis (wawancara, memoar, catatan, percakapan agent) diperlakukan sebagai
     /// sinyal kuat; sumber volume tinggi (chat, lifelog) harus lolos skor.
     pub fn is_biographic(self) -> bool {
-        matches!(self, SourceKind::Interview | SourceKind::Memoir | SourceKind::Note | SourceKind::Document | SourceKind::Audio | SourceKind::Photo)
+        matches!(
+            self,
+            SourceKind::Interview
+                | SourceKind::Memoir
+                | SourceKind::Note
+                | SourceKind::Document
+                | SourceKind::Audio
+                | SourceKind::Photo
+                | SourceKind::AgentConversation
+        )
     }
 
     pub fn parse(s: &str) -> Option<Self> {

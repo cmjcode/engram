@@ -39,6 +39,25 @@ impl AppState {
     pub fn default_subject(&self) -> String {
         self.rt.cfg.vault.default_subject.clone()
     }
+
+    pub async fn resolve_subject(&self, requested: Option<&str>) -> String {
+        if let Some(s) = requested.filter(|s| !s.trim().is_empty()) {
+            return s.to_string();
+        }
+        let def = self.default_subject();
+        if def != "default" {
+            return def;
+        }
+        if let Ok(subs) = self.rt.store.list_subjects().await {
+            if subs.iter().any(|s| s.id == "default") {
+                return def;
+            }
+            if let Some(first) = subs.first() {
+                return first.id.clone();
+            }
+        }
+        def
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

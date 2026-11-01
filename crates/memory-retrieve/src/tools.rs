@@ -153,10 +153,11 @@ impl Retriever {
         if let Some(e) = c.into_iter().next() {
             return Ok(Some(e));
         }
-        let v = self.embedder.embed_one(name).await?;
-        for h in self.store.vector_index().search("entity", subject, &v, 1, "status != 'merged'").await? {
-            if h.similarity >= 0.6 {
-                return Ok(self.store.get_entity(&h.id).await?);
+        if let Ok(v) = self.embedder.embed_one(name).await {
+            for h in self.store.vector_index().search("entity", subject, &v, 1, "status != 'merged'").await? {
+                if h.similarity >= 0.6 {
+                    return Ok(self.store.get_entity(&h.id).await?);
+                }
             }
         }
         Ok(None)
@@ -320,9 +321,13 @@ impl Retriever {
         let all = self.store.list_principles(subject, Some(ReflectiveStatus::Active)).await?;
         let rel: Vec<f32> = match situation.filter(|s| !s.trim().is_empty()) {
             Some(s) if !all.is_empty() => {
-                let q = self.embedder.embed_one(s).await?;
-                let vs = self.embedder.embed(&all.iter().map(|p| p.statement.clone()).collect::<Vec<_>>()).await?;
-                vs.iter().map(|v| cosine(v, &q)).collect()
+                if let Ok(q) = self.embedder.embed_one(s).await
+                    && let Ok(vs) = self.embedder.embed(&all.iter().map(|p| p.statement.clone()).collect::<Vec<_>>()).await
+                {
+                    vs.iter().map(|v| cosine(v, &q)).collect()
+                } else {
+                    all.iter().map(|p| p.confidence).collect()
+                }
             }
             _ => all.iter().map(|p| p.confidence).collect(),
         };

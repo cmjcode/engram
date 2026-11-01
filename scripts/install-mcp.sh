@@ -145,6 +145,7 @@ if os.path.exists(path) and os.path.getsize(path) > 0:
     with open(path) as f:
         data = json.load(f)
 servers = data.setdefault("mcpServers", {})
+servers.pop("memori", None)
 if entry:
     servers[name] = json.loads(entry)
 else:
@@ -192,6 +193,7 @@ ensure_hook_bin() {
   mkdir -p "$(dirname "$HOOK_BIN")"
   cp "$HOOK_SRC" "$HOOK_BIN"
   chmod 755 "$HOOK_BIN"
+  rm -f "$HOME/.local/bin/mnemonic-auto-remember"
 }
 
 upsert_rule_section() {
@@ -206,6 +208,8 @@ import os, re, sys
 path, uninstall = sys.argv[1], sys.argv[2] == "1"
 marker_start = "<!-- ENGRAM_START -->"
 marker_end = "<!-- ENGRAM_END -->"
+legacy_start = "<!-- MNEMONIC_MEMORY_START -->"
+legacy_end = "<!-- MNEMONIC_MEMORY_END -->"
 block = f"""{marker_start}
 ## Engram (`engram` MCP)
 
@@ -217,6 +221,9 @@ text = ""
 if os.path.exists(path):
     with open(path, "r", encoding="utf-8") as f:
         text = f.read()
+
+legacy_pattern = re.compile(re.escape(legacy_start) + r".*?" + re.escape(legacy_end) + r"\n?", re.DOTALL)
+text = legacy_pattern.sub("", text)
 
 pattern = re.compile(re.escape(marker_start) + r".*?" + re.escape(marker_end) + r"\n?", re.DOTALL)
 if uninstall:
@@ -280,6 +287,7 @@ d = {}
 if os.path.exists(p) and os.path.getsize(p) > 0:
     with open(p) as f:
         d = json.load(f)
+d.pop("mnemonic-auto-remember", None)
 d["engram-auto-remember"] = {
     "enabled": True,
     "Stop": [
@@ -330,7 +338,7 @@ p, hook_bin = sys.argv[1], sys.argv[2]
 d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
 hooks = d.setdefault("hooks", {})
 after_agent = hooks.setdefault("AfterAgent", [])
-after_agent = [x for x in after_agent if not any(h.get("name") == "engram-auto-remember" for h in x.get("hooks", []))]
+after_agent = [x for x in after_agent if not any(h.get("name") in ("engram-auto-remember", "mnemonic-auto-remember") for h in x.get("hooks", []))]
 after_agent.append({
     "matcher": "*",
     "hooks": [
@@ -367,6 +375,7 @@ do_claude() {
   if [[ $UNINSTALL -eq 1 ]]; then
     if command -v claude >/dev/null; then
       run claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
+    run claude mcp remove -s user "memori" >/dev/null 2>&1 || true
     fi
     if [[ $DRY_RUN -eq 0 && -f "$settings_f" ]]; then
       python3 - "$settings_f" "$HOOK_BIN" <<'PY'
@@ -386,6 +395,7 @@ PY
   ensure_hook_bin
   if command -v claude >/dev/null; then
     run claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
+    run claude mcp remove -s user "memori" >/dev/null 2>&1 || true
     if [[ "$MODE" == "http" ]]; then
       run claude mcp add -s user --transport http "$NAME" "$URL" --header "Authorization: Bearer $TOKEN"
     else
@@ -402,11 +412,13 @@ p, hook_bin = sys.argv[1], sys.argv[2]
 os.makedirs(os.path.dirname(p), exist_ok=True)
 d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
 perms = d.setdefault("permissions", {}).setdefault("allow", [])
+if "mcp__memori__*" in perms:
+    perms.remove("mcp__memori__*")
 if "mcp__engram__*" not in perms:
     perms.append("mcp__engram__*")
 hooks = d.setdefault("hooks", {})
 stop_hooks = hooks.setdefault("Stop", [])
-stop_hooks = [x for x in stop_hooks if not any(h.get("command") == hook_bin for h in x.get("hooks", []))]
+stop_hooks = [x for x in stop_hooks if not any(h.get("command") == hook_bin or "mnemonic-auto-remember" in str(h.get("command", "")) for h in x.get("hooks", []))]
 stop_hooks.append({
     "hooks": [
         {

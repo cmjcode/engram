@@ -201,8 +201,13 @@ impl<'a> Resolver<'a> {
             episode_ids: vec![],
             created_at: now_rfc3339(),
         };
-        let emb = self.p.embedder.embed_one(&entity_embed_text(&probe)).await?;
-        let hits = self.p.store.vector_index().search("entity", &self.subject.id, &emb, 3, "status != 'merged' AND is_self != true").await?;
+        let hits = match self.p.embedder.embed_one(&entity_embed_text(&probe)).await {
+            Ok(emb) => self.p.store.vector_index().search("entity", &self.subject.id, &emb, 3, "status != 'merged' AND is_self != true").await?,
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding entitas probe gagal; dilewati");
+                vec![]
+            }
+        };
         let pc = &self.p.cfg.pipeline;
         for hit in hits {
             if hit.similarity < pc.entity_review {

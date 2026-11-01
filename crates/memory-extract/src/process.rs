@@ -177,12 +177,21 @@ impl Pipeline {
         }
         self.progress(job_id, "score", 0, segments.len()).await;
         let texts: Vec<String> = segments.iter().map(|s| s.text.clone()).collect();
-        let embs = self.embedder.embed(&texts).await?;
+        let embs: Vec<Option<Vec<f32>>> = match self.embedder.embed(&texts).await {
+            Ok(v) => v.into_iter().map(Some).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding segmen gagal; lanjut tanpa pencarian kemiripan vektor");
+                vec![None; texts.len()]
+            }
+        };
         let alias_keys = self.known_alias_keys(&subject.id).await?;
         let index = self.store.vector_index();
         let mut items = Vec::with_capacity(segments.len());
         for (seg, emb) in segments.into_iter().zip(embs) {
-            let hits = index.search("episode", &subject.id, &emb, 1, "status = 'active'").await?;
+            let hits = match &emb {
+                Some(v) => index.search("episode", &subject.id, v, 1, "status = 'active'").await?,
+                None => vec![],
+            };
             let top = hits.first().map(|h| h.similarity).unwrap_or(0.0);
             let score_text = crate::segment::strip_chat_prefix(&seg.text);
             let padded = format!(" {} ", normalize(&score_text));
@@ -212,7 +221,23 @@ impl Pipeline {
         .collect()
         .await;
         for (i, r) in results {
-            items[i].extraction = Some(r?);
+            let ext = match r {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ekstraksi LLM gagal; memakai fallback segmen");
+                    let clean = crate::segment::strip_chat_prefix(&items[i].seg.text);
+                    ExtractionOut {
+                        title: if items[i].seg.topic.trim().is_empty() {
+                            truncate_chars(clean.lines().next().unwrap_or(&clean), 72)
+                        } else {
+                            items[i].seg.topic.clone()
+                        },
+                        summary: truncate_chars(&clean, 300),
+                        ..Default::default()
+                    }
+                }
+            };
+            items[i].extraction = Some(ext);
         }
         Ok(Staging { items })
     }
@@ -332,8 +357,17 @@ impl Pipeline {
             .or_else(|| ext.life_phase.clone().filter(|p| !p.trim().is_empty()));
 
         // Merge: deteksi penceritaan ulang terhadap keadaan terbaru.
-        let emb = self.embedder.embed_one(&seg.text).await?;
-        let hits = self.store.vector_index().search("episode", &subject.id, &emb, 1, "status = 'active'").await?;
+        let emb = match self.embedder.embed_one(&seg.text).await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding episode gagal; disimpan tanpa vektor");
+                None
+            }
+        };
+        let hits = match &emb {
+            Some(v) => self.store.vector_index().search("episode", &subject.id, v, 1, "status = 'active'").await?,
+            None => vec![],
+        };
         let retelling_of = hits.first().filter(|h| h.similarity >= self.cfg.pipeline.merge_similarity && h.id != ep_id).map(|h| h.id.clone());
         out.retelling = retelling_of.is_some();
         let conf_factor = if out.retelling { self.cfg.pipeline.retelling_confidence_factor } else { 1.0 };
@@ -540,11 +574,11 @@ impl Pipeline {
 
         // Commit atomik.
         let mut tx = self.store.tx();
-        tx.upsert("episode", ep_id, &episode, Some(&emb))?;
+        tx.upsert("episode", ep_id, &episode, emb.as_deref())?;
         for t in res.touched.values() {
             if t.is_new || t.changed {
-                let e_emb = self.embedder.embed_one(&entity_embed_text(&t.entity)).await?;
-                tx.upsert("entity", &t.entity.id, &entity_doc(&t.entity), Some(&e_emb))?;
+                let e_emb = self.embedder.embed_one(&entity_embed_text(&t.entity)).await.ok();
+                tx.upsert("entity", &t.entity.id, &entity_doc(&t.entity), e_emb.as_deref())?;
             }
         }
         for a in &actions {
@@ -590,7 +624,18 @@ impl Pipeline {
         let seg = Segment { start: 0, end: 0, text: item.text.clone(), topic: String::new(), about_subject: true, speaker: item.speaker.clone(), significance: None, date: item.occurred_at.clone() };
         let observed = seg.date.clone().unwrap_or_else(|| item.created_at.chars().take(10).collect());
         let known = self.known_entities_prompt(&subject.id).await?;
-        let ext = self.extract(&subject.name, &observed, subject.anchors.birth.map(iso).as_deref(), &known, &seg.text).await?;
+        let ext = match self.extract(&subject.name, &observed, subject.anchors.birth.map(iso).as_deref(), &known, &seg.text).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "ekstraksi promosi stream item gagal; memakai fallback");
+                let clean = crate::segment::strip_chat_prefix(&seg.text);
+                ExtractionOut {
+                    title: truncate_chars(clean.lines().next().unwrap_or(&clean), 72),
+                    summary: truncate_chars(&clean, 300),
+                    ..Default::default()
+                }
+            }
+        };
         let lock = self.subject_lock(&subject.id).await;
         let _g = lock.lock().await;
         let subject = self.store.get_subject(&subject.id).await?.unwrap_or(subject);

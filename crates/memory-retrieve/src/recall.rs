@@ -171,20 +171,31 @@ impl Retriever {
             (Some(t), Some(a)) => Some(t.clone().min(a.clone())),
             (t, a) => t.clone().or(a.clone()),
         };
-        let qvec = self.embedder.embed_one(&q.query).await?;
+        let qvec = match self.embedder.embed_one(&q.query).await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding query recall gagal, lanjut dengan pencarian fulltext dan graph");
+                None
+            }
+        };
         let index = self.store.vector_index();
 
         // 1. Kandidat episode dari tiga jalur.
-        let vhits = index.search("episode", &q.subject, &qvec, rc.candidate_k, "status = 'active'").await?;
+        let vhits = match &qvec {
+            Some(v) => index.search("episode", &q.subject, v, rc.candidate_k, "status = 'active'").await?,
+            None => vec![],
+        };
         let best_sim = vhits.first().map(|h| h.similarity).unwrap_or(0.0);
         let vlist: Vec<String> = vhits.iter().filter(|h| h.similarity >= rc.min_similarity * 0.8).map(|h| h.id.clone()).collect();
         let flist: Vec<String> = self.store.fulltext_episodes(&q.subject, &q.query, rc.candidate_k).await?.into_iter().map(|(id, _)| id).collect();
         let mut entities = self.entities_in_query(&q.subject, &q.query).await?;
-        for h in index.search("entity", &q.subject, &qvec, 5, "status != 'merged'").await? {
-            if h.similarity >= 0.6 && !entities.iter().any(|e| e.id == h.id)
-                && let Some(e) = self.store.get_entity(&h.id).await? {
-                    entities.push(e);
-                }
+        if let Some(v) = &qvec {
+            for h in index.search("entity", &q.subject, v, 5, "status != 'merged'").await? {
+                if h.similarity >= 0.6 && !entities.iter().any(|e| e.id == h.id)
+                    && let Some(e) = self.store.get_entity(&h.id).await? {
+                        entities.push(e);
+                    }
+            }
         }
         // Ekspansi graph: episode yang menyebut entitas + tetangga kekerabatan (hop 2).
         let mut glist: Vec<String> = Vec::new();
@@ -317,10 +328,20 @@ impl Retriever {
                 .filter(|p| p.valid_from.as_deref().is_none_or(|v| v <= reference.as_str()))
                 .collect();
             if !all.is_empty() {
-                let vecs = self.embedder.embed(&all.iter().map(|p| p.statement.clone()).collect::<Vec<_>>()).await?;
-                let mut scored: Vec<(Principle, f32)> = all.into_iter().zip(vecs).map(|(p, v)| (p, cosine(&v, &qvec))).filter(|(_, s)| *s >= 0.3).collect();
-                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-                principles = scored.into_iter().take(3).map(|(p, _)| p).collect();
+                if let Some(qv) = &qvec
+                    && let Ok(vecs) = self.embedder.embed(&all.iter().map(|p| p.statement.clone()).collect::<Vec<_>>()).await
+                {
+                    let mut scored: Vec<(Principle, f32)> = all.into_iter().zip(vecs).map(|(p, v)| (p, cosine(&v, qv))).filter(|(_, s)| *s >= 0.3).collect();
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    principles = scored.into_iter().take(3).map(|(p, _)| p).collect();
+                } else {
+                    let mut scored: Vec<(Principle, f32)> = all.into_iter().map(|p| {
+                        let s = overlap(&qtoks, &format!("{} {}", p.statement, p.domain));
+                        (p, s)
+                    }).filter(|(_, s)| *s > 0.0).collect();
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    principles = scored.into_iter().take(3).map(|(p, _)| p).collect();
+                }
             }
         }
         let mut dispositions = Vec::new();

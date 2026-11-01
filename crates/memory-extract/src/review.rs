@@ -119,8 +119,8 @@ impl Pipeline {
         }
         a.status = EntityStatus::Merged;
         a.merged_into = Some(b.id.clone());
-        let emb = self.embedder.embed_one(&crate::resolve::entity_embed_text(&b)).await?;
-        self.store.put_entity(&b, Some(&emb)).await?;
+        let emb = self.embedder.embed_one(&crate::resolve::entity_embed_text(&b)).await.ok();
+        self.store.put_entity(&b, emb.as_deref()).await?;
         self.store.put_entity(&a, None).await?;
         self.store.repoint_entity(from, into).await?;
         Ok(())
