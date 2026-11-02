@@ -51,6 +51,17 @@ ChatGPT/Claude (`conversations.json`), email (.mbox/.eml), foto + caption
 Teks yang sama tidak pernah diproses dua kali. Basa-basi chat ("oke sip",
 "wkwk") tidak menjadi memori jangka panjang.
 
+### Sumber yang gagal diproses
+
+Bila server LLM/embedding mati, sumber bisa berstatus `failed`. engram
+memprosesnya ulang otomatis tiap `[schedule] retry_failed_minutes` (default 10)
+**hanya bila server sudah bisa dihubungi**, maksimal `retry_failed_max` kali
+(default 20) per sumber. Proses ulang manual:
+
+- UI: tombol "Proses ulang" di detail sumber, atau "Proses ulang yang gagal" di Ringkasan
+- CLI: `engram jobs retry` (semua) atau `engram jobs retry --source <id> --run`
+- API: `POST /api/jobs/retry-failed`, `POST /api/sources/{id}/retry`
+
 ## Menghubungkan agent AI (MCP)
 
 Paling mudah: di aplikasi desktop, klik tombol **Agent AI** di kanan atas, lalu **Pasang** pada

@@ -7,7 +7,7 @@ use memory_llm::mock::{ScriptedLlm, last_user};
 use memory_llm::{ChatRequest, HashEmbedder};
 use serde_json::{Value, json};
 
-use crate::{AppState, router};
+use crate::{AppState, ServiceControl, ServiceInfo, router};
 
 const DIM: usize = 64;
 
@@ -27,6 +27,10 @@ fn llm(req: &ChatRequest) -> memory_llm::Result<String> {
 }
 
 async fn spawn(token: Option<&str>) -> (String, AppState, tempfile::TempDir) {
+    spawn_with(token, None).await
+}
+
+async fn spawn_with(token: Option<&str>, services: Option<Arc<dyn ServiceControl>>) -> (String, AppState, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = MemoryConfig::for_tests(DIM);
     cfg.vault.path = dir.path().to_path_buf();
@@ -36,6 +40,7 @@ async fn spawn(token: Option<&str>) -> (String, AppState, tempfile::TempDir) {
     let importer = Importer::new(rt.pipeline.clone(), None);
     let mut st = AppState::new(rt, importer);
     st.token = token.map(|t| Arc::new(t.to_string()));
+    st.services = services;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(st.clone());
@@ -149,4 +154,52 @@ fn ui_has_no_browser_dialogs() {
         let used = crate::APP_JS.lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| l.contains(call));
         assert!(!used, "app.js memakai {call}");
     }
+}
+
+/// Pengendali palsu: layanan "workers" berhenti sampai dijalankan.
+struct FakeServices(std::sync::Mutex<bool>);
+
+impl ServiceControl for FakeServices {
+    fn list(&self) -> Vec<ServiceInfo> {
+        let workers = *self.0.lock().unwrap();
+        vec![
+            ServiceInfo { id: "server".into(), name: "Server".into(), description: String::new(), running: true },
+            ServiceInfo { id: "workers".into(), name: "Worker".into(), description: String::new(), running: workers },
+        ]
+    }
+
+    fn start(&self, id: &str) -> Result<(), String> {
+        match id {
+            "workers" => {
+                *self.0.lock().unwrap() = true;
+                Ok(())
+            }
+            "server" => Ok(()),
+            _ => Err(format!("layanan tidak dikenal: {id}")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn services_status_and_start() {
+    let (base, _st, _d) = spawn_with(None, Some(Arc::new(FakeServices(std::sync::Mutex::new(false))))).await;
+    let c = reqwest::Client::new();
+    let r: Value = c.get(format!("{base}/api/services")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["enabled"], true);
+    assert_eq!(r["services"][1]["running"], false);
+
+    let r = post(&c, format!("{base}/api/services/workers/start"), json!({})).await;
+    assert_eq!(r["services"][1]["running"], true);
+
+    let bad = c.post(format!("{base}/api/services/nope/start")).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+}
+
+#[tokio::test]
+async fn services_disabled_without_controller() {
+    let (base, _st, _d) = spawn(None).await;
+    let r: Value = reqwest::get(format!("{base}/api/services")).await.unwrap().json().await.unwrap();
+    assert_eq!(r["enabled"], false);
+    let bad = reqwest::Client::new().post(format!("{base}/api/services/workers/start")).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
 }

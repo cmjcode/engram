@@ -38,6 +38,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/reviews/{id}", post(resolve_review))
         .route("/api/subjects/{s}/sources", get(sources))
         .route("/api/sources/{id}", get(source))
+        .route("/api/sources/{id}/retry", post(retry_source))
+        .route("/api/jobs/retry-failed", post(retry_failed))
         .route("/api/subjects/{s}/import", post(import))
         .route("/api/subjects/{s}/batches", get(batches))
         .route("/api/batches/{id}", get(batch))
@@ -49,6 +51,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/mcp/clients", get(mcp_clients))
         .route("/api/mcp/clients/{id}/install", post(mcp_install))
         .route("/api/mcp/clients/{id}/uninstall", post(mcp_uninstall))
+        .route("/api/services", get(services))
+        .route("/api/services/{id}/start", post(service_start))
 }
 
 fn check(s: &str) -> Result<(), ApiError> {
@@ -338,6 +342,15 @@ async fn interview_next(State(st): State<AppState>, Path(s): Path<String>) -> Ap
     Ok(Json(st.rt.pipeline.next_question(&s).await?))
 }
 
+async fn retry_source(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let job = st.rt.retry_source(&id).await?;
+    Ok(Json(json!({"job_id": job})))
+}
+
+async fn retry_failed(State(st): State<AppState>) -> ApiResult<Value> {
+    Ok(Json(json!(st.rt.retry_failed(false).await?)))
+}
+
 #[derive(Deserialize)]
 struct AnswerIn {
     question: String,
@@ -401,4 +414,17 @@ async fn mcp_uninstall(State(st): State<AppState>, Path(id): Path<String>) -> Ap
     let token = st.token.as_deref().map(String::as_str);
     let msg = crate::install::uninstall(&dirs, c).await.map_err(ApiError::BadRequest)?;
     Ok(Json(json!({"ok": true, "message": msg, "status": crate::install::status(&dirs, c, &url, token)})))
+}
+
+async fn services(State(st): State<AppState>) -> ApiResult<Value> {
+    Ok(Json(match &st.services {
+        Some(c) => json!({"enabled": true, "services": c.list()}),
+        None => json!({"enabled": false, "services": []}),
+    }))
+}
+
+async fn service_start(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let c = st.services.as_ref().ok_or_else(|| ApiError::BadRequest("pengendali layanan tidak tersedia".into()))?;
+    c.start(&id).map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true, "services": c.list()})))
 }

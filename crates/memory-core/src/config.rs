@@ -232,11 +232,15 @@ pub struct ScheduleConfig {
     pub voice_hours: u64,
     pub export_hours: u64,
     pub inbox_poll_secs: u64,
+    /// Interval proses ulang otomatis sumber yang gagal (menit, 0 = mati).
+    pub retry_failed_minutes: u64,
+    /// Batas proses ulang otomatis per sumber; setelahnya hanya manual.
+    pub retry_failed_max: u32,
 }
 
 impl Default for ScheduleConfig {
     fn default() -> Self {
-        Self { consolidate_hours: 24, distill_hours: 24, voice_hours: 168, export_hours: 24, inbox_poll_secs: 10 }
+        Self { consolidate_hours: 24, distill_hours: 24, voice_hours: 168, export_hours: 24, inbox_poll_secs: 10, retry_failed_minutes: 10, retry_failed_max: 20 }
     }
 }
 

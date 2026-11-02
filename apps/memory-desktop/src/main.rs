@@ -12,14 +12,14 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod services;
 mod update;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tauri::async_runtime::JoinHandle;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -29,12 +29,15 @@ use memory_import::Importer;
 use memory_jobs::Runtime;
 use memory_server::AppState;
 
+use services::{Kind, Services};
+
 const MAIN: &str = "main";
 
 /// Status proses yang dibagikan ke handler menu & event.
 struct Desktop {
     shutdown: tokio::sync::watch::Sender<bool>,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Layanan latar; kosong bila mesin memori gagal dijalankan.
+    engine: OnceLock<Arc<Services>>,
     data_dir: PathBuf,
 }
 
@@ -116,8 +119,11 @@ fn start_engine(desktop: &Desktop) -> Result<Started> {
                 tokio::net::TcpListener::bind("127.0.0.1:0").await?
             }
         };
-        let url = format!("http://{}/", listener.local_addr()?);
+        let services = Arc::new(Services::new(rt.clone(), importer, listener.local_addr()?, desktop.shutdown.subscribe()));
+        let url = services.url();
         state.mcp_url = Some(format!("{url}mcp"));
+        state.services = Some(services.clone());
+        services.set_state(state);
         write_private(
             &desktop.data_dir.join("connection.json"),
             &serde_json::to_string_pretty(&serde_json::json!({
@@ -129,19 +135,11 @@ fn start_engine(desktop: &Desktop) -> Result<Started> {
             }))?,
         )?;
 
-        let stop = desktop.shutdown.subscribe();
-        let mut tasks = desktop.tasks.lock().expect("mutex tasks");
-        let (r, s) = (rt.clone(), stop.clone());
-        tasks.push(tauri::async_runtime::spawn(async move { r.run_workers(s).await }));
-        let (r, s) = (rt.clone(), stop.clone());
-        tasks.push(tauri::async_runtime::spawn(async move { r.run_scheduler(s).await }));
-        let (subj, poll, s) = (rt.cfg.vault.default_subject.clone(), rt.cfg.schedule.inbox_poll_secs, stop.clone());
-        tasks.push(tauri::async_runtime::spawn(async move { importer.watch_inbox(subj, poll, s).await }));
-        tasks.push(tauri::async_runtime::spawn(async move {
-            if let Err(e) = memory_server::serve_listener(state, listener, stop).await {
-                tracing::error!(error = %e, "server berhenti");
-            }
-        }));
+        services.start_server_with(listener).map_err(anyhow::Error::msg)?;
+        for k in [Kind::Workers, Kind::Scheduler, Kind::Inbox] {
+            services.start_kind(k).map_err(anyhow::Error::msg)?;
+        }
+        let _ = desktop.engine.set(services);
         Ok(Started { url, token })
     })
 }
@@ -197,7 +195,17 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Keluar", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &inbox, &data, &sep, &version, &check_update, &sep2, &quit])?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
+    let header = MenuItem::with_id(app, "svc_header", "Layanan", false, None::<&str>)?;
+    // Satu baris per layanan: teks & aktif/tidaknya diperbarui oleh `watch_services`.
+    let svc_items = Kind::ALL
+        .into_iter()
+        .map(|k| MenuItem::with_id(app, format!("svc:{}", k.id()), k.name(), false, None::<&str>))
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&open, &inbox, &data, &sep, &header];
+    items.extend(svc_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>));
+    items.extend([&sep3 as &dyn tauri::menu::IsMenuItem<tauri::Wry>, &version, &check_update, &sep2, &quit]);
+    let menu = Menu::with_items(app, &items)?;
     let mut tray = TrayIconBuilder::with_id("main").tooltip("engram").menu(&menu).show_menu_on_left_click(true);
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
@@ -216,11 +224,63 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 tauri::async_runtime::spawn(update::check(app.clone(), true));
             }
             "quit" => app.exit(0),
-            _ => {}
+            id => {
+                if let Some(kind) = id.strip_prefix("svc:").and_then(Kind::from_id) {
+                    start_service(app, kind);
+                }
+            }
         }
     })
     .build(app)?;
+    let stop = app.state::<Desktop>().shutdown.subscribe();
+    tauri::async_runtime::spawn(watch_services(app.clone(), svc_items, stop));
     Ok(())
+}
+
+/// Label menu bar untuk satu layanan.
+fn service_label(kind: Kind, running: bool) -> String {
+    if running { format!("{}: berjalan", kind.name()) } else { format!("{}: berhenti - klik untuk menjalankan", kind.name()) }
+}
+
+/// Perbarui status layanan di menu bar secara berkala.
+async fn watch_services(app: AppHandle, items: Vec<MenuItem<tauri::Wry>>, mut stop: tokio::sync::watch::Receiver<bool>) {
+    let mut last: Option<Vec<bool>> = None;
+    loop {
+        let engine = app.state::<Desktop>().engine.get().cloned();
+        let status: Vec<bool> = Kind::ALL.iter().map(|k| engine.as_ref().is_some_and(|e| e.is_running(*k))).collect();
+        if last.as_ref() != Some(&status) {
+            for ((kind, item), running) in Kind::ALL.iter().zip(&items).zip(&status) {
+                let _ = item.set_text(service_label(*kind, *running));
+                // Hanya layanan yang berhenti (dan mesin sudah siap) yang bisa diklik.
+                let _ = item.set_enabled(engine.is_some() && !running);
+            }
+            last = Some(status);
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+            _ = stop.changed() => return,
+        }
+    }
+}
+
+/// Jalankan layanan yang berhenti dari menu bar.
+fn start_service(app: &AppHandle, kind: Kind) {
+    let Some(engine) = app.state::<Desktop>().engine.get().cloned() else { return };
+    match engine.start_kind(kind) {
+        Ok(()) => {
+            // Jendela utama dimuat dari server ini; muat ulang setelah server hidup lagi.
+            if kind == Kind::Server
+                && let (Some(w), Ok(url)) = (app.get_webview_window(MAIN), engine.url().parse())
+            {
+                let _ = w.navigate(url);
+            }
+        }
+        Err(e) => {
+            tracing::error!(service = kind.id(), error = %e, "gagal menjalankan layanan");
+            use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+            app.dialog().message(format!("{} gagal dijalankan:\n{e}", kind.name())).title("engram").kind(MessageDialogKind::Error).show(|_| {});
+        }
+    }
 }
 
 /// Hentikan worker & server dengan rapi agar database tertutup bersih.
@@ -228,7 +288,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn stop_engine(app: &AppHandle) {
     let desktop = app.state::<Desktop>();
     let _ = desktop.shutdown.send(true);
-    let tasks: Vec<JoinHandle<()>> = desktop.tasks.lock().map(|mut t| t.drain(..).collect()).unwrap_or_default();
+    let tasks = desktop.engine.get().map(|e| e.take_all()).unwrap_or_default();
     tauri::async_runtime::block_on(async move {
         for t in tasks {
             let _ = tokio::time::timeout(Duration::from_secs(10), t).await;
@@ -252,7 +312,7 @@ fn main() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let (shutdown, _) = tokio::sync::watch::channel(false);
-            app.manage(Desktop { shutdown, tasks: Mutex::new(Vec::new()), data_dir });
+            app.manage(Desktop { shutdown, engine: OnceLock::new(), data_dir });
             let started = start_engine(&app.state::<Desktop>());
             if let Err(e) = &started {
                 tracing::error!("mesin memori gagal: {e:#}");

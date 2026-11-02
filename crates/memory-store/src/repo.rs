@@ -97,6 +97,11 @@ impl Store {
         .await
     }
 
+    /// Sumber berstatus gagal di semua subjek, terlama dulu.
+    pub async fn failed_sources(&self, limit: usize) -> Result<Vec<Source>> {
+        self.rows_as(&format!("SELECT * FROM source WHERE status = 'failed' ORDER BY created_at ASC LIMIT {limit};"), binds! {}).await
+    }
+
     pub async fn sources_for_batch(&self, batch_id: &str) -> Result<Vec<Source>> {
         self.rows_as("SELECT * FROM source WHERE batch_id = $b ORDER BY created_at;", binds! {"b" => batch_id}).await
     }

@@ -84,3 +84,73 @@ async fn batch_progress_scheduler_and_encrypted_backup_roundtrip() {
     assert!(exp.join("markdown/budi/README.md").exists());
     let _ = Vault::new(d2.path());
 }
+
+#[tokio::test]
+async fn failed_sources_are_retried_only_when_backends_are_up() {
+    use memory_core::model::SourceStatus;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Embedder yang bisa "dimatikan" seperti server TEI yang mati.
+    struct FlakyEmbedder(Arc<AtomicBool>, HashEmbedder);
+    #[async_trait::async_trait]
+    impl memory_llm::Embedder for FlakyEmbedder {
+        async fn embed(&self, texts: &[String]) -> memory_llm::Result<Vec<Vec<f32>>> {
+            if self.0.load(Ordering::SeqCst) {
+                return Err(memory_llm::LlmError::Other("server embedding mati".into()));
+            }
+            self.1.embed(texts).await
+        }
+        fn dimension(&self) -> usize {
+            DIM
+        }
+    }
+
+    let down = Arc::new(AtomicBool::new(true));
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = MemoryConfig::for_tests(DIM);
+    cfg.vault.path = dir.path().to_path_buf();
+    cfg.schedule.retry_failed_max = 1;
+    let embedder = FlakyEmbedder(down.clone(), HashEmbedder::new(DIM));
+    let r = Runtime::open_with(cfg, Arc::new(ScriptedLlm::new(llm)), Arc::new(embedder)).await.unwrap();
+
+    let out = r
+        .pipeline
+        .ingest(IngestDoc {
+            subject: "budi".into(),
+            kind: SourceKind::Memoir,
+            text: "Waktu kecil saya tinggal di rumah kayu dekat sungai bersama simbah di desa.".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let id = out.source.id.clone();
+    // Sumber yang gagal di versi lama / karena server mati.
+    let fail = |r: Runtime, id: String| async move { r.store.set_source_status(&id, SourceStatus::Failed, Some("http: server mati".into())).await.unwrap() };
+    fail(r.clone(), id.clone()).await;
+    let status = |r: Runtime, id: String| async move { r.store.get_source(&id).await.unwrap().unwrap() };
+    assert_eq!(status(r.clone(), id.clone()).await.status, SourceStatus::Failed);
+
+    // Server masih mati: tidak ada yang diantre, jatah otomatis tidak terpakai.
+    let rep = r.retry_failed(true).await.unwrap();
+    assert_eq!((rep.failed, rep.requeued), (1, 0));
+    assert!(rep.backend_error.is_some());
+    assert!(r.retry_source(&id).await.is_err(), "manual juga menolak bila server mati");
+    assert_eq!(status(r.clone(), id.clone()).await.status, SourceStatus::Failed);
+
+    // Server mati lagi saat diproses: jatah otomatis (1) habis.
+    down.store(false, Ordering::SeqCst);
+    assert_eq!(r.retry_failed(true).await.unwrap().requeued, 1);
+    let s = status(r.clone(), id.clone()).await;
+    assert_eq!((s.status, s.meta["auto_retries"].as_u64()), (SourceStatus::Pending, Some(1)));
+    fail(r.clone(), id.clone()).await;
+    let rep = r.retry_failed(true).await.unwrap();
+    assert_eq!((rep.requeued, rep.exhausted), (0, 1));
+
+    // Manual tetap bisa, lalu sumber selesai diproses.
+    assert!(r.retry_source(&id).await.unwrap().is_some());
+    r.drain().await.unwrap();
+    let s = status(r.clone(), id.clone()).await;
+    assert!(matches!(s.status, SourceStatus::Done | SourceStatus::Skipped), "{:?} {:?}", s.status, s.error);
+    assert_eq!(s.meta["auto_retries"].as_u64(), Some(0));
+    assert!(r.retry_source(&id).await.unwrap().is_none(), "sumber yang tidak gagal tidak diantre");
+}

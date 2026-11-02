@@ -17,6 +17,7 @@ const ICONS = {
   flag: '<path d="M5 21V4h11l-1.5 4L16 12H5"/>',
   home: '<path d="M4 11 12 4l8 7v9H4z"/><path d="M10 20v-5h4v5"/>',
   plug: '<path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
+  play: '<path d="M8 5v14l11-7z"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.5-4.5L4 8M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.5 4.5L20 16M20 20v-4h-4"/>',
 };
 const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
@@ -191,9 +192,16 @@ async function showSource(id) {
     <p class="small muted">${esc(s.kind)} · ${esc(s.status)} · ${esc((s.languages || []).join(", "))} · ${esc(s.created_at.slice(0, 10))}</p>
     <p class="small">Episode ${s.stats.episodes} · working memory ${s.stats.stream_items} · dibuang (noise) ${s.stats.dropped} · bukan tentang subjek ${s.stats.not_about_subject} · fakta ${s.stats.facts} · kutipan ditolak ${s.stats.facts_rejected}</p>
     ${s.error ? `<p class="badge conflict">${esc(s.error)}</p>` : ""}
+    ${s.status === "failed" ? `<div class="row"><button id="src-retry">${icon("refresh")} Proses ulang</button><span class="muted small">Otomatis dicoba lagi saat server LLM &amp; embedding hidup.</span></div>` : ""}
     <h3>Episode dari sumber ini</h3>
     ${r.episodes.map((ep) => `<div class="tl-item" data-ep="${esc(ep.id)}"><span class="tl-time">${esc(labelTime(ep))}</span><span>${esc(ep.title)}</span></div>`).join("") || '<p class="muted">Belum ada.</p>'}
     <h3>Teks asli <span class="muted small">(sorotan = kutipan yang dipakai sebagai bukti)</span></h3><pre class="src">${text}</pre>`);
+  const rb = $("#src-retry");
+  if (rb) rb.onclick = async () => {
+    rb.disabled = true;
+    try { await api(`/api/sources/${encodeURIComponent(id)}/retry`, { method: "POST" }); toast("Masuk antrean"); showSource(id); }
+    catch (e) { toast(e.message); rb.disabled = false; }
+  };
 }
 
 // ---------------------------------------------------------------- views
@@ -210,6 +218,7 @@ async function viewHome(el) {
       <button data-m="consolidate">${icon("refresh")} Konsolidasi</button>
       <button data-m="distill">${icon("compass")} Distilasi prinsip</button>
       <button data-m="voice">${icon("mic")} Profil gaya tutur</button>
+      <button id="retry-failed">${icon("refresh")} Proses ulang yang gagal</button>
     </div>
     <h2>Data subjek</h2>
     <div class="card"><div class="row">
@@ -218,6 +227,12 @@ async function viewHome(el) {
       <span class="muted small">Dipakai untuk menerjemahkan "umur 20" dan "waktu SD" menjadi tahun.</span>
     </div></div>`;
   el.querySelectorAll("[data-m]").forEach((b) => { b.onclick = async () => { await api(`/api/subjects/${S()}/maintenance/${b.dataset.m}`, { method: "POST" }); toast("Masuk antrean"); }; });
+  $("#retry-failed").onclick = async () => {
+    try {
+      const r = await api("/api/jobs/retry-failed", { method: "POST" });
+      toast(r.backend_error ? `${r.failed} gagal, server belum bisa dihubungi` : r.failed ? `${r.requeued} sumber diantre ulang` : "Tidak ada sumber yang gagal");
+    } catch (e) { toast(e.message); }
+  };
   $("#save-birth").onclick = async () => {
     await api("/api/subjects", { method: "POST", json: { id: state.subject, name: r.subject.name, birth: $("#birth").value } });
     toast("Tersimpan");
@@ -436,6 +451,62 @@ async function pollBatch(id) {
 $("#subject-select").onchange = (e) => { state.subject = e.target.value; localStorage.setItem("subject", state.subject); route(); };
 $("#new-subject").onclick = () => newSubjectForm();
 $("#connect-agents").onclick = () => connectAgents();
+$("#services-btn").onclick = () => showServices();
+
+// Status layanan latar (server, worker, scheduler, inbox). Hanya ada di aplikasi desktop.
+const svc = { list: [] };
+async function pollServices() {
+  try {
+    const r = await api("/api/services");
+    if (!r.enabled) { $("#services-btn").hidden = true; return; }
+    svc.list = r.services;
+  } catch (e) {
+    // Server tidak menjawab: tandai semua layanan tidak diketahui.
+    svc.list = svc.list.map((s) => Object.assign({}, s, { running: false }));
+  }
+  renderServicesBadge();
+  if (!$("#drawer").hidden && $("#svc-list")) renderServices();
+}
+function renderServicesBadge() {
+  const up = svc.list.filter((s) => s.running).length, all = svc.list.length;
+  if (!all) return;
+  $("#services-btn").hidden = false;
+  $("#services-dot").className = "dot " + (up === all ? "ok" : "bad");
+  $("#services-label").textContent = up === all ? "Layanan aktif" : `${all - up} layanan berhenti`;
+  $("#services-btn").title = svc.list.map((s) => `${s.name}: ${s.running ? "berjalan" : "berhenti"}`).join("\n");
+}
+function showServices() {
+  openDrawer("Status layanan", `<p class="muted small">Layanan latar engram di aplikasi ini. Layanan yang berhenti bisa dijalankan lagi dari sini atau dari ikon menu bar.</p><div id="svc-list"></div>`);
+  renderServices();
+  pollServices();
+}
+function renderServices() {
+  $("#svc-list").innerHTML = svc.list.map((s) => `<div class="card" data-svc="${esc(s.id)}">
+      <div class="row" style="justify-content:space-between">
+        <div class="row"><span class="dot ${s.running ? "ok" : "bad"}"></span><b>${esc(s.name)}</b>
+          <span class="badge ${s.running ? "now" : "conflict"}">${s.running ? "Berjalan" : "Berhenti"}</span></div>
+        ${s.running ? "" : `<button class="primary" data-start>${icon("play")} Jalankan</button>`}
+      </div>
+      <div class="small muted">${esc(s.description)}</div>
+      <div class="small msg"></div>
+    </div>`).join("");
+  $("#svc-list").querySelectorAll("[data-start]").forEach((b) => {
+    b.onclick = async () => {
+      const card = b.closest("[data-svc]");
+      b.disabled = true;
+      try {
+        const r = await api(`/api/services/${encodeURIComponent(card.dataset.svc)}/start`, { method: "POST" });
+        svc.list = r.services;
+        renderServicesBadge();
+        renderServices();
+        toast("Layanan dijalankan");
+      } catch (e) {
+        card.querySelector(".msg").innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`;
+        b.disabled = false;
+      }
+    };
+  });
+}
 
 // Pasang server MCP ke agent AI (Antigravity, VS Code, Claude Code) dengan satu klik.
 const MCP_STATE = {
@@ -542,4 +613,6 @@ function askToken() {
 
 window.addEventListener("hashchange", route);
 hydrateIcons();
+pollServices();
+setInterval(pollServices, 5000);
 loadSubjects().then(route).catch((e) => { $("#view").innerHTML = `<div class="card">Tidak bisa menghubungi server: ${esc(e.message)}</div>`; });

@@ -191,6 +191,14 @@ enum JobsCmd {
         #[arg(long)]
         status: Option<String>,
     },
+    /// Proses ulang sumber yang gagal (semua, atau satu dengan --source).
+    Retry {
+        #[arg(long)]
+        source: Option<String>,
+        /// Langsung jalankan antreannya (tanpa worker terpisah).
+        #[arg(long)]
+        run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -347,6 +355,24 @@ async fn main() -> Result<()> {
         }
         Cmd::Jobs { cmd } => match cmd {
             JobsCmd::Run => println!("{} job dijalankan.", rt.drain().await?),
+            JobsCmd::Retry { source, run } => {
+                match source {
+                    Some(id) => match rt.retry_source(&id).await? {
+                        Some(job) => println!("Sumber {id} diantre ulang (job {job})."),
+                        None => println!("Sumber {id} tidak berstatus gagal; tidak ada yang diantre."),
+                    },
+                    None => {
+                        let r = rt.retry_failed(false).await?;
+                        print(j, &r, || match &r.backend_error {
+                            Some(e) => format!("{} sumber gagal, belum diantre: server belum bisa dihubungi ({e}).", r.failed),
+                            None => format!("{} sumber gagal, {} diantre ulang.", r.failed, r.requeued),
+                        });
+                    }
+                }
+                if run {
+                    println!("{} job dijalankan.", rt.drain().await?);
+                }
+            }
             JobsCmd::List { status } => {
                 let st = status.as_deref().and_then(|s| serde_json::from_value(json!(s)).ok());
                 let jobs = rt.store.list_jobs(st, 100).await?;

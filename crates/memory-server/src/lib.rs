@@ -28,12 +28,32 @@ pub struct AppState {
     /// Alamat MCP HTTP server ini (mis. `http://127.0.0.1:7878/mcp`). Bila diisi, UI bisa
     /// memasang server ke config agent AI di komputer ini (lihat [`install`]).
     pub mcp_url: Option<String>,
+    /// Pengendali layanan latar (worker, scheduler, inbox, server). Hanya diisi
+    /// aplikasi desktop; `engram serve` membiarkannya kosong.
+    pub services: Option<Arc<dyn ServiceControl>>,
+}
+
+/// Status satu layanan latar untuk ditampilkan di UI.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ServiceInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub running: bool,
+}
+
+/// Dipasang oleh aplikasi yang menjalankan layanan agar UI bisa melihat status
+/// dan menyalakan ulang layanan yang berhenti.
+pub trait ServiceControl: Send + Sync {
+    fn list(&self) -> Vec<ServiceInfo>;
+    /// Jalankan layanan `id` bila sedang berhenti. Tidak berbuat apa-apa bila sudah jalan.
+    fn start(&self, id: &str) -> Result<(), String>;
 }
 
 impl AppState {
     pub fn new(rt: Runtime, importer: Importer) -> Self {
         let token = rt.cfg.server.token_env.as_deref().and_then(|k| std::env::var(k).ok()).filter(|t| !t.is_empty()).map(Arc::new);
-        Self { rt, importer, token, mcp_url: None }
+        Self { rt, importer, token, mcp_url: None, services: None }
     }
 
     pub fn default_subject(&self) -> String {

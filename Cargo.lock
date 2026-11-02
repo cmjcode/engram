@@ -3896,6 +3896,7 @@ name = "memory-jobs"
 version = "0.0.7"
 dependencies = [
  "age",
+ "async-trait",
  "chrono",
  "flate2",
  "memory-core",

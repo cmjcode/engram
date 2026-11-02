@@ -10,12 +10,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use memory_core::model::{Job, JobStatus};
+use memory_core::model::{Job, JobStatus, Source, SourceStatus};
 use memory_core::{MemoryConfig, ids::now_rfc3339};
 use memory_extract::ingest::PROCESS_SOURCE;
 use memory_extract::review::Decision;
 use memory_extract::{Pipeline, Vault};
-use memory_llm::{Embedder, LlmProvider};
+use memory_llm::{ChatRequest, Embedder, LlmProvider, Message, ModelRole};
 use memory_retrieve::Retriever;
 use memory_store::Store;
 
@@ -43,6 +43,21 @@ pub enum JobError {
 }
 
 pub type Result<T> = std::result::Result<T, JobError>;
+
+/// Hasil proses ulang sumber yang gagal.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RetryReport {
+    /// Jumlah sumber berstatus gagal yang ditemukan.
+    pub failed: u32,
+    /// Diantre ulang sekarang.
+    pub requeued: u32,
+    /// Dilewati karena batas proses ulang otomatis sudah habis.
+    pub exhausted: u32,
+    /// Server LLM/embedding belum bisa dihubungi; tidak ada yang diantre.
+    pub backend_error: Option<String>,
+}
+
+const AUTO_RETRIES: &str = "auto_retries";
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -174,6 +189,70 @@ impl Runtime {
         }
     }
 
+    /// Cek singkat bahwa server embedding dan LLM (kedua peran) bisa dihubungi.
+    pub async fn check_backends(&self) -> std::result::Result<(), String> {
+        let p = &self.pipeline;
+        p.embedder.embed_one("ping").await.map_err(|e| format!("embedding: {e}"))?;
+        for role in [ModelRole::Light, ModelRole::Extract] {
+            let req = ChatRequest {
+                role,
+                messages: vec![Message::user("ping")],
+                json_schema: None,
+                temperature: Some(0.0),
+                max_tokens: Some(4),
+                task: "ping".into(),
+            };
+            p.llm.chat(req).await.map_err(|e| format!("llm ({role:?}): {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Kembalikan satu sumber gagal ke antrean. `None` bila sumber tidak gagal.
+    async fn requeue_source(&self, source: &Source, auto_retries: u64) -> Result<Option<String>> {
+        if source.status != SourceStatus::Failed {
+            return Ok(None);
+        }
+        self.store.patch("source", &source.id, json!({"status": "pending", "error": null, "meta": {AUTO_RETRIES: auto_retries}})).await?;
+        Ok(Some(self.pipeline.enqueue_process(source).await?))
+    }
+
+    /// Proses ulang satu sumber gagal (manual; menyetel ulang hitungan otomatis).
+    pub async fn retry_source(&self, source_id: &str) -> Result<Option<String>> {
+        let source = self.store.get_source(source_id).await?.ok_or_else(|| JobError::Invalid(format!("sumber {source_id} tidak ada")))?;
+        if source.status != SourceStatus::Failed {
+            return Ok(None);
+        }
+        self.check_backends().await.map_err(|e| JobError::Invalid(format!("server belum bisa dihubungi, coba lagi nanti: {e}")))?;
+        self.requeue_source(&source, 0).await
+    }
+
+    /// Antre ulang semua sumber gagal, hanya bila server LLM & embedding hidup.
+    /// `auto`: dipanggil penjadwal — menghormati `retry_failed_max` per sumber.
+    pub async fn retry_failed(&self, auto: bool) -> Result<RetryReport> {
+        let sources = self.store.failed_sources(500).await?;
+        let mut rep = RetryReport { failed: sources.len() as u32, ..Default::default() };
+        if sources.is_empty() {
+            return Ok(rep);
+        }
+        if let Err(e) = self.check_backends().await {
+            rep.backend_error = Some(e);
+            return Ok(rep);
+        }
+        let max = u64::from(self.cfg.schedule.retry_failed_max);
+        for s in &sources {
+            let done = s.meta.get(AUTO_RETRIES).and_then(Value::as_u64).unwrap_or(0);
+            if auto && done >= max {
+                rep.exhausted += 1;
+                continue;
+            }
+            let next = if auto { done + 1 } else { 0 };
+            if self.requeue_source(s, next).await?.is_some() {
+                rep.requeued += 1;
+            }
+        }
+        Ok(rep)
+    }
+
     /// Antrekan pekerjaan berkala yang jatuh tempo (idempoten per periode).
     pub async fn schedule_due(&self) -> Result<u32> {
         let sc = &self.cfg.schedule;
@@ -193,12 +272,26 @@ impl Runtime {
     }
 
     pub async fn run_scheduler(&self, mut shutdown: watch::Receiver<bool>) {
+        let retry_every = Duration::from_secs(self.cfg.schedule.retry_failed_minutes * 60);
+        let mut last_retry: Option<std::time::Instant> = None;
         loop {
             if let Err(e) = self.schedule_due().await {
                 tracing::error!(error = %e, "scheduler error");
             }
+            if !retry_every.is_zero() && last_retry.is_none_or(|t| t.elapsed() >= retry_every) {
+                last_retry = Some(std::time::Instant::now());
+                match self.retry_failed(true).await {
+                    Ok(r) if r.backend_error.is_some() => {
+                        tracing::info!(failed = r.failed, error = r.backend_error.as_deref().unwrap_or(""), "sumber gagal menunggu server LLM/embedding")
+                    }
+                    Ok(r) if r.requeued + r.exhausted > 0 => tracing::info!(requeued = r.requeued, exhausted = r.exhausted, "sumber gagal diproses ulang"),
+                    Ok(_) => {}
+                    Err(e) => tracing::error!(error = %e, "proses ulang otomatis gagal"),
+                }
+            }
+            let tick = if retry_every.is_zero() { Duration::from_secs(300) } else { retry_every.min(Duration::from_secs(300)) };
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                _ = tokio::time::sleep(tick) => {}
                 _ = shutdown.changed() => break,
             }
         }
