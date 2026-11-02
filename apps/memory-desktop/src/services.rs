@@ -193,4 +193,36 @@ impl ServiceControl for Services {
         });
         Ok(format!("Aplikasi dibuka ulang untuk memindahkan data ke {}", target.display()))
     }
+
+    fn check_update(&self) -> Option<Result<memory_server::settings::UpdateInfo, String>> {
+        Some(tauri::async_runtime::block_on(crate::update::info(&self.app)).map_err(|e| format!("{e:#}")))
+    }
+
+    fn install_update(&self) -> Result<String, String> {
+        crate::update::start_install(&self.app)?;
+        Ok("Mengunduh update. Aplikasi dibuka ulang setelah terpasang.".into())
+    }
+
+    fn auto_update(&self) -> Option<bool> {
+        Some(crate::update::auto_enabled(&self.data_dir))
+    }
+
+    fn set_auto_update(&self, on: bool) -> Result<(), String> {
+        crate::update::set_auto(&self.data_dir, on).map_err(|e| format!("{e:#}"))
+    }
+
+    fn restart(&self) -> Result<String, String> {
+        let app = self.app.clone();
+        // Beri waktu jawaban HTTP sampai ke UI; RunEvent::Exit menutup database dengan rapi.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            app.request_restart();
+        });
+        Ok("Aplikasi dibuka ulang...".into())
+    }
+
+    fn open(&self, target: &str) -> Result<(), String> {
+        crate::open_in_file_manager(Path::new(target));
+        Ok(())
+    }
 }

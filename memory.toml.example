@@ -14,6 +14,7 @@ extract_model = "/models/Qwen3.6-35B-A3B-FP8"   # ekstraksi, distilasi, verifika
 light_model = "/models/gemma-4-12B-it"          # segmentasi, klasifikasi, adjudikasi
 # light_base_url = "http://localhost:5212/v1"   # bila model ringan di server lain
 # api_key_env = "OPENAI_API_KEY"
+# api_key = "sk-..."          # dipakai bila env var kosong (bisa diisi dari Pengaturan di UI)
 json_mode = "json_schema"   # guided decoding vLLM; "json_object" atau "none" untuk server lain
 disable_thinking = true     # kirim enable_thinking=false (Qwen3)
 temperature = 0.1

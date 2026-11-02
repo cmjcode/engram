@@ -19,7 +19,7 @@ impl OpenAiCompatible {
             .timeout(Duration::from_secs(cfg.timeout_secs))
             .build()
             .unwrap_or_default();
-        let api_key = cfg.api_key_env.as_deref().and_then(|k| std::env::var(k).ok());
+        let api_key = cfg.resolved_api_key();
         Self { http, cfg: cfg.clone(), api_key }
     }
 

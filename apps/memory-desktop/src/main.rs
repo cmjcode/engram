@@ -158,6 +158,7 @@ fn start_engine(app: &AppHandle, desktop: &Desktop) -> Result<Started> {
         let services = Arc::new(Services::new(app.clone(), desktop.data_dir.clone(), rt.clone(), importer, listener.local_addr()?, desktop.shutdown.subscribe()));
         let url = services.url();
         state.mcp_url = Some(format!("{url}mcp"));
+        state.config_path = Some(desktop.data_dir.join("memory.toml"));
         state.services = Some(services.clone());
         services.set_state(state);
         write_private(
@@ -209,6 +210,7 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// Buka folder di pengelola berkas, atau URL di browser bawaan.
 fn open_in_file_manager(path: &Path) {
     #[cfg(target_os = "macos")]
     let cmd = "open";

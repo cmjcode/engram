@@ -22,6 +22,9 @@ const ICONS = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   alert: '<path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17v.5"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.5-4.5L4 8M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.5 4.5L20 16M20 20v-4h-4"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  download: '<path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/>',
+  external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v6H4V6h6"/>',
 };
 const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -456,6 +459,7 @@ $("#new-subject").onclick = () => newSubjectForm();
 $("#connect-agents").onclick = () => connectAgents();
 $("#data-sync").onclick = () => showDataSync();
 $("#services-btn").onclick = () => showServices();
+$("#settings-btn").onclick = () => showSettings();
 
 // Status layanan latar (server, worker, scheduler, inbox). Hanya ada di aplikasi desktop.
 const svc = { list: [] };
@@ -691,6 +695,349 @@ async function showDataSync() {
         toast(from + (r.pushed ? "Data komputer ini diunggah." : "Tidak ada perubahan."));
         await showDataSync();
       } catch (e) { msg("#sy-msg", errLine(e.message)); b.disabled = false; }
+    };
+  }
+}
+
+// ---------------------------------------------------------------- pengaturan
+// Tab: Umum, Model AI, Pemrosesan, Tentang & update. Nilai model/pemrosesan
+// disimpan ke memory.toml dan berlaku setelah aplikasi dibuka ulang.
+const SETTINGS_TABS = [["umum", "Umum"], ["model", "Model AI"], ["proses", "Pemrosesan"], ["tentang", "Tentang & update"]];
+const settings = { tab: "umum", about: null, data: null, update: null, models: [] };
+
+// [bagian, kunci, label, jenis, petunjuk, pilihan]
+const F_LLM = [
+  ["llm", "base_url", "Alamat server LLM", "text", "Endpoint OpenAI-compatible, mis. http://localhost:5211/v1 atau https://api.openai.com/v1"],
+  ["llm", "extract_model", "Model utama", "model", "Ekstraksi cerita, distilasi, dan jawaban."],
+  ["llm", "light_model", "Model ringan", "model", "Segmentasi dan klasifikasi; boleh sama dengan model utama."],
+  ["llm", "light_base_url", "Alamat server model ringan", "text", "Kosongkan bila sama dengan server LLM."],
+  ["llm", "api_key", "API key", "secret", "Kosongkan untuk server lokal tanpa kunci."],
+];
+const F_LLM_ADV = [
+  ["llm", "api_key_env", "Env var API key", "text", "Dipakai lebih dulu bila terisi, mis. OPENAI_API_KEY."],
+  ["llm", "json_mode", "Mode JSON", "select", "json_schema untuk vLLM; json_object untuk OpenAI/Ollama; none bila tidak didukung.", [["json_schema", "json_schema (vLLM)"], ["json_object", "json_object"], ["none", "none"]]],
+  ["llm", "disable_thinking", "Matikan mode berpikir (Qwen3)", "bool"],
+  ["llm", "temperature", "Temperature", "float"],
+  ["llm", "max_tokens", "Maks. token jawaban", "int"],
+  ["llm", "timeout_secs", "Batas waktu (detik)", "int"],
+  ["llm", "max_retries", "Coba ulang bila gagal", "int"],
+];
+const F_EMB = [
+  ["embedding", "provider", "Penyedia", "select", "", [["openai", "Server embedding (OpenAI-compatible)"], ["hash", "Hash - tanpa server (uji saja)"]]],
+  ["embedding", "base_url", "Alamat server embedding", "text", "mis. http://localhost:8081/v1 (TEI)"],
+  ["embedding", "model", "Model embedding", "text"],
+  ["embedding", "dimension", "Dimensi vektor", "int", "Ganti model/dimensi: jalankan `engram reembed` setelah dibuka ulang."],
+  ["embedding", "api_key", "API key", "secret"],
+];
+const F_EMB_ADV = [
+  ["embedding", "api_key_env", "Env var API key", "text"],
+  ["embedding", "batch_size", "Ukuran batch", "int"],
+];
+const F_TR = [
+  ["transcription", "base_url", "Alamat server Whisper", "text", "Untuk import audio. Kosongkan bila tidak dipakai."],
+  ["transcription", "model", "Model", "text"],
+  ["transcription", "language", "Bahasa", "text", "Kode bahasa, mis. id. Kosongkan untuk deteksi otomatis."],
+];
+const F_PROC = [
+  ["pipeline", "workers", "Pekerja paralel", "int", "Jumlah job yang diproses bersamaan. Naikkan bila server LLM kuat."],
+  ["schedule", "inbox_poll_secs", "Cek folder inbox tiap (detik)", "int"],
+  ["schedule", "retry_failed_minutes", "Proses ulang sumber gagal tiap (menit)", "int", "0 = mati. Berguna bila server LLM kadang mati."],
+  ["schedule", "retry_failed_max", "Batas proses ulang otomatis per sumber", "int"],
+  ["score", "stream_ttl_days", "Simpan obrolan ringan selama (hari)", "int", "Working memory luruh setelah ini; berkas sumber asli tetap ada."],
+  ["retrieval", "top_k", "Jumlah cerita per pencarian", "int", "Dipakai pencarian dan agent AI (MCP)."],
+  ["server", "max_upload_mb", "Batas ukuran upload (MB)", "int"],
+];
+
+function getTheme() { try { return localStorage.getItem("theme") || "system"; } catch (e) { return "system"; } }
+function setTheme(t) {
+  try { if (t === "system") localStorage.removeItem("theme"); else localStorage.setItem("theme", t); } catch (e) {}
+  if (t === "system") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+}
+
+async function openTarget(target, url) {
+  if (settings.about?.can_open) {
+    try { await api("/api/open", { method: "POST", json: { target } }); } catch (e) { toast(e.message); }
+  } else if (url) {
+    window.open(url, "_blank", "noopener");
+  }
+}
+
+async function showSettings(tab) {
+  if (tab) settings.tab = tab;
+  openDrawer("Pengaturan", `<div class="empty">Memuat...</div>`);
+  try { [settings.about, settings.data] = await Promise.all([api("/api/about"), api("/api/settings")]); }
+  catch (e) { $("#drawer-body").innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; return; }
+  renderSettings();
+}
+
+function renderSettings() {
+  const d = settings.data;
+  $("#drawer-body").innerHTML = `
+    <div class="tabs" role="tablist">${SETTINGS_TABS.map(([k, l]) => `<button type="button" role="tab" data-tab="${k}" class="${k === settings.tab ? "active" : ""}" aria-selected="${k === settings.tab}">${esc(l)}</button>`).join("")}</div>
+    ${d.restart_required ? `<div class="notice small">${icon("alert")} Pengaturan baru tersimpan, tetapi belum dipakai.
+      ${settings.about.can_restart ? `<div class="row" style="margin-top:6px"><button class="primary" id="st-restart">${icon("refresh")} Buka ulang sekarang</button></div>` : " Jalankan ulang <code>engram serve</code> agar berlaku."}</div>` : ""}
+    ${!d.editable ? `<div class="notice small">Lokasi <code>memory.toml</code> tidak diketahui; pengaturan hanya bisa dilihat.</div>` : ""}
+    <div id="st-body"></div>`;
+  $("#drawer-body").querySelectorAll("[data-tab]").forEach((b) => { b.onclick = () => { settings.tab = b.dataset.tab; renderSettings(); }; });
+  if ($("#st-restart")) $("#st-restart").onclick = restartApp;
+  ({ umum: tabGeneral, model: tabModels, proses: tabProcessing, tentang: tabAbout })[settings.tab]();
+}
+
+async function restartApp() {
+  try {
+    const r = await api("/api/restart", { method: "POST" });
+    $("#drawer-body").innerHTML = `<div class="empty">${esc(r.message)}</div>`;
+  } catch (e) { toast(e.message); }
+}
+
+// Satu input pengaturan. Nilai awal dari settings.data.values.
+// f32 dari server (0.1 -> 0.10000000149) dibulatkan untuk ditampilkan & dibandingkan.
+const tidy = (v) => (typeof v === "number" ? Number(v.toPrecision(6)) : v);
+function fieldHtml([sec, key, label, type, hint, opts]) {
+  const v = tidy(settings.data.values[sec]?.[key]);
+  const id = `f-${sec}-${key}`;
+  const dis = settings.data.editable ? "" : "disabled";
+  const attrs = `id="${id}" data-sec="${sec}" data-key="${key}" data-type="${type}" ${dis}`;
+  const help = hint ? `<div class="hint">${esc(hint)}</div>` : "";
+  if (type === "bool") return `<label class="field check"><input type="checkbox" ${attrs} ${v ? "checked" : ""}><span>${esc(label)}</span></label>`;
+  let input;
+  if (type === "select") input = `<select ${attrs}>${opts.map(([o, l]) => `<option value="${esc(o)}" ${o === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  else if (type === "secret") {
+    const set = settings.data.values[sec]?.[key + "_set"];
+    input = `<div class="row"><input type="password" ${attrs} autocomplete="new-password" style="flex:1" placeholder="${set ? "tersimpan - kosongkan bila tidak diubah" : "belum diisi"}">
+      ${set && !dis ? `<button type="button" class="ghost small" data-clear="${id}">${icon("x")} Hapus</button>` : ""}</div>`;
+  } else if (type === "int" || type === "float") input = `<input type="number" ${attrs} step="${type === "int" ? 1 : 0.05}" value="${esc(v ?? "")}">`;
+  else input = `<input type="text" ${attrs} value="${esc(v ?? "")}" ${type === "model" ? `list="st-models"` : ""}>`;
+  return `<label class="field" for="${id}"><span>${esc(label)}</span>${input}${help}</label>`;
+}
+
+// Kumpulkan input yang berubah: {bagian: {kunci: nilai}}.
+function collectChanges(root) {
+  const out = {};
+  root.querySelectorAll("[data-sec]").forEach((el) => {
+    const { sec, key, type } = el.dataset;
+    const old = tidy(settings.data.values[sec]?.[key]);
+    let v;
+    if (type === "bool") v = el.checked;
+    else if (type === "secret") {
+      if (el.dataset.cleared === "1") v = "";
+      else if (el.value) v = el.value;
+      else return;
+    } else if (type === "int") { if (el.value === "") return; v = parseInt(el.value, 10); }
+    else if (type === "float") { if (el.value === "") return; v = parseFloat(el.value); }
+    else v = el.value.trim();
+    if (type !== "secret" && (v === old || (v === "" && (old === null || old === undefined)))) return;
+    (out[sec] = out[sec] || {})[key] = v;
+  });
+  return out;
+}
+
+function bindForm(form) {
+  form.querySelectorAll("[data-clear]").forEach((b) => {
+    b.onclick = () => {
+      const el = $("#" + b.dataset.clear);
+      el.dataset.cleared = "1";
+      el.value = "";
+      el.placeholder = "akan dihapus saat disimpan";
+      b.remove();
+    };
+  });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const changes = collectChanges(form);
+    if (!Object.keys(changes).length) { toast("Tidak ada perubahan"); return; }
+    const btn = form.querySelector("[type=submit]");
+    btn.disabled = true;
+    try {
+      settings.data = await api("/api/settings", { method: "PUT", json: { values: changes } });
+      toast("Pengaturan disimpan");
+      renderSettings();
+    } catch (err) {
+      form.querySelector(".msg").innerHTML = errLine(err.message);
+      btn.disabled = false;
+    }
+  };
+}
+
+function tabGeneral() {
+  const a = settings.about, theme = getTheme();
+  const subj = settings.data.values.vault.default_subject;
+  const known = state.subjects.some((s) => s.id === subj);
+  $("#st-body").innerHTML = `
+    <h2 style="margin-top:0">Tampilan</h2>
+    <div class="card">
+      <label class="field"><span>Tema</span><select id="st-theme">
+        ${[["system", "Ikuti sistem"], ["light", "Terang"], ["dark", "Gelap"]].map(([k, l]) => `<option value="${k}" ${k === theme ? "selected" : ""}>${l}</option>`).join("")}
+      </select></label>
+    </div>
+    <h2>Subjek</h2>
+    <form id="st-general" class="card">
+      <label class="field"><span>Subjek default</span>
+        <select data-sec="vault" data-key="default_subject" data-type="text" ${settings.data.editable ? "" : "disabled"}>
+          ${known ? "" : `<option value="${esc(subj)}" selected>${esc(subj)}</option>`}
+          ${state.subjects.map((s) => `<option value="${esc(s.id)}" ${s.id === subj ? "selected" : ""}>${esc(s.name)}</option>`).join("")}
+        </select>
+        <div class="hint">Dipakai pemantau inbox, CLI, dan agent AI bila subjek tidak disebut.</div></label>
+      <p class="small msg"></p>
+      ${settings.data.editable ? `<button class="primary" type="submit">${icon("check")} Simpan</button>` : ""}
+    </form>
+    <h2>Pintasan</h2>
+    <div class="card row">
+      <button type="button" id="st-sync">${icon("cloud")} Data & Sync</button>
+      <button type="button" id="st-agents">${icon("plug")} Agent AI</button>
+      ${svc.list.length ? `<button type="button" id="st-svc">${icon("play")} Status layanan</button>` : ""}
+    </div>
+    ${a.can_open ? `<h2>Folder</h2>
+    <div class="card row">
+      <button type="button" data-open="vault">${icon("folder")} Folder data</button>
+      <button type="button" data-open="inbox">${icon("inbox")} Folder inbox</button>
+      ${a.config_path ? `<button type="button" data-open="config">${icon("folder")} Folder konfigurasi</button>` : ""}
+    </div>` : ""}`;
+  $("#st-theme").onchange = (e) => setTheme(e.target.value);
+  bindForm($("#st-general"));
+  $("#st-sync").onclick = () => showDataSync();
+  $("#st-agents").onclick = () => connectAgents();
+  if ($("#st-svc")) $("#st-svc").onclick = () => showServices();
+  $("#st-body").querySelectorAll("[data-open]").forEach((b) => { b.onclick = () => openTarget(b.dataset.open); });
+}
+
+function tabModels() {
+  const ed = settings.data.editable;
+  const testBtn = (kind, label) => `<div class="row"><button type="button" data-test="${kind}">${icon("refresh")} ${label}</button></div><div class="small" data-test-msg="${kind}"></div>`;
+  $("#st-body").innerHTML = `
+    <form id="st-models-form">
+      <datalist id="st-models">${settings.models.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
+      <h2 style="margin-top:0">Model bahasa (LLM)</h2>
+      <div class="card">
+        ${F_LLM.map(fieldHtml).join("")}
+        <details><summary>Lanjutan</summary><div class="cols">${F_LLM_ADV.map(fieldHtml).join("")}</div></details>
+        ${testBtn("llm", "Tes koneksi LLM")}
+      </div>
+      <h2>Embedding (pencarian makna)</h2>
+      <div class="card">
+        ${F_EMB.map(fieldHtml).join("")}
+        <details><summary>Lanjutan</summary><div class="cols">${F_EMB_ADV.map(fieldHtml).join("")}</div></details>
+        ${testBtn("embedding", "Tes koneksi embedding")}
+      </div>
+      <h2>Transkripsi audio</h2>
+      <div class="card">
+        ${F_TR.map(fieldHtml).join("")}
+        ${testBtn("transcription", "Tes koneksi transkripsi")}
+      </div>
+      <p class="small msg"></p>
+      ${ed ? `<div class="row"><button class="primary" type="submit">${icon("check")} Simpan</button><span class="small muted">Berlaku setelah aplikasi dibuka ulang.</span></div>` : ""}
+    </form>`;
+  const form = $("#st-models-form");
+  bindForm(form);
+  form.querySelectorAll("[data-test]").forEach((b) => {
+    b.onclick = async () => {
+      const kind = b.dataset.test, out = form.querySelector(`[data-test-msg="${kind}"]`);
+      b.disabled = true;
+      out.textContent = "Menguji...";
+      try {
+        // Uji nilai di formulir (belum disimpan).
+        const r = await api("/api/settings/test", { method: "POST", json: { kind, values: collectChanges(form) } });
+        out.innerHTML = `<span class="${r.ok ? "ok-text" : "bad-text"}">${icon(r.ok ? "check" : "alert")} ${esc(r.message)}</span>`;
+        if (r.models?.length) {
+          settings.models = r.models;
+          $("#st-models").innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join("");
+          out.innerHTML += `<div class="hint">Model di server: ${r.models.map(esc).join(", ")}</div>`;
+        }
+      } catch (e) { out.innerHTML = errLine(e.message); }
+      b.disabled = false;
+    };
+  });
+}
+
+function tabProcessing() {
+  $("#st-body").innerHTML = `
+    <form id="st-proc-form" class="card">
+      <div class="cols">${F_PROC.map(fieldHtml).join("")}</div>
+      <p class="small msg"></p>
+      ${settings.data.editable ? `<div class="row"><button class="primary" type="submit">${icon("check")} Simpan</button><span class="small muted">Berlaku setelah aplikasi dibuka ulang.</span></div>` : ""}
+    </form>`;
+  bindForm($("#st-proc-form"));
+}
+
+function tabAbout() {
+  const a = settings.about;
+  const host = a.host === "desktop" ? "Aplikasi desktop" : "Server (engram serve)";
+  $("#st-body").innerHTML = `
+    <div class="card">
+      <h3 style="font-size:20px;margin:0">engram <span class="badge">v${esc(a.version)}</span></h3>
+      <p class="muted small" style="margin:4px 0 10px">Arsip memori pribadi: menyimpan cerita, fakta, dan cara berpikir seseorang secara lokal, lengkap dengan server MCP untuk agent AI.</p>
+      <dl class="kv">
+        <dt>Versi</dt><dd>${esc(a.version)}</dd>
+        <dt>Mode</dt><dd>${esc(host)}</dd>
+        <dt>Sistem</dt><dd>${esc(a.os)} / ${esc(a.arch)}</dd>
+        <dt>Lisensi</dt><dd>${esc(a.license)}</dd>
+        <dt>Lokasi data</dt><dd><code>${esc(a.vault)}</code></dd>
+        ${a.config_path ? `<dt>Konfigurasi</dt><dd><code>${esc(a.config_path)}</code></dd>` : ""}
+      </dl>
+      <div class="row" style="margin-top:12px">
+        <button type="button" data-open="repo">${icon("external")} Halaman proyek</button>
+        <button type="button" data-open="releases">${icon("external")} Catatan rilis</button>
+        <button type="button" data-open="issues">${icon("flag")} Laporkan masalah</button>
+      </div>
+    </div>
+    <h2>Pembaruan</h2>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>Versi terpasang <b>${esc(a.version)}</b></div>
+        <button type="button" id="st-check">${icon("refresh")} Periksa update</button>
+      </div>
+      <div id="st-update" class="small" style="margin-top:8px"></div>
+      ${a.auto_update !== null && a.auto_update !== undefined ? `<label class="field check" style="margin-top:10px"><input type="checkbox" id="st-auto" ${a.auto_update ? "checked" : ""}><span>Periksa update otomatis</span></label>` : ""}
+    </div>`;
+  const urls = { repo: a.repository, releases: a.repository + "/releases", issues: a.repository + "/issues" };
+  $("#st-body").querySelectorAll("[data-open]").forEach((b) => { b.onclick = () => openTarget(b.dataset.open, urls[b.dataset.open]); });
+  $("#st-check").onclick = checkUpdate;
+  if ($("#st-auto")) {
+    $("#st-auto").onchange = async (e) => {
+      try {
+        await api("/api/update/auto", { method: "POST", json: { enabled: e.target.checked } });
+        settings.about.auto_update = e.target.checked;
+        toast(e.target.checked ? "Update otomatis aktif" : "Update otomatis dimatikan");
+      } catch (err) { toast(err.message); e.target.checked = !e.target.checked; }
+    };
+  }
+  if (settings.update) renderUpdate();
+  else checkUpdate();
+}
+
+async function checkUpdate() {
+  const b = $("#st-check");
+  b.disabled = true;
+  $("#st-update").textContent = "Memeriksa...";
+  try {
+    settings.update = await api("/api/update/check", { method: "POST" });
+    renderUpdate();
+  } catch (e) { $("#st-update").innerHTML = errLine(e.message); }
+  b.disabled = false;
+}
+
+function renderUpdate() {
+  const u = settings.update, el = $("#st-update");
+  if (!el) return;
+  $("#update-dot").hidden = !u.available;
+  if (!u.available) { el.innerHTML = `<span class="ok-text">${icon("check")} Sudah versi terbaru${u.latest ? ` (${esc(u.latest)})` : ""}.</span>`; return; }
+  el.innerHTML = `
+    <div class="notice">
+      <b>Versi ${esc(u.latest)} tersedia</b>${u.date ? ` <span class="muted">&middot; ${esc(new Date(u.date).toLocaleDateString("id-ID"))}</span>` : ""}
+      ${u.notes ? `<pre class="src" style="max-height:200px;margin:8px 0">${esc(u.notes)}</pre>` : ""}
+      <div class="row" style="margin-top:6px">
+        ${u.can_install ? `<button class="primary" id="st-install">${icon("download")} Pasang & buka ulang</button>` : `<button type="button" id="st-dl">${icon("external")} Unduh di GitHub</button>`}
+      </div>
+      <div class="small" id="st-install-msg"></div>
+    </div>`;
+  if ($("#st-dl")) $("#st-dl").onclick = () => openTarget("releases", u.url);
+  if ($("#st-install")) {
+    $("#st-install").onclick = async () => {
+      $("#st-install").disabled = true;
+      try {
+        const r = await api("/api/update/install", { method: "POST" });
+        $("#st-install-msg").textContent = r.message;
+      } catch (e) { $("#st-install-msg").innerHTML = errLine(e.message); $("#st-install").disabled = false; }
     };
   }
 }

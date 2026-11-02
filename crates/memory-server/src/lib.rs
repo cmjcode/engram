@@ -6,6 +6,7 @@
 pub mod api;
 pub mod install;
 pub mod mcp;
+pub mod settings;
 
 use std::sync::Arc;
 
@@ -31,6 +32,9 @@ pub struct AppState {
     /// Pengendali layanan latar (worker, scheduler, inbox, server). Hanya diisi
     /// aplikasi desktop; `engram serve` membiarkannya kosong.
     pub services: Option<Arc<dyn ServiceControl>>,
+    /// Berkas `memory.toml` yang dipakai. Bila diisi, UI bisa mengubah pengaturan
+    /// (berlaku setelah dijalankan ulang). Kosong = pengaturan hanya bisa dilihat.
+    pub config_path: Option<std::path::PathBuf>,
 }
 
 /// Status satu layanan latar untuk ditampilkan di UI.
@@ -62,12 +66,36 @@ pub trait ServiceControl: Send + Sync {
     fn move_vault(&self, _target: &std::path::Path) -> Result<String, String> {
         Err("pemindahan lokasi data hanya tersedia di aplikasi desktop; pakai `engram vault move`".into())
     }
+    /// Cek update lewat updater aplikasi (memblokir). `None` = tidak didukung;
+    /// server lalu memeriksa rilis GitHub sendiri.
+    fn check_update(&self) -> Option<Result<settings::UpdateInfo, String>> {
+        None
+    }
+    /// Unduh & pasang update lalu buka ulang aplikasi (berjalan di latar).
+    fn install_update(&self) -> Result<String, String> {
+        Err("pasang update hanya tersedia di aplikasi desktop; unduh rilis baru dari GitHub".into())
+    }
+    /// Cek update otomatis aktif? `None` = tidak ada pengaturan ini.
+    fn auto_update(&self) -> Option<bool> {
+        None
+    }
+    fn set_auto_update(&self, _on: bool) -> Result<(), String> {
+        Err("pengaturan ini hanya ada di aplikasi desktop".into())
+    }
+    /// Buka ulang aplikasi (agar pengaturan baru berlaku).
+    fn restart(&self) -> Result<String, String> {
+        Err("jalankan ulang `engram serve` agar pengaturan baru berlaku".into())
+    }
+    /// Buka folder/berkas di pengelola berkas, atau URL di browser.
+    fn open(&self, _target: &str) -> Result<(), String> {
+        Err("hanya tersedia di aplikasi desktop".into())
+    }
 }
 
 impl AppState {
     pub fn new(rt: Runtime, importer: Importer) -> Self {
         let token = rt.cfg.server.token_env.as_deref().and_then(|k| std::env::var(k).ok()).filter(|t| !t.is_empty()).map(Arc::new);
-        Self { rt, importer, token, mcp_url: None, services: None }
+        Self { rt, importer, token, mcp_url: None, services: None, config_path: None }
     }
 
     pub fn default_subject(&self) -> String {

@@ -449,6 +449,7 @@ async fn main() -> Result<()> {
             let stop = shutdown_signal();
             let hs = if no_worker { vec![] } else { background(&rt, &stop, true).await };
             let mut st = memory_server::AppState::new(rt.clone(), importer(&rt));
+            st.config_path = std::path::absolute(&cli.config).ok();
             let addr = bind.clone().unwrap_or_else(|| rt.cfg.server.bind.clone());
             // Pemasangan MCP ke agent AI hanya untuk server di komputer ini sendiri.
             if addr.starts_with("127.") || addr.starts_with("localhost") {

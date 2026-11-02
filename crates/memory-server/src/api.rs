@@ -58,6 +58,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pick-folder", post(pick_folder))
         .route("/api/sync", get(sync_status).put(sync_settings))
         .route("/api/sync/run", post(sync_run))
+        .route("/api/about", get(about))
+        .route("/api/update/check", post(update_check))
+        .route("/api/update/install", post(update_install))
+        .route("/api/update/auto", post(update_auto))
+        .route("/api/settings", get(settings_get).put(settings_put))
+        .route("/api/settings/test", post(settings_test))
+        .route("/api/restart", post(restart))
+        .route("/api/open", post(open_target))
 }
 
 fn check(s: &str) -> Result<(), ApiError> {
@@ -510,4 +518,137 @@ async fn sync_settings(State(st): State<AppState>, Json(b): Json<SyncIn>) -> Api
 
 async fn sync_run(State(st): State<AppState>) -> ApiResult<memory_jobs::sync::SyncReport> {
     memory_jobs::sync::sync_now(&st.rt).await.map(Json).map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
+// ---------------------------------------------------------------- pengaturan, tentang, update
+
+fn blocking_err(e: tokio::task::JoinError) -> ApiError {
+    ApiError::Internal(e.to_string())
+}
+
+async fn about(State(st): State<AppState>) -> ApiResult<Value> {
+    let c = st.services.as_ref();
+    Ok(Json(json!({
+        "name": "engram",
+        "version": crate::settings::VERSION,
+        "license": "AGPL-3.0-or-later",
+        "repository": crate::settings::REPO_URL,
+        "host": if c.is_some() { "desktop" } else { "server" },
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "vault": st.rt.vault.root(),
+        "config_path": st.config_path,
+        "auto_update": c.and_then(|c| c.auto_update()),
+        "can_open": c.is_some(),
+        "can_restart": c.is_some(),
+    })))
+}
+
+async fn update_check(State(st): State<AppState>) -> ApiResult<crate::settings::UpdateInfo> {
+    if let Some(c) = st.services.clone() {
+        let res = tokio::task::spawn_blocking(move || c.check_update()).await.map_err(blocking_err)?;
+        if let Some(r) = res {
+            return r.map(Json).map_err(ApiError::BadRequest);
+        }
+    }
+    crate::settings::check_github().await.map(Json).map_err(ApiError::BadRequest)
+}
+
+async fn update_install(State(st): State<AppState>) -> ApiResult<Value> {
+    let c = st.services.as_ref().ok_or_else(|| ApiError::BadRequest("pasang update hanya tersedia di aplikasi desktop; unduh rilis baru dari GitHub".into()))?;
+    let msg = c.install_update().map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true, "message": msg})))
+}
+
+#[derive(Deserialize)]
+struct OnIn {
+    enabled: bool,
+}
+
+async fn update_auto(State(st): State<AppState>, Json(b): Json<OnIn>) -> ApiResult<Value> {
+    let c = st.services.as_ref().ok_or_else(|| ApiError::BadRequest("pengaturan ini hanya ada di aplikasi desktop".into()))?;
+    c.set_auto_update(b.enabled).map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true, "auto_update": c.auto_update()})))
+}
+
+/// Nilai pengaturan dari memory.toml, dan apakah berbeda dari yang sedang dipakai.
+fn settings_view(st: &AppState) -> Result<Value, ApiError> {
+    use crate::settings::{editable_values, preview};
+    let file = preview(st.config_path.as_deref(), &st.rt.cfg, None).map_err(ApiError::BadRequest)?;
+    let (saved, running) = (editable_values(&file), editable_values(&st.rt.cfg));
+    // Rahasia hanya terlihat sebagai *_set; bandingkan nilai aslinya juga.
+    let secret_changed = file.llm.api_key != st.rt.cfg.llm.api_key || file.embedding.api_key != st.rt.cfg.embedding.api_key;
+    Ok(json!({
+        "editable": st.config_path.is_some(),
+        "config_path": st.config_path,
+        "values": saved,
+        "restart_required": saved != running || secret_changed,
+    }))
+}
+
+async fn settings_get(State(st): State<AppState>) -> ApiResult<Value> {
+    settings_view(&st).map(Json)
+}
+
+#[derive(Deserialize)]
+struct SettingsIn {
+    values: Value,
+}
+
+async fn settings_put(State(st): State<AppState>, Json(b): Json<SettingsIn>) -> ApiResult<Value> {
+    let path = st.config_path.clone().ok_or_else(|| ApiError::BadRequest("lokasi memory.toml tidak diketahui; ubah berkasnya langsung".into()))?;
+    tokio::task::spawn_blocking(move || crate::settings::save(&path, &b.values)).await.map_err(blocking_err)?.map_err(ApiError::BadRequest)?;
+    settings_view(&st).map(Json)
+}
+
+#[derive(Deserialize)]
+struct TestIn {
+    kind: String,
+    /// Perubahan yang belum disimpan, format sama dengan PUT /api/settings.
+    #[serde(default)]
+    values: Option<Value>,
+}
+
+async fn settings_test(State(st): State<AppState>, Json(b): Json<TestIn>) -> ApiResult<Value> {
+    use crate::settings;
+    let cfg = settings::preview(st.config_path.as_deref(), &st.rt.cfg, b.values.as_ref()).map_err(ApiError::BadRequest)?;
+    Ok(Json(match b.kind.as_str() {
+        "llm" => settings::test_llm(&cfg).await,
+        "embedding" => settings::test_embedding(&cfg).await,
+        "transcription" => settings::test_transcription(&cfg).await,
+        k => return Err(ApiError::BadRequest(format!("jenis tes tidak dikenal: {k}"))),
+    }))
+}
+
+async fn restart(State(st): State<AppState>) -> ApiResult<Value> {
+    let c = st.services.as_ref().ok_or_else(|| ApiError::BadRequest("jalankan ulang `engram serve` agar pengaturan baru berlaku".into()))?;
+    let msg = c.restart().map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true, "message": msg})))
+}
+
+#[derive(Deserialize)]
+struct OpenIn {
+    target: String,
+}
+
+/// Hanya target yang dikenal; UI tidak bisa membuka path atau URL sembarang.
+async fn open_target(State(st): State<AppState>, Json(b): Json<OpenIn>) -> ApiResult<Value> {
+    let c = st.services.as_ref().ok_or_else(|| ApiError::BadRequest("hanya tersedia di aplikasi desktop".into()))?;
+    let repo = crate::settings::REPO_URL;
+    let vault = st.rt.vault.root();
+    let target = match b.target.as_str() {
+        "vault" => vault.display().to_string(),
+        "inbox" => {
+            let dir = vault.join("inbox");
+            std::fs::create_dir_all(&dir)?;
+            dir.display().to_string()
+        }
+        "config" => st.config_path.as_ref().and_then(|p| p.parent()).ok_or_else(|| ApiError::BadRequest("lokasi memory.toml tidak diketahui".into()))?.display().to_string(),
+        "repo" => repo.to_string(),
+        "releases" => format!("{repo}/releases"),
+        "issues" => format!("{repo}/issues"),
+        t => return Err(ApiError::BadRequest(format!("target tidak dikenal: {t}"))),
+    };
+    c.open(&target).map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true})))
 }

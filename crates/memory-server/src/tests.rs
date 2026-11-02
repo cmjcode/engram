@@ -31,6 +31,10 @@ async fn spawn(token: Option<&str>) -> (String, AppState, tempfile::TempDir) {
 }
 
 async fn spawn_with(token: Option<&str>, services: Option<Arc<dyn ServiceControl>>) -> (String, AppState, tempfile::TempDir) {
+    spawn_full(token, services, None).await
+}
+
+async fn spawn_full(token: Option<&str>, services: Option<Arc<dyn ServiceControl>>, config_path: Option<std::path::PathBuf>) -> (String, AppState, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = MemoryConfig::for_tests(DIM);
     cfg.vault.path = dir.path().to_path_buf();
@@ -41,6 +45,7 @@ async fn spawn_with(token: Option<&str>, services: Option<Arc<dyn ServiceControl
     let mut st = AppState::new(rt, importer);
     st.token = token.map(|t| Arc::new(t.to_string()));
     st.services = services;
+    st.config_path = config_path;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(st.clone());
@@ -242,4 +247,77 @@ async fn storage_and_sync_settings_api() {
     // Mematikan sync.
     let r: Value = c.put(format!("{base}/api/sync")).json(&json!({"dir": null})).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["configured"], false);
+}
+
+#[tokio::test]
+async fn about_and_settings_api() {
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let path = cfg_dir.path().join("memory.toml");
+    std::fs::write(&path, "[llm]\nbase_url = \"http://localhost:5211/v1\"\n\n[index]\nhnsw_m = 24\n").unwrap();
+    let (base, _st, _d) = spawn_full(None, None, Some(path.clone())).await;
+    let c = reqwest::Client::new();
+
+    let a: Value = c.get(format!("{base}/api/about")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(a["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(a["host"], "server");
+    assert_eq!(a["can_restart"], false);
+
+    let s: Value = c.get(format!("{base}/api/settings")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(s["editable"], true);
+    assert_eq!(s["values"]["llm"]["base_url"], "http://localhost:5211/v1");
+    assert_eq!(s["values"]["llm"]["api_key_set"], false);
+
+    // Simpan: kunci lain di berkas tetap, API key tidak pernah dikirim balik.
+    let r = c
+        .put(format!("{base}/api/settings"))
+        .json(&json!({"values": {"llm": {"extract_model": "qwen3", "api_key": "sk-rahasia"}, "pipeline": {"workers": 4}}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let s: Value = r.json().await.unwrap();
+    assert_eq!(s["values"]["llm"]["extract_model"], "qwen3");
+    assert_eq!(s["values"]["llm"]["api_key_set"], true);
+    assert_eq!(s["values"]["pipeline"]["workers"], 4);
+    assert_eq!(s["restart_required"], true);
+    assert!(!s.to_string().contains("sk-rahasia"));
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert!(file.contains("hnsw_m = 24"), "{file}");
+    assert!(file.contains("sk-rahasia"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    // Kunci di luar daftar dan nilai tidak valid ditolak; berkas tidak berubah.
+    for bad in [json!({"index": {"hnsw_m": 8}}), json!({"pipeline": {"workers": 0}}), json!({"embedding": {"provider": "x"}})] {
+        let r = c.put(format!("{base}/api/settings")).json(&json!({"values": bad})).send().await.unwrap();
+        assert_eq!(r.status(), 400, "{bad}");
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), file);
+
+    // Tes koneksi memakai nilai yang belum disimpan.
+    let t = post(&c, format!("{base}/api/settings/test"), json!({"kind": "embedding", "values": {"embedding": {"provider": "hash"}}})).await;
+    assert_eq!(t["ok"], true);
+    let t = post(&c, format!("{base}/api/settings/test"), json!({"kind": "llm", "values": {"llm": {"base_url": "http://127.0.0.1:9/v1"}}})).await;
+    assert_eq!(t["ok"], false);
+
+    // Tanpa aplikasi desktop: buka ulang, pasang update, dan buka folder tidak tersedia.
+    for ep in ["restart", "update/install", "open"] {
+        let r = c.post(format!("{base}/api/{ep}")).json(&json!({"target": "vault"})).send().await.unwrap();
+        assert_eq!(r.status(), 400, "{ep}");
+    }
+}
+
+#[tokio::test]
+async fn settings_read_only_without_config_path() {
+    let (base, _st, _d) = spawn(None).await;
+    let c = reqwest::Client::new();
+    let s: Value = c.get(format!("{base}/api/settings")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(s["editable"], false);
+    assert_eq!(s["restart_required"], false);
+    assert_eq!(s["values"]["embedding"]["provider"], "hash");
+    let r = c.put(format!("{base}/api/settings")).json(&json!({"values": {"pipeline": {"workers": 3}}})).send().await.unwrap();
+    assert_eq!(r.status(), 400);
 }

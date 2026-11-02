@@ -45,6 +45,9 @@ pub struct LlmConfig {
     pub base_url: String,
     /// Nama env var berisi API key (opsional untuk vLLM lokal).
     pub api_key_env: Option<String>,
+    /// API key langsung (dipakai bila env var kosong). Untuk aplikasi desktop yang tidak
+    /// mewarisi env shell; disimpan apa adanya di memory.toml.
+    pub api_key: Option<String>,
     /// Model besar: ekstraksi, distilasi, verifikasi.
     pub extract_model: String,
     /// Model ringan: segmentasi, klasifikasi, adjudikasi.
@@ -66,6 +69,7 @@ impl Default for LlmConfig {
         Self {
             base_url: "http://localhost:5211/v1".into(),
             api_key_env: None,
+            api_key: None,
             extract_model: "/models/Qwen3.6-35B-A3B-FP8".into(),
             light_model: "/models/gemma-4-12B-it".into(),
             light_base_url: None,
@@ -88,6 +92,8 @@ pub struct EmbeddingConfig {
     pub dimension: usize,
     pub batch_size: usize,
     pub api_key_env: Option<String>,
+    /// API key langsung (dipakai bila env var kosong).
+    pub api_key: Option<String>,
     /// "openai" (default) atau "hash" (deterministik, tanpa server; untuk uji/offline).
     pub provider: String,
 }
@@ -100,6 +106,7 @@ impl Default for EmbeddingConfig {
             dimension: 1024,
             batch_size: 32,
             api_key_env: None,
+            api_key: None,
             provider: "openai".into(),
         }
     }
@@ -279,6 +286,25 @@ impl Default for TranscriptionConfig {
 pub struct BackupConfig {
     /// Penerima `age` (age1...) untuk enkripsi backup. Kosong = tanpa enkripsi.
     pub age_recipient: Option<String>,
+}
+
+/// API key dari env var `env` (bila terisi), selain itu dari nilai langsung.
+pub fn resolve_api_key(env: Option<&str>, direct: Option<&str>) -> Option<String> {
+    env.and_then(|k| std::env::var(k).ok())
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| direct.map(str::trim).filter(|k| !k.is_empty()).map(String::from))
+}
+
+impl LlmConfig {
+    pub fn resolved_api_key(&self) -> Option<String> {
+        resolve_api_key(self.api_key_env.as_deref(), self.api_key.as_deref())
+    }
+}
+
+impl EmbeddingConfig {
+    pub fn resolved_api_key(&self) -> Option<String> {
+        resolve_api_key(self.api_key_env.as_deref(), self.api_key.as_deref())
+    }
 }
 
 impl MemoryConfig {

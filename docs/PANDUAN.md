@@ -106,6 +106,25 @@ Tool: `recall`, `who_is`, `timeline`, `principles`, `persona_context`,
 - `engram who "Pakde Karno"`, `engram timeline --entity Karno`, `engram principles`.
 - `engram review list` lalu `approve`/`reject`: konflik fakta, entitas kembar, data zona abu-abu.
 
+## Pengaturan, tentang & update
+
+Klik ikon roda gigi di kanan atas UI:
+
+- **Umum**: tema (ikuti sistem/terang/gelap), subjek default, pintasan ke Data & Sync, Agent AI,
+  dan (desktop) tombol buka folder data, inbox, dan konfigurasi.
+- **Model AI**: alamat server & model LLM, embedding, dan transkripsi Whisper, termasuk API key.
+  Tombol *Tes koneksi* menguji nilai di formulir sebelum disimpan dan menampilkan daftar model di server.
+  Ganti model/dimensi embedding: jalankan `engram reembed` setelah dibuka ulang.
+- **Pemrosesan**: jumlah pekerja, interval inbox, proses ulang sumber gagal, umur obrolan ringan,
+  jumlah hasil pencarian, batas upload.
+- **Tentang & update**: versi, lisensi, lokasi data & `memory.toml`, tautan proyek, *Periksa update*.
+  Di aplikasi desktop update bisa langsung dipasang, dan cek otomatis bisa dimatikan.
+  Di `engram serve` hanya ditampilkan tautan unduhan.
+
+Pengaturan disimpan ke `memory.toml` (kunci lain tidak diubah) dan berlaku setelah aplikasi dibuka
+ulang; tombol *Buka ulang sekarang* muncul di aplikasi desktop. API key tidak pernah dikirim balik ke UI;
+`api_key_env` (env var) tetap didahulukan bila terisi.
+
 ## Lokasi data
 
 Semua memori (database, berkas sumber, inbox, ekspor) ada di satu folder vault.
