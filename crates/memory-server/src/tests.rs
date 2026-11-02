@@ -203,3 +203,43 @@ async fn services_disabled_without_controller() {
     let bad = reqwest::Client::new().post(format!("{base}/api/services/workers/start")).send().await.unwrap();
     assert_eq!(bad.status(), 400);
 }
+
+#[tokio::test]
+async fn storage_and_sync_settings_api() {
+    let (base, st, _dir) = spawn(None).await;
+    let c = reqwest::Client::new();
+    let r: Value = c.get(format!("{base}/api/storage")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["vault"], json!(st.rt.vault.root()));
+    assert_eq!(r["can_change"], false, "tanpa aplikasi desktop lokasi tidak bisa diubah dari UI");
+    let bad = c.post(format!("{base}/api/storage/move")).json(&json!({"path": "/tmp/x"})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+
+    // Atur folder sync + kata sandi, lalu jalankan.
+    let drive = tempfile::tempdir().unwrap();
+    let r: Value = c
+        .put(format!("{base}/api/sync"))
+        .json(&json!({"dir": drive.path(), "interval_minutes": 5, "device_name": "Laptop", "passphrase": "rahasia-keluarga"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["configured"], true);
+    assert_eq!(r["encrypted"], true);
+    assert_eq!(r["settings"]["interval_minutes"], 5);
+    let run = post(&c, format!("{base}/api/sync/run"), json!({})).await;
+    assert_eq!(run["pushed"], true, "{run}");
+    let r: Value = c.get(format!("{base}/api/sync")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["devices"][0]["name"], "Laptop");
+    assert!(r["last_sync_at"].is_string());
+
+    // Kata sandi terlalu pendek ditolak; folder relatif ditolak.
+    let bad = c.put(format!("{base}/api/sync")).json(&json!({"dir": drive.path(), "passphrase": "pendek"})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    let bad = c.put(format!("{base}/api/sync")).json(&json!({"dir": "relatif/folder"})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    // Mematikan sync.
+    let r: Value = c.put(format!("{base}/api/sync")).json(&json!({"dir": null})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["configured"], false);
+}

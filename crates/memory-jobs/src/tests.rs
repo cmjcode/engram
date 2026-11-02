@@ -154,3 +154,102 @@ async fn failed_sources_are_retried_only_when_backends_are_up() {
     assert_eq!(s.meta["auto_retries"].as_u64(), Some(0));
     assert!(r.retry_source(&id).await.unwrap().is_none(), "sumber yang tidak gagal tidak diantre");
 }
+
+#[tokio::test]
+async fn two_computers_sync_through_shared_folder() {
+    use crate::sync::{self, SyncSettings};
+
+    let drive = tempfile::tempdir().unwrap();
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (rt(da.path()).await, rt(db.path()).await);
+    let setup = |r: &Runtime, name: &str| {
+        let s = sync::save_settings(&r.vault, SyncSettings { dir: Some(drive.path().to_path_buf()), interval_minutes: 0, device_name: Some(name.into()) }).unwrap();
+        sync::set_passphrase(&r.vault, Some("rahasia-keluarga")).unwrap();
+        s
+    };
+    let ingest = |r: Runtime, text: &'static str| async move {
+        r.pipeline.ingest(IngestDoc { subject: "budi".into(), kind: SourceKind::Memoir, text: text.into(), ..Default::default() }).await.unwrap();
+        r.drain().await.unwrap();
+    };
+
+    // Folder Drive kosong dipakai langsung.
+    assert_eq!(setup(&a, "Laptop").dir.unwrap(), drive.path());
+    setup(&b, "PC kantor");
+    ingest(a.clone(), "Waktu kecil saya tinggal di rumah kayu dekat sungai bersama simbah di desa.").await;
+
+    // A mengunggah; snapshot terenkripsi, tidak ada teks polos di folder Drive.
+    let ra = sync::sync_now(&a).await.unwrap();
+    assert!(ra.pushed && ra.source_files_out >= 1, "{ra:?}");
+    let devs = sync::status(&a).devices;
+    assert_eq!(devs.len(), 1);
+    assert!(devs[0].encrypted && devs[0].this_device);
+    for e in walk(drive.path()) {
+        let bytes = std::fs::read(&e).unwrap();
+        if e.to_string_lossy().contains("snapshot") {
+            assert!(bytes.starts_with(b"age-encryption.org/v1"), "{}", e.display());
+        }
+    }
+
+    // B menarik data A dan bisa langsung mencarinya (embedding dihitung di B).
+    let rb = sync::sync_now(&b).await.unwrap();
+    assert_eq!(rb.pulled_from, vec!["Laptop".to_string()], "{rb:?}");
+    assert!(rb.added > 0 && rb.embedded > 0 && rb.pending_embed == 0, "{rb:?}");
+    assert_eq!(b.store.count_episodes("budi").await.unwrap(), 1);
+    let hits = b.retriever.recall(&memory_retrieve::RecallQuery::new("budi", "rumah kayu dekat sungai")).await.unwrap();
+    assert!(hits.found, "embedding harus ada setelah sync");
+
+    // B menambah cerita; A menerimanya. Data A tidak hilang.
+    ingest(b.clone(), "Tahun 1998 saya merantau ke Jakarta dan bekerja di pabrik tekstil di Tangerang.").await;
+    sync::sync_now(&b).await.unwrap();
+    let ra = sync::sync_now(&a).await.unwrap();
+    assert_eq!(ra.pulled_from, vec!["PC kantor".to_string()], "{ra:?}");
+    assert_eq!(a.store.count_episodes("budi").await.unwrap(), 2);
+    assert_eq!(b.store.count_episodes("budi").await.unwrap(), 2);
+
+    // B menarik snapshot A yang isinya sudah sama: tidak ada record yang ditimpa.
+    let same = sync::sync_now(&b).await.unwrap();
+    assert_eq!(same.pulled_from.len(), 1, "{same:?}");
+    assert_eq!((same.added, same.updated, same.embedded), (0, 0, 0), "{same:?}");
+
+    // Tanpa perubahan: tidak ada yang diunggah atau ditarik ulang.
+    let again = sync::sync_now(&a).await.unwrap();
+    let again_b = sync::sync_now(&b).await.unwrap();
+    assert!(!again_b.pushed && again_b.pulled_from.is_empty() && again_b.added + again_b.updated == 0, "{again_b:?} {again:?}");
+
+    // Komputer ketiga dengan kata sandi salah: ditolak dengan pesan jelas, data tidak tercampur.
+    let dc = tempfile::tempdir().unwrap();
+    let c = rt(dc.path()).await;
+    sync::save_settings(&c.vault, SyncSettings { dir: Some(drive.path().to_path_buf()), interval_minutes: 0, device_name: None }).unwrap();
+    sync::set_passphrase(&c.vault, Some("kata-sandi-lain")).unwrap();
+    let rc = sync::sync_now(&c).await.unwrap();
+    assert!(rc.pulled_from.is_empty() && rc.warnings.iter().any(|w| w.contains("tidak cocok")), "{rc:?}");
+    assert_eq!(c.store.count_episodes("budi").await.unwrap(), 0);
+    assert!(sync::set_passphrase(&c.vault, Some("pendek")).is_err());
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        if e.path().is_dir() {
+            out.extend(walk(&e.path()));
+        } else {
+            out.push(e.path());
+        }
+    }
+    out
+}
+
+#[test]
+fn merge_unions_id_lists_and_converges() {
+    use crate::sync::{merge, same};
+    let a = json!({"id": "e1", "name": "Budi", "episode_ids": ["x", "y"], "mention_count": 2, "error": null});
+    let b = json!({"id": "e1", "name": "Budi", "episode_ids": ["x", "z"], "mention_count": 3});
+    // Masing-masing komputer menggabung dari sisinya; hasilnya setara.
+    let on_a = merge(&a, &b);
+    let on_b = merge(&b, &a);
+    assert!(same(&on_a, &on_b), "{on_a} vs {on_b}");
+    assert_eq!(on_a["mention_count"], 3);
+    assert_eq!(on_a["episode_ids"].as_array().unwrap().len(), 3);
+    // null sama dengan field tidak ada.
+    assert!(same(&json!({"id": "s", "error": null}), &json!({"id": "s"})));
+}

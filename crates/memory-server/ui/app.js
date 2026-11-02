@@ -18,6 +18,9 @@ const ICONS = {
   home: '<path d="M4 11 12 4l8 7v9H4z"/><path d="M10 20v-5h4v5"/>',
   plug: '<path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
   play: '<path d="M8 5v14l11-7z"/>',
+  cloud: '<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 8.5a4.5 4.5 0 0 1-.5 9.5z"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  alert: '<path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17v.5"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.5-4.5L4 8M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.5 4.5L20 16M20 20v-4h-4"/>',
 };
 const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
@@ -451,6 +454,7 @@ async function pollBatch(id) {
 $("#subject-select").onchange = (e) => { state.subject = e.target.value; localStorage.setItem("subject", state.subject); route(); };
 $("#new-subject").onclick = () => newSubjectForm();
 $("#connect-agents").onclick = () => connectAgents();
+$("#data-sync").onclick = () => showDataSync();
 $("#services-btn").onclick = () => showServices();
 
 // Status layanan latar (server, worker, scheduler, inbox). Hanya ada di aplikasi desktop.
@@ -560,6 +564,135 @@ async function connectAgents() {
       }
     };
   });
+}
+
+// ---------------------------------------------------------------- lokasi data & sinkronisasi
+const fmtTime = (t) => (t ? new Date(t).toLocaleString("id-ID") : "belum pernah");
+const errLine = (m) => `<span style="color:var(--bad)">${esc(m)}</span>`;
+
+async function pickFolder(title) {
+  const r = await api("/api/pick-folder", { method: "POST", json: { title } });
+  return r.path || "";
+}
+
+async function showDataSync() {
+  openDrawer("Data & Sync", `<div class="empty">Memuat...</div>`);
+  let storage, sync;
+  try { [storage, sync] = await Promise.all([api("/api/storage"), api("/api/sync")]); }
+  catch (e) { $("#drawer-body").innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; return; }
+  const can = storage.can_change;
+  const pickBtn = (id) => (can ? `<button type="button" id="${id}">${icon("folder")} Pilih folder</button>` : "");
+  const intervals = [[0, "Manual saja"], [5, "Tiap 5 menit"], [10, "Tiap 10 menit"], [30, "Tiap 30 menit"], [60, "Tiap jam"]];
+  const cur = sync.settings.interval_minutes;
+  if (!intervals.some(([m]) => m === cur)) intervals.push([cur, `Tiap ${cur} menit`]);
+  $("#drawer-body").innerHTML = `
+    <h2 style="margin-top:0">${icon("folder")} Lokasi data</h2>
+    <div class="card">
+      <div class="small muted">Database dan berkas sumber disimpan di:</div>
+      <p><code>${esc(storage.vault)}</code></p>
+      ${storage.in_cloud_folder ? `<p class="small" style="color:var(--warn)">${icon("alert")} Folder ini disinkron layanan cloud. Database bisa rusak; pindahkan ke folder biasa dan pakai Sinkronisasi di bawah.</p>` : ""}
+      ${can ? `
+        <div class="row"><input type="text" id="mv-path" placeholder="Folder baru, mis. /Users/nama/Documents/engram">${pickBtn("mv-pick")}</div>
+        <p class="small muted">Data disalin ke folder baru, lalu aplikasi dibuka ulang. Folder lama tidak dihapus. Bila folder berisi berkas lain, dibuat subfolder <code>engram-vault</code>. Bila folder sudah berisi data engram, data itu yang dipakai.</p>
+        <div id="mv-confirm"></div>
+        <button class="primary" id="mv-go">${icon("upload")} Pindahkan data</button>
+        <div class="small msg" id="mv-msg"></div>`
+      : `<p class="small muted">Untuk memindah, hentikan server lalu jalankan <code>engram vault move &lt;folder&gt;</code>.</p>`}
+    </div>
+
+    <h2>${icon("cloud")} Sinkronisasi Google Drive</h2>
+    <p class="small muted">Pasang <b>Google Drive for desktop</b> di setiap komputer, lalu pilih folder yang <b>sama</b> di My Drive dan isi kata sandi yang <b>sama</b>.
+      Tiap komputer menyimpan salinan terenkripsi di folder itu dan menggabungkan data komputer lain. Database tetap di lokasi data di atas.</p>
+    <form id="sync-form" class="card">
+      <p><label>Folder sync di Google Drive<br>
+        <span class="row"><input type="text" id="sy-dir" value="${esc(sync.settings.dir || "")}" placeholder="mis. .../Google Drive/My Drive/engram-sync">${pickBtn("sy-pick")}</span></label></p>
+      ${sync.suggestions.length ? `<p class="small muted">Terdeteksi: ${sync.suggestions.map((p) => `<button type="button" class="ghost small" data-suggest="${esc(p)}">${icon("folder")} ${esc(p)}</button>`).join(" ")}</p>` : ""}
+      ${sync.configured && !sync.dir_ok ? `<p class="small" style="color:var(--bad)">${icon("alert")} Folder tidak bisa diakses. Pastikan Google Drive berjalan.</p>` : ""}
+      <p><label>Kata sandi enkripsi (sama di semua komputer)<br>
+        <input type="password" id="sy-pass" autocomplete="new-password" style="width:100%" placeholder="${sync.encrypted ? "tersimpan - kosongkan bila tidak diubah" : "minimal 8 karakter"}"></label></p>
+      ${sync.encrypted ? "" : `<p class="small" style="color:var(--warn)">${icon("alert")} Tanpa kata sandi, isi memori tersimpan apa adanya di Google Drive.</p>`}
+      <div class="row">
+        <label>Jadwal<br><select id="sy-int">${intervals.map(([m, l]) => `<option value="${m}" ${m === cur ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+        <label style="flex:1">Nama komputer ini<br><input type="text" id="sy-name" value="${esc(sync.settings.device_name || "")}" placeholder="${esc(sync.device_name)}" style="width:100%"></label>
+      </div>
+      <p class="small msg" id="sy-msg"></p>
+      <div class="row">
+        <button class="primary" type="submit">${icon("check")} Simpan</button>
+        ${sync.configured ? `<button type="button" id="sy-run">${icon("refresh")} Sync sekarang</button><button type="button" id="sy-off" class="ghost">${icon("x")} Matikan sync</button>` : ""}
+      </div>
+    </form>
+    ${sync.configured ? `<div class="card">
+      <div class="small">Sync terakhir: <b>${esc(fmtTime(sync.last_sync_at))}</b>${sync.pending_embed ? ` &middot; ${sync.pending_embed} record menunggu server embedding` : ""}</div>
+      ${sync.last_error ? `<p class="small">${errLine("Galat: " + sync.last_error)}</p>` : ""}
+      ${sync.last_warnings.map((w) => `<div class="small" style="color:var(--warn)">${icon("alert")} ${esc(w)}</div>`).join("")}
+      ${sync.devices.length ? `<table><tr><th>Komputer</th><th>Record</th><th>Diperbarui</th></tr>
+        ${sync.devices.map((d) => `<tr><td>${esc(d.name)}${d.this_device ? ' <span class="badge now">ini</span>' : ""}${d.encrypted ? "" : ' <span class="badge warn">tanpa enkripsi</span>'}</td><td>${d.rows}</td><td class="small">${esc(fmtTime(d.updated_at))}</td></tr>`).join("")}</table>`
+      : `<p class="small muted">Belum ada data di folder sync. Klik Sync sekarang.</p>`}
+    </div>` : ""}`;
+
+  const msg = (sel, html) => { $(sel).innerHTML = html; };
+  const bindPick = (btnId, inputId, title) => {
+    const b = $("#" + btnId);
+    if (!b) return;
+    b.onclick = async () => {
+      try { const p = await pickFolder(title); if (p) $("#" + inputId).value = p; }
+      catch (e) { toast(e.message); }
+    };
+  };
+  bindPick("mv-pick", "mv-path", "Pilih folder baru untuk data engram");
+  bindPick("sy-pick", "sy-dir", "Pilih folder di Google Drive");
+  $("#drawer-body").querySelectorAll("[data-suggest]").forEach((b) => { b.onclick = () => { $("#sy-dir").value = b.dataset.suggest; }; });
+
+  // Pindah lokasi data: konfirmasi di halaman (WebView tidak menampilkan confirm()).
+  if ($("#mv-go")) {
+    $("#mv-go").onclick = () => {
+      const path = $("#mv-path").value.trim();
+      if (!path) { msg("#mv-msg", errLine("Pilih atau ketik folder tujuan.")); return; }
+      $("#mv-confirm").innerHTML = `<div class="card" style="background:var(--accent-soft)">
+        <p class="small">Data akan disalin ke <code>${esc(path)}</code> lalu aplikasi dibuka ulang. Lanjutkan?</p>
+        <div class="row"><button class="primary" id="mv-yes">${icon("check")} Ya, pindahkan</button><button id="mv-no">${icon("x")} Batal</button></div></div>`;
+      $("#mv-no").onclick = () => { $("#mv-confirm").innerHTML = ""; };
+      $("#mv-yes").onclick = async () => {
+        $("#mv-yes").disabled = true;
+        try {
+          const r = await api("/api/storage/move", { method: "POST", json: { path } });
+          $("#mv-confirm").innerHTML = "";
+          msg("#mv-msg", esc(r.message) + ". Tunggu sebentar...");
+        } catch (e) { $("#mv-confirm").innerHTML = ""; msg("#mv-msg", errLine(e.message)); }
+      };
+    };
+  }
+
+  const saveSync = async (body, okText) => {
+    try {
+      await api("/api/sync", { method: "PUT", json: body });
+      toast(okText);
+      await showDataSync();
+    } catch (e) { msg("#sy-msg", errLine(e.message)); }
+  };
+  $("#sync-form").onsubmit = (e) => {
+    e.preventDefault();
+    const dir = $("#sy-dir").value.trim();
+    if (!dir) { msg("#sy-msg", errLine("Pilih folder sync di Google Drive.")); return; }
+    const body = { dir, interval_minutes: Number($("#sy-int").value), device_name: $("#sy-name").value.trim() };
+    const pass = $("#sy-pass").value;
+    if (pass) body.passphrase = pass;
+    saveSync(body, "Pengaturan sync disimpan");
+  };
+  if ($("#sy-off")) $("#sy-off").onclick = () => saveSync({ dir: null }, "Sinkronisasi dimatikan");
+  if ($("#sy-run")) {
+    $("#sy-run").onclick = async () => {
+      const b = $("#sy-run");
+      b.disabled = true;
+      msg("#sy-msg", "Menyinkronkan...");
+      try {
+        const r = await api("/api/sync/run", { method: "POST" });
+        const from = r.pulled_from.length ? `Data dari ${r.pulled_from.join(", ")}: ${r.added} baru, ${r.updated} diperbarui. ` : "";
+        toast(from + (r.pushed ? "Data komputer ini diunggah." : "Tidak ada perubahan."));
+        await showDataSync();
+      } catch (e) { msg("#sy-msg", errLine(e.message)); b.disabled = false; }
+    };
+  }
 }
 
 // Formulir di dalam halaman; jangan pakai prompt()/confirm(): WebView aplikasi

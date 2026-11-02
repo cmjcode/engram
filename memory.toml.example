@@ -3,6 +3,8 @@
 
 [vault]
 path = "vault"              # satu folder = seluruh memori (db, sumber asli, inbox, ekspor)
+                            # pindah: `engram vault move <folder>`; JANGAN di folder Google Drive
+                            # sync antar komputer: `engram sync setup --dir <folder Drive>` (disimpan di <vault>/sync.json)
 default_subject = "bapak"
 engine = "rocksdb"          # "rocksdb" (produksi) | "mem" (uji)
 

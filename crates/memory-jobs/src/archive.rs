@@ -257,13 +257,7 @@ pub async fn reembed(rt: &Runtime) -> Result<u64> {
         loop {
             let rows = rt.store.dump_table(table, false, PAGE, offset).await?;
             for chunk in rows.chunks(batch) {
-                let texts: Vec<String> = chunk
-                    .iter()
-                    .map(|r| match table {
-                        "episode" => r["text"].as_str().unwrap_or("").to_string(),
-                        _ => serde_json::from_value::<Entity>(r.clone()).map(|e| memory_extract::resolve::entity_embed_text(&e)).unwrap_or_default(),
-                    })
-                    .collect();
+                let texts: Vec<String> = chunk.iter().map(|r| crate::sync::embed_text(table, r)).collect();
                 let vecs = emb.embed(&texts).await?;
                 for (r, v) in chunk.iter().zip(vecs) {
                     if let Some(id) = r["id"].as_str() {

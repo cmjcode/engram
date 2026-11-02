@@ -48,6 +48,20 @@ pub trait ServiceControl: Send + Sync {
     fn list(&self) -> Vec<ServiceInfo>;
     /// Jalankan layanan `id` bila sedang berhenti. Tidak berbuat apa-apa bila sudah jalan.
     fn start(&self, id: &str) -> Result<(), String>;
+    /// Bisa membuka dialog pilih folder & memindah vault (aplikasi desktop).
+    fn can_manage_storage(&self) -> bool {
+        false
+    }
+    /// Dialog pilih folder bawaan sistem (memblokir sampai pengguna memilih).
+    /// `None` bila dibatalkan atau tidak didukung.
+    fn pick_folder(&self, _title: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// Pindahkan vault ke `target` (sudah diperiksa [`memory_jobs::storage::plan_move`]).
+    /// Aplikasi menutup database, menyalin vault, lalu dibuka ulang.
+    fn move_vault(&self, _target: &std::path::Path) -> Result<String, String> {
+        Err("pemindahan lokasi data hanya tersedia di aplikasi desktop; pakai `engram vault move`".into())
+    }
 }
 
 impl AppState {

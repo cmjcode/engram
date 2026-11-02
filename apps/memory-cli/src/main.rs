@@ -142,6 +142,16 @@ enum Cmd {
         #[arg(long)]
         identity: Option<PathBuf>,
     },
+    /// Lokasi vault (database & berkas sumber).
+    Vault {
+        #[command(subcommand)]
+        cmd: VaultCmd,
+    },
+    /// Sinkronisasi antar komputer lewat folder Google Drive.
+    Sync {
+        #[command(subcommand)]
+        cmd: SyncCmd,
+    },
     /// Hitung ulang semua embedding (setelah ganti model).
     Reembed,
     /// Statistik subjek.
@@ -181,6 +191,41 @@ enum SubjectCmd {
         #[arg(long)]
         birth: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    /// Tampilkan lokasi vault.
+    Where,
+    /// Pindahkan vault ke folder lain (disalin; vault lama tidak dihapus) dan perbarui memory.toml.
+    /// Hentikan dulu `engram serve`/`worker`/aplikasi desktop yang memakai vault ini.
+    Move { to: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum SyncCmd {
+    /// Atur folder sync (mis. folder di Google Drive) dan kata sandi enkripsi.
+    Setup {
+        /// Folder sync; kosongkan dengan --off.
+        #[arg(long, required_unless_present = "off")]
+        dir: Option<PathBuf>,
+        /// Sync otomatis tiap N menit saat worker/serve berjalan (0 = manual).
+        #[arg(long)]
+        interval: Option<u64>,
+        /// Nama komputer ini di daftar perangkat.
+        #[arg(long)]
+        name: Option<String>,
+        /// Kata sandi enkripsi (sama di semua komputer). Atau env ENGRAM_SYNC_PASSPHRASE.
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Matikan sinkronisasi.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Sync sekarang: tarik data komputer lain lalu unggah data komputer ini.
+    Run,
+    /// Status & daftar perangkat.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -295,6 +340,16 @@ async fn main() -> Result<()> {
         println!("Vault siap di {} dengan subjek '{}' ({}).", rt.vault.root().display(), s.name, s.id);
         return Ok(());
     }
+    if let Cmd::Vault { cmd } = &cli.cmd {
+        let cfg = load_config(&cli.config)?;
+        return match cmd {
+            VaultCmd::Where => {
+                println!("{}", cfg.vault.path.display());
+                Ok(())
+            }
+            VaultCmd::Move { to } => move_vault(&cli.config, &cfg, to),
+        };
+    }
     if let Cmd::Bench { episodes, queries, index, dir } = &cli.cmd {
         let cfg = load_config(&cli.config)?;
         return bench::run(&cfg, *episodes, *queries, index, dir.clone()).await;
@@ -306,7 +361,7 @@ async fn main() -> Result<()> {
     let j = cli.json;
 
     match cli.cmd {
-        Cmd::Init { .. } | Cmd::Bench { .. } => unreachable!(),
+        Cmd::Init { .. } | Cmd::Bench { .. } | Cmd::Vault { .. } => unreachable!(),
         Cmd::Subject { cmd } => match cmd {
             SubjectCmd::List => {
                 let subs = rt.store.list_subjects().await?;
@@ -506,12 +561,99 @@ async fn main() -> Result<()> {
             let r = memory_jobs::archive::restore(&rt, &file, identity.as_deref()).await?;
             print(j, &r, || format!("{} record, {} berkas sumber, {} embedding dihitung ulang", r.rows, r.source_files, r.reembedded));
         }
+        Cmd::Sync { cmd } => {
+            use memory_jobs::sync;
+            match cmd {
+                SyncCmd::Setup { dir, interval, name, passphrase, off } => {
+                    let mut s = sync::load_settings(&rt.vault);
+                    s.dir = if off { None } else { dir.map(|d| std::path::absolute(&d)).transpose()? };
+                    if let Some(i) = interval {
+                        s.interval_minutes = i;
+                    }
+                    if name.is_some() {
+                        s.device_name = name;
+                    }
+                    if let Some(p) = passphrase {
+                        sync::set_passphrase(&rt.vault, Some(&p))?;
+                    }
+                    let s = sync::save_settings(&rt.vault, s)?;
+                    match &s.dir {
+                        Some(d) => println!("Folder sync: {}\nSync otomatis: {}", d.display(), if s.interval_minutes == 0 { "mati (manual)".to_string() } else { format!("tiap {} menit saat worker/serve berjalan", s.interval_minutes) }),
+                        None => println!("Sinkronisasi dimatikan."),
+                    }
+                    if s.dir.is_some() && !sync::status(&rt).encrypted {
+                        eprintln!("Peringatan: data di Drive tidak dienkripsi. Tambahkan --passphrase (sama di semua komputer).");
+                    }
+                }
+                SyncCmd::Run => {
+                    let r = sync::sync_now(&rt).await?;
+                    print(j, &r, || {
+                        let mut s = format!(
+                            "Ditarik dari: {}\n{} record baru, {} diperbarui, {} versi lokal dipertahankan\nBerkas sumber: {} masuk, {} keluar\nDiunggah: {}",
+                            if r.pulled_from.is_empty() { "-".to_string() } else { r.pulled_from.join(", ") },
+                            r.added,
+                            r.updated,
+                            r.kept_local,
+                            r.source_files_in,
+                            r.source_files_out,
+                            if r.pushed { "ya" } else { "tidak ada perubahan" }
+                        );
+                        for w in &r.warnings {
+                            s.push_str(&format!("\nPeringatan: {w}"));
+                        }
+                        s
+                    });
+                }
+                SyncCmd::Status => {
+                    let st = sync::status(&rt);
+                    print(j, &st, || {
+                        let mut s = match &st.settings.dir {
+                            Some(d) => format!("Folder sync: {}{}", d.display(), if st.dir_ok { "" } else { " (TIDAK bisa diakses)" }),
+                            None => "Sinkronisasi belum diatur. Jalankan `engram sync setup --dir <folder Google Drive>`.".into(),
+                        };
+                        s.push_str(&format!("\nKomputer ini: {} | enkripsi: {} | sync terakhir: {}", st.device_name, if st.encrypted { "ya" } else { "tidak" }, st.last_sync_at.as_deref().unwrap_or("-")));
+                        if let Some(e) = &st.last_error {
+                            s.push_str(&format!("\nGalat terakhir: {e}"));
+                        }
+                        for d in &st.devices {
+                            s.push_str(&format!("\n  {}{}\t{} record\t{}", d.name, if d.this_device { " (ini)" } else { "" }, d.rows, d.updated_at));
+                        }
+                        for p in st.suggestions.iter().filter(|_| st.settings.dir.is_none()) {
+                            s.push_str(&format!("\nSaran folder: {}", p.display()));
+                        }
+                        s
+                    });
+                }
+            }
+        }
         Cmd::Reembed => println!("{} embedding dihitung ulang.", memory_jobs::archive::reembed(&rt).await?),
         Cmd::Stats => {
             let s = rt.store.stats(&subject).await?;
             print(j, &s, || format!("{s:#?}"));
         }
         Cmd::Smoke => smoke(&rt).await?,
+    }
+    Ok(())
+}
+
+/// Salin vault ke lokasi baru lalu arahkan memory.toml ke sana.
+fn move_vault(config: &Path, cfg: &MemoryConfig, to: &Path) -> Result<()> {
+    let to = std::path::absolute(to)?;
+    let plan = memory_jobs::storage::plan_move(&cfg.vault.path, &to)?;
+    let files = memory_jobs::storage::copy_vault(&cfg.vault.path, &plan)?;
+    // Edit sebagai tabel TOML agar kunci lain tetap (komentar tidak ikut terbawa).
+    let mut table: toml::Table = match std::fs::read_to_string(config) {
+        Ok(s) => s.parse().with_context(|| format!("format {}", config.display()))?,
+        Err(_) => toml::Table::new(),
+    };
+    let vault = table.entry("vault").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let toml::Value::Table(vault) = vault else { bail!("[vault] di {} bukan tabel", config.display()) };
+    vault.insert("path".into(), toml::Value::String(plan.target.to_string_lossy().into_owned()));
+    std::fs::write(config, toml::to_string_pretty(&table)?)?;
+    if plan.use_existing {
+        println!("memory.toml sekarang memakai vault yang sudah ada di {}", plan.target.display());
+    } else {
+        println!("{files} berkas disalin ke {}.\nVault lama di {} tidak dihapus; hapus bila semuanya sudah berjalan baik.", plan.target.display(), cfg.vault.path.display());
     }
     Ok(())
 }

@@ -53,6 +53,11 @@ pub fn routes() -> Router<AppState> {
         .route("/api/mcp/clients/{id}/uninstall", post(mcp_uninstall))
         .route("/api/services", get(services))
         .route("/api/services/{id}/start", post(service_start))
+        .route("/api/storage", get(storage))
+        .route("/api/storage/move", post(storage_move))
+        .route("/api/pick-folder", post(pick_folder))
+        .route("/api/sync", get(sync_status).put(sync_settings))
+        .route("/api/sync/run", post(sync_run))
 }
 
 fn check(s: &str) -> Result<(), ApiError> {
@@ -427,4 +432,82 @@ async fn service_start(State(st): State<AppState>, Path(id): Path<String>) -> Ap
     let c = st.services.as_ref().ok_or_else(|| ApiError::BadRequest("pengendali layanan tidak tersedia".into()))?;
     c.start(&id).map_err(ApiError::BadRequest)?;
     Ok(Json(json!({"ok": true, "services": c.list()})))
+}
+
+// ---------------------------------------------------------------- lokasi data & sinkronisasi
+
+async fn storage(State(st): State<AppState>) -> ApiResult<Value> {
+    let root = st.rt.vault.root();
+    Ok(Json(json!({
+        "vault": root,
+        "can_change": st.services.as_ref().is_some_and(|c| c.can_manage_storage()),
+        "in_cloud_folder": memory_jobs::storage::looks_like_cloud_folder(root),
+    })))
+}
+
+#[derive(Deserialize)]
+struct PathIn {
+    path: String,
+}
+
+async fn storage_move(State(st): State<AppState>, Json(b): Json<PathIn>) -> ApiResult<Value> {
+    let c = st.services.clone().filter(|c| c.can_manage_storage()).ok_or_else(|| ApiError::BadRequest("pemindahan lokasi data hanya tersedia di aplikasi desktop; pakai `engram vault move`".into()))?;
+    let to = PathBuf::from(b.path.trim());
+    let plan = memory_jobs::storage::plan_move(st.rt.vault.root(), &to).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let msg = c.move_vault(&plan.target).map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true, "target": plan.target, "use_existing": plan.use_existing, "message": msg})))
+}
+
+#[derive(Deserialize)]
+struct PickIn {
+    #[serde(default)]
+    title: Option<String>,
+}
+
+async fn pick_folder(State(st): State<AppState>, Json(b): Json<PickIn>) -> ApiResult<Value> {
+    let c = st.services.clone().filter(|c| c.can_manage_storage()).ok_or_else(|| ApiError::BadRequest("dialog folder hanya tersedia di aplikasi desktop; ketik path folder".into()))?;
+    let title = b.title.unwrap_or_else(|| "Pilih folder".into());
+    let path = tokio::task::spawn_blocking(move || c.pick_folder(&title)).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({"path": path})))
+}
+
+async fn sync_status(State(st): State<AppState>) -> ApiResult<memory_jobs::sync::SyncStatus> {
+    let rt = st.rt.clone();
+    // Membaca folder Drive bisa lambat (berkas online-only); jangan blok runtime.
+    Ok(Json(tokio::task::spawn_blocking(move || memory_jobs::sync::status(&rt)).await.map_err(|e| ApiError::Internal(e.to_string()))?))
+}
+
+#[derive(Deserialize)]
+struct SyncIn {
+    /// Folder sync; kosong/null = sinkronisasi dimatikan.
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
+    interval_minutes: Option<u64>,
+    #[serde(default)]
+    device_name: Option<String>,
+    /// Kata sandi baru; tidak dikirim = tidak berubah, string kosong = hapus.
+    #[serde(default)]
+    passphrase: Option<String>,
+}
+
+async fn sync_settings(State(st): State<AppState>, Json(b): Json<SyncIn>) -> ApiResult<memory_jobs::sync::SyncStatus> {
+    use memory_jobs::sync;
+    let mut s = sync::load_settings(&st.rt.vault);
+    s.dir = b.dir.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).map(PathBuf::from);
+    if let Some(m) = b.interval_minutes {
+        s.interval_minutes = m;
+    }
+    if b.device_name.is_some() {
+        s.device_name = b.device_name;
+    }
+    if let Some(p) = &b.passphrase {
+        sync::set_passphrase(&st.rt.vault, Some(p.as_str())).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    }
+    sync::save_settings(&st.rt.vault, s).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    sync_status(State(st)).await
+}
+
+async fn sync_run(State(st): State<AppState>) -> ApiResult<memory_jobs::sync::SyncReport> {
+    memory_jobs::sync::sync_now(&st.rt).await.map(Json).map_err(|e| ApiError::BadRequest(e.to_string()))
 }

@@ -3,6 +3,8 @@
 //! scheduler pekerjaan berkala (konsolidasi, distilasi, profil suara, ekspor).
 
 pub mod archive;
+pub mod storage;
+pub mod sync;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +68,8 @@ pub struct Runtime {
     pub pipeline: Pipeline,
     pub retriever: Retriever,
     pub vault: Vault,
+    /// Satu sinkronisasi pada satu waktu (penjadwal & tombol UI).
+    pub sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Runtime {
@@ -90,7 +94,7 @@ impl Runtime {
         let cfg = Arc::new(cfg);
         let pipeline = Pipeline::new(store.clone(), llm.clone(), embedder.clone(), cfg.clone(), vault.clone());
         let retriever = Retriever::new(store.clone(), embedder, llm, cfg.clone());
-        Self { cfg, store, pipeline, retriever, vault }
+        Self { cfg, store, pipeline, retriever, vault, sync_lock: Arc::new(tokio::sync::Mutex::new(())) }
     }
 
     pub async fn enqueue(&self, kind: &str, payload: Value, key: String) -> Result<Job> {
@@ -274,6 +278,7 @@ impl Runtime {
     pub async fn run_scheduler(&self, mut shutdown: watch::Receiver<bool>) {
         let retry_every = Duration::from_secs(self.cfg.schedule.retry_failed_minutes * 60);
         let mut last_retry: Option<std::time::Instant> = None;
+        let mut last_sync: Option<std::time::Instant> = None;
         loop {
             if let Err(e) = self.schedule_due().await {
                 tracing::error!(error = %e, "scheduler error");
@@ -289,11 +294,33 @@ impl Runtime {
                     Err(e) => tracing::error!(error = %e, "proses ulang otomatis gagal"),
                 }
             }
-            let tick = if retry_every.is_zero() { Duration::from_secs(300) } else { retry_every.min(Duration::from_secs(300)) };
+            self.sync_if_due(&mut last_sync).await;
+            // Tiap menit: pengaturan sync bisa diubah dari UI kapan saja.
+            let tick = if retry_every.is_zero() { Duration::from_secs(60) } else { retry_every.min(Duration::from_secs(60)) };
             tokio::select! {
                 _ = tokio::time::sleep(tick) => {}
                 _ = shutdown.changed() => break,
             }
+        }
+    }
+
+    /// Sinkronisasi otomatis bila folder sync diatur dan intervalnya sudah lewat.
+    async fn sync_if_due(&self, last: &mut Option<std::time::Instant>) {
+        let s = sync::load_settings(&self.vault);
+        if s.dir.is_none() || s.interval_minutes == 0 || last.is_some_and(|t| t.elapsed() < Duration::from_secs(s.interval_minutes * 60)) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+        match sync::sync_now(self).await {
+            Ok(r) => {
+                if r.pushed || !r.pulled_from.is_empty() {
+                    tracing::info!(from = ?r.pulled_from, added = r.added, updated = r.updated, pushed = r.pushed, "sinkronisasi selesai");
+                }
+                for w in &r.warnings {
+                    tracing::warn!("sinkronisasi: {w}");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "sinkronisasi gagal"),
         }
     }
 

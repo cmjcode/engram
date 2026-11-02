@@ -4,9 +4,13 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
+use tauri::AppHandle;
 use tauri::async_runtime::JoinHandle;
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::watch;
 
 use memory_import::Importer;
@@ -57,6 +61,9 @@ impl Kind {
 }
 
 pub struct Services {
+    app: AppHandle,
+    /// Folder data aplikasi (tempat `memory.toml` & penanda pemindahan vault).
+    data_dir: PathBuf,
     rt: Runtime,
     importer: Importer,
     /// Diisi setelah `AppState` memegang pengendali ini (keduanya saling merujuk).
@@ -68,8 +75,8 @@ pub struct Services {
 }
 
 impl Services {
-    pub fn new(rt: Runtime, importer: Importer, addr: SocketAddr, shutdown: watch::Receiver<bool>) -> Self {
-        Self { rt, importer, state: OnceLock::new(), addr, shutdown, handles: Mutex::new(HashMap::new()) }
+    pub fn new(app: AppHandle, data_dir: PathBuf, rt: Runtime, importer: Importer, addr: SocketAddr, shutdown: watch::Receiver<bool>) -> Self {
+        Self { app, data_dir, rt, importer, state: OnceLock::new(), addr, shutdown, handles: Mutex::new(HashMap::new()) }
     }
 
     pub fn set_state(&self, state: AppState) {
@@ -164,5 +171,26 @@ impl ServiceControl for Services {
     fn start(&self, id: &str) -> Result<(), String> {
         let kind = Kind::from_id(id).ok_or_else(|| format!("layanan tidak dikenal: {id}"))?;
         self.start_kind(kind)
+    }
+
+    fn can_manage_storage(&self) -> bool {
+        true
+    }
+
+    fn pick_folder(&self, title: &str) -> Option<PathBuf> {
+        self.app.dialog().file().set_title(title).blocking_pick_folder().and_then(|p| p.into_path().ok())
+    }
+
+    /// Catat tujuan, lalu buka ulang aplikasi: database tertutup saat keluar dan
+    /// vault disalin sebelum dibuka lagi (lihat `apply_pending_move`).
+    fn move_vault(&self, target: &Path) -> Result<String, String> {
+        crate::request_move(&self.data_dir, target).map_err(|e| format!("{e:#}"))?;
+        let app = self.app.clone();
+        // Beri waktu jawaban HTTP sampai ke UI sebelum aplikasi ditutup.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            app.restart();
+        });
+        Ok(format!("Aplikasi dibuka ulang untuk memindahkan data ke {}", target.display()))
     }
 }

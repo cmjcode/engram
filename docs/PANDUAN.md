@@ -106,6 +106,44 @@ Tool: `recall`, `who_is`, `timeline`, `principles`, `persona_context`,
 - `engram who "Pakde Karno"`, `engram timeline --entity Karno`, `engram principles`.
 - `engram review list` lalu `approve`/`reject`: konflik fakta, entitas kembar, data zona abu-abu.
 
+## Lokasi data
+
+Semua memori (database, berkas sumber, inbox, ekspor) ada di satu folder vault.
+
+- Aplikasi desktop: tombol **Data & Sync** > *Lokasi data* > pilih folder > *Pindahkan data*.
+  Aplikasi dibuka ulang, data disalin ke folder baru, dan folder lama tidak dihapus
+  (hapus sendiri bila semua sudah berjalan). Bila folder yang dipilih sudah berisi data
+  engram, data itu yang dipakai.
+- CLI: hentikan `engram serve`/`worker`, lalu `engram vault move /folder/baru`
+  (`engram vault where` menampilkan lokasi sekarang).
+- Jangan taruh vault di folder Google Drive/Dropbox/OneDrive/iCloud: database bisa rusak
+  karena disalin setengah jadi. Untuk berbagi antar komputer pakai Sinkronisasi di bawah.
+
+## Sinkronisasi antar komputer (Google Drive)
+
+1. Pasang **Google Drive for desktop** di setiap komputer dan login ke akun yang sama.
+2. Di komputer pertama: **Data & Sync** > pilih folder di *My Drive* (mis. `My Drive/engram-sync`),
+   isi kata sandi enkripsi, *Simpan*, lalu *Sync sekarang*.
+3. Di komputer lain: pilih folder yang **sama** dan kata sandi yang **sama**, lalu *Sync sekarang*.
+
+Sesudahnya sync berjalan otomatis sesuai jadwal (default tiap 10 menit) selama aplikasi atau
+`engram serve`/`worker` berjalan. CLI: `engram sync setup --dir <folder> --passphrase <sandi>`,
+`engram sync run`, `engram sync status`.
+
+Cara kerjanya: database tetap di lokasi data lokal. Tiap komputer menulis salinan terenkripsi
+miliknya ke `devices/<id>/` di folder sync, dan berkas sumber ke `sources/`. Saat sync, data
+komputer lain digabungkan per record:
+
+- record baru ditambahkan; daftar ID (mis. episode milik satu tokoh) digabung;
+- bila dua komputer mengubah record yang sama, versi `updated_at` terbaru menang, selain itu
+  versi yang ditarik menang;
+- sumber yang belum selesai diproses di komputer asalnya ikut setelah selesai (tidak diproses dua kali);
+- antrean job tetap lokal; **penghapusan tidak ikut tersinkron**;
+- embedding dihitung ulang di komputer penerima (ditunda bila server embedding belum hidup).
+
+Kata sandi disimpan di `<vault>/sync.key` (atau env `ENGRAM_SYNC_PASSPHRASE`). Lupa kata sandi
+berarti salinan di Drive tidak bisa dibuka; data lokal tetap aman.
+
 ## Kedaulatan data
 
 - `engram export` membuat JSONL + Markdown yang bisa dibaca tanpa software ini.

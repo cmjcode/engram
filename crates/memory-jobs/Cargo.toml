@@ -20,6 +20,7 @@ tracing.workspace = true
 tar.workspace = true
 flate2.workspace = true
 age.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

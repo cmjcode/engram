@@ -4,7 +4,9 @@
 //! pemantau inbox, dan server HTTP lokal (UI + API + MCP). Jendela aplikasi
 //! menampilkan UI web yang sama dengan `engram serve`.
 //!
-//! - Data ada di folder data aplikasi (macOS: `~/Library/Application Support/id.engram.ai/`).
+//! - Data ada di folder data aplikasi (macOS: `~/Library/Application Support/id.engram.ai/`),
+//!   atau di folder lain pilihan pengguna (menu "Data & Sync" di UI; dipindah saat aplikasi dibuka ulang).
+//! - Sinkronisasi antar komputer lewat folder Google Drive: lihat `memory_jobs::sync`.
 //! - Menutup jendela hanya menyembunyikannya; worker tetap jalan dari ikon menu bar.
 //! - Alamat & token MCP ditulis ke `connection.json` di folder data, untuk agent AI.
 //!   Tombol "Hubungkan agent AI" di UI mendaftarkannya ke Antigravity, VS Code, atau Claude Code.
@@ -68,6 +70,40 @@ fn random_token() -> String {
     (0..32).map(|_| format!("{:x}", rng.random_range(0..16u8))).collect()
 }
 
+/// Penanda pemindahan vault yang menunggu aplikasi dibuka ulang.
+const MOVE_MARKER: &str = "vault_move.json";
+
+/// Catat permintaan pindah vault ke `target`; dikerjakan saat aplikasi dibuka lagi.
+fn request_move(data_dir: &Path, target: &Path) -> Result<()> {
+    let body = serde_json::to_string_pretty(&serde_json::json!({ "to": target }))?;
+    std::fs::write(data_dir.join(MOVE_MARKER), body).context("menulis penanda pemindahan")?;
+    Ok(())
+}
+
+/// Kerjakan pemindahan vault yang diminta sebelum database dibuka.
+/// `Ok(None)` bila tidak ada permintaan. Vault lama tidak dihapus.
+fn apply_pending_move(data_dir: &Path) -> Result<Option<String>> {
+    let marker = data_dir.join(MOVE_MARKER);
+    let Ok(raw) = std::fs::read_to_string(&marker) else { return Ok(None) };
+    // Dihapus lebih dulu: bila gagal, aplikasi tetap terbuka dengan vault lama (tidak berulang).
+    std::fs::remove_file(&marker)?;
+    let to: PathBuf = serde_json::from_str::<serde_json::Value>(&raw)?["to"].as_str().map(PathBuf::from).context("penanda pemindahan rusak")?;
+    let cfg = load_or_create_config(data_dir)?;
+    let from = cfg.vault.path.clone();
+    let plan = memory_jobs::storage::plan_move(&from, &to)?;
+    let files = memory_jobs::storage::copy_vault(&from, &plan)?;
+    let path = data_dir.join("memory.toml");
+    let mut file_cfg = MemoryConfig::from_toml(&std::fs::read_to_string(&path)?)?;
+    file_cfg.vault.path = plan.target.clone();
+    std::fs::write(&path, file_cfg.to_toml()).with_context(|| format!("menulis {}", path.display()))?;
+    tracing::info!(from = %from.display(), to = %plan.target.display(), files, "vault dipindahkan");
+    Ok(Some(if plan.use_existing {
+        format!("Sekarang memakai data di:\n{}\n\nData lama tetap ada di:\n{}", plan.target.display(), from.display())
+    } else {
+        format!("Data dipindahkan ke:\n{}\n\nSalinan lama masih ada di:\n{}\nHapus folder lama itu bila semuanya sudah berjalan baik.", plan.target.display(), from.display())
+    }))
+}
+
 /// Token akses tetap di `mcp_token` (berkas yang sama dipakai `scripts/install-mcp.sh`).
 fn load_or_create_token(data_dir: &Path) -> Result<String> {
     let path = data_dir.join("mcp_token");
@@ -94,7 +130,7 @@ fn write_private(path: &Path, body: &str) -> Result<()> {
 }
 
 /// Buka vault, jalankan server + worker + scheduler + inbox.
-fn start_engine(desktop: &Desktop) -> Result<Started> {
+fn start_engine(app: &AppHandle, desktop: &Desktop) -> Result<Started> {
     let cfg = load_or_create_config(&desktop.data_dir)?;
     tauri::async_runtime::block_on(async {
         let rt = Runtime::open(cfg).await.context("membuka vault")?;
@@ -119,7 +155,7 @@ fn start_engine(desktop: &Desktop) -> Result<Started> {
                 tokio::net::TcpListener::bind("127.0.0.1:0").await?
             }
         };
-        let services = Arc::new(Services::new(rt.clone(), importer, listener.local_addr()?, desktop.shutdown.subscribe()));
+        let services = Arc::new(Services::new(app.clone(), desktop.data_dir.clone(), rt.clone(), importer, listener.local_addr()?, desktop.shutdown.subscribe()));
         let url = services.url();
         state.mcp_url = Some(format!("{url}mcp"));
         state.services = Some(services.clone());
@@ -219,7 +255,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 let _ = std::fs::create_dir_all(&dir);
                 open_in_file_manager(&dir);
             }
-            "data" => open_in_file_manager(&desktop.data_dir),
+            "data" => {
+                let dir = load_or_create_config(&desktop.data_dir).map(|c| c.vault.path).unwrap_or_else(|_| desktop.data_dir.clone());
+                open_in_file_manager(&dir);
+            }
             "check_update" => {
                 tauri::async_runtime::spawn(update::check(app.clone(), true));
             }
@@ -312,13 +351,30 @@ fn main() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let (shutdown, _) = tokio::sync::watch::channel(false);
+            let moved = apply_pending_move(&data_dir);
+            if let Err(e) = &moved {
+                tracing::error!("pemindahan data gagal: {e:#}");
+            }
             app.manage(Desktop { shutdown, engine: OnceLock::new(), data_dir });
-            let started = start_engine(&app.state::<Desktop>());
+            let started = start_engine(app.handle(), &app.state::<Desktop>());
             if let Err(e) = &started {
                 tracing::error!("mesin memori gagal: {e:#}");
             }
             build_main_window(app.handle(), &started)?;
             build_tray(app.handle())?;
+            {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                match moved {
+                    Ok(Some(msg)) => app.dialog().message(msg).title("Lokasi data diubah").kind(MessageDialogKind::Info).show(|_| {}),
+                    Ok(None) => {}
+                    Err(e) => app
+                        .dialog()
+                        .message(format!("Data tidak dipindahkan, aplikasi tetap memakai lokasi lama.\n\n{e:#}"))
+                        .title("Gagal memindah data")
+                        .kind(MessageDialogKind::Error)
+                        .show(|_| {}),
+                }
+            }
             // Tidak dimasukkan ke `tasks`: tidak memegang database, dan stop_engine
             // bisa dipanggil dari dalam proses update itu sendiri.
             let stop = app.state::<Desktop>().shutdown.subscribe();
