@@ -456,9 +456,6 @@ async function pollBatch(id) {
 // ---------------------------------------------------------------- boot
 $("#subject-select").onchange = (e) => { state.subject = e.target.value; localStorage.setItem("subject", state.subject); route(); };
 $("#new-subject").onclick = () => newSubjectForm();
-$("#connect-agents").onclick = () => connectAgents();
-$("#data-sync").onclick = () => showDataSync();
-$("#services-btn").onclick = () => showServices();
 $("#settings-btn").onclick = () => showSettings();
 
 // Status layanan latar (server, worker, scheduler, inbox). Hanya ada di aplikasi desktop.
@@ -466,25 +463,29 @@ const svc = { list: [] };
 async function pollServices() {
   try {
     const r = await api("/api/services");
-    if (!r.enabled) { $("#services-btn").hidden = true; return; }
+    if (!r.enabled) { svc.list = []; updateGearDot(); return; }
     svc.list = r.services;
   } catch (e) {
     // Server tidak menjawab: tandai semua layanan tidak diketahui.
     svc.list = svc.list.map((s) => Object.assign({}, s, { running: false }));
   }
-  renderServicesBadge();
+  updateGearDot();
   if (!$("#drawer").hidden && $("#svc-list")) renderServices();
 }
-function renderServicesBadge() {
-  const up = svc.list.filter((s) => s.running).length, all = svc.list.length;
-  if (!all) return;
-  $("#services-btn").hidden = false;
-  $("#services-dot").className = "dot " + (up === all ? "ok" : "bad");
-  $("#services-label").textContent = up === all ? "Layanan aktif" : `${all - up} layanan berhenti`;
-  $("#services-btn").title = svc.list.map((s) => `${s.name}: ${s.running ? "berjalan" : "berhenti"}`).join("\n");
+// Titik di tombol Pengaturan: merah bila ada layanan berhenti, hijau bila ada update.
+function updateGearDot() {
+  const stopped = svc.list.filter((x) => !x.running);
+  const upd = settings.update?.available;
+  const dot = $("#settings-dot"), btn = $("#settings-btn");
+  dot.hidden = !stopped.length && !upd;
+  dot.className = "dot " + (stopped.length ? "bad" : "ok");
+  const lines = ["Pengaturan"];
+  if (stopped.length) lines.push(`${stopped.length} layanan berhenti: ${stopped.map((x) => x.name).join(", ")}`);
+  if (upd) lines.push(`Versi ${settings.update.latest} tersedia`);
+  btn.title = lines.join("\n");
 }
-function showServices() {
-  openDrawer("Status layanan", `<p class="muted small">Layanan latar engram di aplikasi ini. Layanan yang berhenti bisa dijalankan lagi dari sini atau dari ikon menu bar.</p><div id="svc-list"></div>`);
+function tabServices() {
+  $("#st-body").innerHTML = `<p class="muted small">Layanan latar engram di aplikasi ini. Layanan yang berhenti bisa dijalankan lagi dari sini atau dari ikon menu bar.</p><div id="svc-list"></div>`;
   renderServices();
   pollServices();
 }
@@ -493,9 +494,10 @@ function renderServices() {
       <div class="row" style="justify-content:space-between">
         <div class="row"><span class="dot ${s.running ? "ok" : "bad"}"></span><b>${esc(s.name)}</b>
           <span class="badge ${s.running ? "now" : "conflict"}">${s.running ? "Berjalan" : "Berhenti"}</span></div>
-        ${s.running ? "" : `<button class="primary" data-start>${icon("play")} Jalankan</button>`}
+        ${s.running || s.external ? "" : `<button class="primary" data-start>${icon("play")} Jalankan</button>`}
       </div>
       <div class="small muted">${esc(s.description)}</div>
+      ${s.error ? `<div class="small" style="color:var(--bad)">${esc(s.error)}</div>` : ""}
       <div class="small msg"></div>
     </div>`).join("");
   $("#svc-list").querySelectorAll("[data-start]").forEach((b) => {
@@ -505,7 +507,7 @@ function renderServices() {
       try {
         const r = await api(`/api/services/${encodeURIComponent(card.dataset.svc)}/start`, { method: "POST" });
         svc.list = r.services;
-        renderServicesBadge();
+        updateGearDot();
         renderServices();
         toast("Layanan dijalankan");
       } catch (e) {
@@ -524,16 +526,16 @@ const MCP_STATE = {
   unreadable: ["conflict", "Config tidak terbaca"],
 };
 async function connectAgents() {
-  openDrawer("Hubungkan agent AI", `<div class="empty">Memuat...</div>`);
+  $("#st-body").innerHTML = `<div class="empty">Memuat...</div>`;
   let r;
   try { r = await api("/api/mcp/clients"); }
-  catch (e) { $("#drawer-body").innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; return; }
+  catch (e) { $("#st-body").innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; return; }
   if (!r.enabled) {
-    $("#drawer-body").innerHTML = `<div class="card"><p>Pemasangan otomatis hanya tersedia di aplikasi desktop atau <code>engram serve</code> di 127.0.0.1.</p>
+    $("#st-body").innerHTML = `<div class="card"><p>Pemasangan otomatis hanya tersedia di aplikasi desktop atau <code>engram serve</code> di 127.0.0.1.</p>
       <p class="small muted">Pakai <code>scripts/install-mcp.sh</code> untuk server lain.</p></div>`;
     return;
   }
-  $("#drawer-body").innerHTML = `
+  $("#st-body").innerHTML = `
     <p class="muted small">Daftarkan memori ini sebagai server MCP <b>${esc(r.name)}</b> agar agent AI bisa mengingat dan mencari cerita.
       Alamat: <code>${esc(r.url)}</code></p>
     ${r.clients.map((c) => {
@@ -552,7 +554,7 @@ async function connectAgents() {
       </div>`;
     }).join("")}
     <p class="small muted">Token akses ikut ditulis ke config tersebut. Cadangan berkas lama disimpan sebagai <code>.bak</code>.</p>`;
-  $("#drawer-body").querySelectorAll("[data-act]").forEach((b) => {
+  $("#st-body").querySelectorAll("[data-act]").forEach((b) => {
     b.onclick = async () => {
       const card = b.closest("[data-client]");
       card.querySelectorAll("button").forEach((x) => { x.disabled = true; });
@@ -580,16 +582,16 @@ async function pickFolder(title) {
 }
 
 async function showDataSync() {
-  openDrawer("Data & Sync", `<div class="empty">Memuat...</div>`);
+  $("#st-body").innerHTML = `<div class="empty">Memuat...</div>`;
   let storage, sync;
   try { [storage, sync] = await Promise.all([api("/api/storage"), api("/api/sync")]); }
-  catch (e) { $("#drawer-body").innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; return; }
+  catch (e) { $("#st-body").innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; return; }
   const can = storage.can_change;
   const pickBtn = (id) => (can ? `<button type="button" id="${id}">${icon("folder")} Pilih folder</button>` : "");
   const intervals = [[0, "Manual saja"], [5, "Tiap 5 menit"], [10, "Tiap 10 menit"], [30, "Tiap 30 menit"], [60, "Tiap jam"]];
   const cur = sync.settings.interval_minutes;
   if (!intervals.some(([m]) => m === cur)) intervals.push([cur, `Tiap ${cur} menit`]);
-  $("#drawer-body").innerHTML = `
+  $("#st-body").innerHTML = `
     <h2 style="margin-top:0">${icon("folder")} Lokasi data</h2>
     <div class="card">
       <div class="small muted">Database dan berkas sumber disimpan di:</div>
@@ -645,7 +647,7 @@ async function showDataSync() {
   };
   bindPick("mv-pick", "mv-path", "Pilih folder baru untuk data engram");
   bindPick("sy-pick", "sy-dir", "Pilih folder di Google Drive");
-  $("#drawer-body").querySelectorAll("[data-suggest]").forEach((b) => { b.onclick = () => { $("#sy-dir").value = b.dataset.suggest; }; });
+  $("#st-body").querySelectorAll("[data-suggest]").forEach((b) => { b.onclick = () => { $("#sy-dir").value = b.dataset.suggest; }; });
 
   // Pindah lokasi data: konfirmasi di halaman (WebView tidak menampilkan confirm()).
   if ($("#mv-go")) {
@@ -702,7 +704,9 @@ async function showDataSync() {
 // ---------------------------------------------------------------- pengaturan
 // Tab: Umum, Model AI, Pemrosesan, Tentang & update. Nilai model/pemrosesan
 // disimpan ke memory.toml dan berlaku setelah aplikasi dibuka ulang.
-const SETTINGS_TABS = [["umum", "Umum"], ["model", "Model AI"], ["proses", "Pemrosesan"], ["tentang", "Tentang & update"]];
+// Tab Layanan hanya di aplikasi desktop (svc.list kosong di `engram serve`).
+const settingsTabs = () => [["umum", "Umum"], ["model", "Model AI"], ["proses", "Pemrosesan"], ["data", "Data & Sync"], ["agent", "Agent AI"],
+  ...(svc.list.length ? [["layanan", svc.list.some((x) => !x.running) ? "Layanan (berhenti)" : "Layanan"]] : []), ["tentang", "Tentang & update"]];
 const settings = { tab: "umum", about: null, data: null, update: null, models: [] };
 
 // [bagian, kunci, label, jenis, petunjuk, pilihan]
@@ -772,15 +776,17 @@ async function showSettings(tab) {
 
 function renderSettings() {
   const d = settings.data;
+  if (!settingsTabs().some(([k]) => k === settings.tab)) settings.tab = "umum";
   $("#drawer-body").innerHTML = `
-    <div class="tabs" role="tablist">${SETTINGS_TABS.map(([k, l]) => `<button type="button" role="tab" data-tab="${k}" class="${k === settings.tab ? "active" : ""}" aria-selected="${k === settings.tab}">${esc(l)}</button>`).join("")}</div>
+    <div class="tabs" role="tablist">${settingsTabs().map(([k, l]) => `<button type="button" role="tab" data-tab="${k}" class="${k === settings.tab ? "active" : ""}" aria-selected="${k === settings.tab}">${esc(l)}</button>`).join("")}</div>
     ${d.restart_required ? `<div class="notice small">${icon("alert")} Pengaturan baru tersimpan, tetapi belum dipakai.
       ${settings.about.can_restart ? `<div class="row" style="margin-top:6px"><button class="primary" id="st-restart">${icon("refresh")} Buka ulang sekarang</button></div>` : " Jalankan ulang <code>engram serve</code> agar berlaku."}</div>` : ""}
     ${!d.editable ? `<div class="notice small">Lokasi <code>memory.toml</code> tidak diketahui; pengaturan hanya bisa dilihat.</div>` : ""}
     <div id="st-body"></div>`;
   $("#drawer-body").querySelectorAll("[data-tab]").forEach((b) => { b.onclick = () => { settings.tab = b.dataset.tab; renderSettings(); }; });
   if ($("#st-restart")) $("#st-restart").onclick = restartApp;
-  ({ umum: tabGeneral, model: tabModels, proses: tabProcessing, tentang: tabAbout })[settings.tab]();
+  if (!settingsTabs().some(([k]) => k === settings.tab)) settings.tab = "umum";
+  ({ umum: tabGeneral, model: tabModels, proses: tabProcessing, data: showDataSync, agent: connectAgents, layanan: tabServices, tentang: tabAbout })[settings.tab]();
 }
 
 async function restartApp() {
@@ -881,12 +887,6 @@ function tabGeneral() {
       <p class="small msg"></p>
       ${settings.data.editable ? `<button class="primary" type="submit">${icon("check")} Simpan</button>` : ""}
     </form>
-    <h2>Pintasan</h2>
-    <div class="card row">
-      <button type="button" id="st-sync">${icon("cloud")} Data & Sync</button>
-      <button type="button" id="st-agents">${icon("plug")} Agent AI</button>
-      ${svc.list.length ? `<button type="button" id="st-svc">${icon("play")} Status layanan</button>` : ""}
-    </div>
     ${a.can_open ? `<h2>Folder</h2>
     <div class="card row">
       <button type="button" data-open="vault">${icon("folder")} Folder data</button>
@@ -895,9 +895,6 @@ function tabGeneral() {
     </div>` : ""}`;
   $("#st-theme").onchange = (e) => setTheme(e.target.value);
   bindForm($("#st-general"));
-  $("#st-sync").onclick = () => showDataSync();
-  $("#st-agents").onclick = () => connectAgents();
-  if ($("#st-svc")) $("#st-svc").onclick = () => showServices();
   $("#st-body").querySelectorAll("[data-open]").forEach((b) => { b.onclick = () => openTarget(b.dataset.open); });
 }
 
@@ -1018,8 +1015,8 @@ async function checkUpdate() {
 
 function renderUpdate() {
   const u = settings.update, el = $("#st-update");
+  updateGearDot();
   if (!el) return;
-  $("#update-dot").hidden = !u.available;
   if (!u.available) { el.innerHTML = `<span class="ok-text">${icon("check")} Sudah versi terbaru${u.latest ? ` (${esc(u.latest)})` : ""}.</span>`; return; }
   el.innerHTML = `
     <div class="notice">
@@ -1095,4 +1092,12 @@ window.addEventListener("hashchange", route);
 hydrateIcons();
 pollServices();
 setInterval(pollServices, 5000);
+setTimeout(async () => {
+  try {
+    const a = await api("/api/about");
+    if (a.auto_update === false) return;
+    settings.update = await api("/api/update/check", { method: "POST" });
+    updateGearDot();
+  } catch (e) { /* offline: abaikan, bisa dicek manual di Pengaturan */ }
+}, 5000);
 loadSubjects().then(route).catch((e) => { $("#view").innerHTML = `<div class="card">Tidak bisa menghubungi server: ${esc(e.message)}</div>`; });

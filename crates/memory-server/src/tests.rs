@@ -192,9 +192,13 @@ async fn services_status_and_start() {
     let r: Value = c.get(format!("{base}/api/services")).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["enabled"], true);
     assert_eq!(r["services"][1]["running"], false);
+    // Server embedding (di luar engram) ikut dilaporkan; embedder uji selalu hidup.
+    let emb = &r["services"][2];
+    assert_eq!((emb["id"].as_str(), emb["external"].as_bool(), emb["running"].as_bool()), (Some("embedding"), Some(true), Some(true)));
 
     let r = post(&c, format!("{base}/api/services/workers/start"), json!({})).await;
     assert_eq!(r["services"][1]["running"], true);
+    assert_eq!(r["services"][2]["id"], "embedding");
 
     let bad = c.post(format!("{base}/api/services/nope/start")).send().await.unwrap();
     assert_eq!(bad.status(), 400);

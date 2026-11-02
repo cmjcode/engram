@@ -64,7 +64,7 @@ memprosesnya ulang otomatis tiap `[schedule] retry_failed_minutes` (default 10)
 
 ## Menghubungkan agent AI (MCP)
 
-Paling mudah: di aplikasi desktop, klik tombol **Agent AI** di kanan atas, lalu **Pasang** pada
+Paling mudah: di aplikasi desktop, klik ikon roda gigi (Pengaturan) > tab **Agent AI**, lalu **Pasang** pada
 Antigravity, VS Code, atau Claude Code. Aplikasi menambah server `engram` ke config client itu
 (`~/.gemini/antigravity/mcp_config.json`, `mcp.json` di folder User VS Code, atau `claude mcp add -s user`),
 tanpa mengubah server lain, dan menyimpan cadangan `.bak`. Tombol yang sama ada di `engram serve` bila
@@ -110,8 +110,12 @@ Tool: `recall`, `who_is`, `timeline`, `principles`, `persona_context`,
 
 Klik ikon roda gigi di kanan atas UI:
 
-- **Umum**: tema (ikuti sistem/terang/gelap), subjek default, pintasan ke Data & Sync, Agent AI,
-  dan (desktop) tombol buka folder data, inbox, dan konfigurasi.
+- **Umum**: tema (ikuti sistem/terang/gelap), subjek default, dan (desktop) tombol buka folder
+  data, inbox, dan konfigurasi.
+- **Data & Sync**: lokasi data dan sinkronisasi Google Drive (lihat di bawah).
+- **Agent AI**: pasang server MCP ke Antigravity, VS Code, atau Claude Code.
+- **Layanan** (desktop): status server, worker, penjadwal, dan pemantau inbox; jalankan lagi yang berhenti.
+  Titik merah di ikon roda gigi = ada layanan berhenti; titik hijau = ada update baru.
 - **Model AI**: alamat server & model LLM, embedding, dan transkripsi Whisper, termasuk API key.
   Tombol *Tes koneksi* menguji nilai di formulir sebelum disimpan dan menampilkan daftar model di server.
   Ganti model/dimensi embedding: jalankan `engram reembed` setelah dibuka ulang.
@@ -129,7 +133,7 @@ ulang; tombol *Buka ulang sekarang* muncul di aplikasi desktop. API key tidak pe
 
 Semua memori (database, berkas sumber, inbox, ekspor) ada di satu folder vault.
 
-- Aplikasi desktop: tombol **Data & Sync** > *Lokasi data* > pilih folder > *Pindahkan data*.
+- Aplikasi desktop: Pengaturan > **Data & Sync** > *Lokasi data* > pilih folder > *Pindahkan data*.
   Aplikasi dibuka ulang, data disalin ke folder baru, dan folder lama tidak dihapus
   (hapus sendiri bila semua sudah berjalan). Bila folder yang dipilih sudah berisi data
   engram, data itu yang dipakai.
@@ -141,7 +145,7 @@ Semua memori (database, berkas sumber, inbox, ekspor) ada di satu folder vault.
 ## Sinkronisasi antar komputer (Google Drive)
 
 1. Pasang **Google Drive for desktop** di setiap komputer dan login ke akun yang sama.
-2. Di komputer pertama: **Data & Sync** > pilih folder di *My Drive* (mis. `My Drive/engram-sync`),
+2. Di komputer pertama: Pengaturan > **Data & Sync** > pilih folder di *My Drive* (mis. `My Drive/engram-sync`),
    isi kata sandi enkripsi, *Simpan*, lalu *Sync sekarang*.
 3. Di komputer lain: pilih folder yang **sama** dan kata sandi yang **sama**, lalu *Sync sekarang*.
 

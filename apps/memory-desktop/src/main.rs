@@ -5,11 +5,11 @@
 //! menampilkan UI web yang sama dengan `engram serve`.
 //!
 //! - Data ada di folder data aplikasi (macOS: `~/Library/Application Support/id.engram.ai/`),
-//!   atau di folder lain pilihan pengguna (menu "Data & Sync" di UI; dipindah saat aplikasi dibuka ulang).
+//!   atau di folder lain pilihan pengguna (Pengaturan > "Data & Sync" di UI; dipindah saat aplikasi dibuka ulang).
 //! - Sinkronisasi antar komputer lewat folder Google Drive: lihat `memory_jobs::sync`.
 //! - Menutup jendela hanya menyembunyikannya; worker tetap jalan dari ikon menu bar.
 //! - Alamat & token MCP ditulis ke `connection.json` di folder data, untuk agent AI.
-//!   Tombol "Hubungkan agent AI" di UI mendaftarkannya ke Antigravity, VS Code, atau Claude Code.
+//!   Tab "Agent AI" di Pengaturan UI mendaftarkannya ke Antigravity, VS Code, atau Claude Code.
 //! - Update otomatis dari GitHub Release (lihat `update.rs`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

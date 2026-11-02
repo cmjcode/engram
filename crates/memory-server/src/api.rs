@@ -430,16 +430,46 @@ async fn mcp_uninstall(State(st): State<AppState>, Path(id): Path<String>) -> Ap
 }
 
 async fn services(State(st): State<AppState>) -> ApiResult<Value> {
-    Ok(Json(match &st.services {
-        Some(c) => json!({"enabled": true, "services": c.list()}),
-        None => json!({"enabled": false, "services": []}),
-    }))
+    let Some(c) = &st.services else {
+        return Ok(Json(json!({"enabled": false, "services": []})));
+    };
+    Ok(Json(json!({"enabled": true, "services": service_list(&st, c.as_ref()).await})))
+}
+
+/// Layanan internal + status server embedding.
+async fn service_list(st: &AppState, c: &dyn crate::ServiceControl) -> Value {
+    let mut list = serde_json::to_value(c.list()).unwrap_or_else(|_| json!([]));
+    if let Some(arr) = list.as_array_mut() {
+        arr.push(embedding_status(st).await);
+    }
+    list
+}
+
+/// Server embedding berjalan di luar engram (mis. TEI di mesin GPU): cek dengan
+/// satu permintaan embedding sungguhan. Tidak bisa dijalankan dari sini.
+async fn embedding_status(st: &AppState) -> Value {
+    let cfg = &st.rt.cfg.embedding;
+    let target = if cfg.provider == "hash" { "hash (tanpa server)".to_string() } else { format!("{} · {}", cfg.base_url, cfg.model) };
+    let probe = tokio::time::timeout(std::time::Duration::from_secs(3), st.rt.pipeline.embedder.embed_one("ping")).await;
+    let error = match probe {
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(_) => Some("tidak menjawab dalam 3 detik".to_string()),
+    };
+    json!({
+        "id": "embedding",
+        "name": "Server embedding",
+        "description": format!("Server di luar engram ({target}). Dibutuhkan untuk memproses memori baru; nyalakan di mesinnya bila berhenti."),
+        "running": error.is_none(),
+        "external": true,
+        "error": error,
+    })
 }
 
 async fn service_start(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     let c = st.services.as_ref().ok_or_else(|| ApiError::BadRequest("pengendali layanan tidak tersedia".into()))?;
     c.start(&id).map_err(ApiError::BadRequest)?;
-    Ok(Json(json!({"ok": true, "services": c.list()})))
+    Ok(Json(json!({"ok": true, "services": service_list(&st, c.as_ref()).await})))
 }
 
 // ---------------------------------------------------------------- lokasi data & sinkronisasi
