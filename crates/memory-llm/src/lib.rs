@@ -79,6 +79,11 @@ pub struct ChatRequest {
 pub trait LlmProvider: Send + Sync {
     async fn chat(&self, req: ChatRequest) -> Result<String>;
     fn describe(&self) -> String;
+
+    /// Cek ringan bahwa server untuk peran ini bisa dihubungi (tanpa generate).
+    async fn health(&self, _role: ModelRole) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]

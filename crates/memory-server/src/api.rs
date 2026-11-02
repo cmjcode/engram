@@ -440,9 +440,44 @@ async fn services(State(st): State<AppState>) -> ApiResult<Value> {
 async fn service_list(st: &AppState, c: &dyn crate::ServiceControl) -> Value {
     let mut list = serde_json::to_value(c.list()).unwrap_or_else(|_| json!([]));
     if let Some(arr) = list.as_array_mut() {
-        arr.push(embedding_status(st).await);
+        // Dicek paralel: tiap server bisa butuh beberapa detik untuk timeout.
+        let (emb, llm) = tokio::join!(embedding_status(st), llm_status(st));
+        arr.push(emb);
+        arr.extend(llm);
     }
     list
+}
+
+/// Hasil cek layanan luar sebagai entri daftar layanan.
+fn external_service(id: &str, name: &str, description: String, error: Option<String>) -> Value {
+    json!({"id": id, "name": name, "description": description, "running": error.is_none(), "external": true, "error": error})
+}
+
+/// Server LLM (vLLM dkk.) di luar engram; model ringan bisa di server terpisah.
+async fn llm_status(st: &AppState) -> Vec<Value> {
+    use memory_llm::ModelRole;
+    let cfg = &st.rt.cfg.llm;
+    let mut out = Vec::new();
+    let light_separate = cfg.light_base_url.as_deref().is_some_and(|u| u.trim_end_matches('/') != cfg.base_url.trim_end_matches('/'));
+    let mut targets = vec![("llm", "Server LLM", ModelRole::Extract, cfg.base_url.clone(), if light_separate { cfg.extract_model.clone() } else { format!("{}, {}", cfg.extract_model, cfg.light_model) })];
+    if light_separate {
+        targets.push(("llm-light", "Server LLM ringan", ModelRole::Light, cfg.light_base_url.clone().unwrap_or_default(), cfg.light_model.clone()));
+    }
+    let probe = |role| async move {
+        match tokio::time::timeout(std::time::Duration::from_secs(3), st.rt.pipeline.llm.health(role)).await {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e.to_string()),
+            Err(_) => Some("tidak menjawab dalam 3 detik".to_string()),
+        }
+    };
+    let (main_err, light_err) = tokio::join!(probe(ModelRole::Extract), async {
+        if light_separate { probe(ModelRole::Light).await } else { None }
+    });
+    for ((id, name, _, url, models), error) in targets.into_iter().zip([main_err, light_err]) {
+        let desc = format!("Server di luar engram ({url} · {models}). Dibutuhkan untuk ekstraksi memori dan jawaban; nyalakan di mesinnya bila berhenti.");
+        out.push(external_service(id, name, desc, error));
+    }
+    out
 }
 
 /// Server embedding berjalan di luar engram (mis. TEI di mesin GPU): cek dengan
@@ -456,14 +491,7 @@ async fn embedding_status(st: &AppState) -> Value {
         Ok(Err(e)) => Some(e.to_string()),
         Err(_) => Some("tidak menjawab dalam 3 detik".to_string()),
     };
-    json!({
-        "id": "embedding",
-        "name": "Server embedding",
-        "description": format!("Server di luar engram ({target}). Dibutuhkan untuk memproses memori baru; nyalakan di mesinnya bila berhenti."),
-        "running": error.is_none(),
-        "external": true,
-        "error": error,
-    })
+    external_service("embedding", "Server embedding", format!("Server di luar engram ({target}). Dibutuhkan untuk memproses memori baru; nyalakan di mesinnya bila berhenti."), error)
 }
 
 async fn service_start(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {

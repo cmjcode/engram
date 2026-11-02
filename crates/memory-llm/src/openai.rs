@@ -85,6 +85,20 @@ impl LlmProvider for OpenAiCompatible {
         Ok(content.to_string())
     }
 
+    async fn health(&self, role: ModelRole) -> Result<()> {
+        let (base, _) = self.endpoint(role);
+        let mut rb = self.http.get(format!("{}/models", base.trim_end_matches('/'))).timeout(Duration::from_secs(3));
+        if let Some(k) = &self.api_key {
+            rb = rb.bearer_auth(k);
+        }
+        let resp = rb.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LlmError::Status { status: status.as_u16(), body: resp.text().await.unwrap_or_default().chars().take(200).collect() });
+        }
+        Ok(())
+    }
+
     fn describe(&self) -> String {
         format!("{} [extract={}, light={}]", self.cfg.base_url, self.cfg.extract_model, self.cfg.light_model)
     }
