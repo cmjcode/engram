@@ -5,12 +5,13 @@
 pub mod archive;
 pub mod storage;
 pub mod sync;
+pub mod watch;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::watch::Receiver;
 
 use memory_core::model::{Job, JobStatus, Source, SourceStatus};
 use memory_core::{MemoryConfig, ids::now_rfc3339};
@@ -71,6 +72,8 @@ pub struct Runtime {
     pub vault: Vault,
     /// Satu sinkronisasi pada satu waktu (penjadwal & tombol UI).
     pub sync_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Satu pemindaian folder penting pada satu waktu (pemantau latar & tombol UI).
+    pub watch_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Runtime {
@@ -95,7 +98,15 @@ impl Runtime {
         let cfg = Arc::new(cfg);
         let pipeline = Pipeline::new(store.clone(), llm.clone(), embedder.clone(), cfg.clone(), vault.clone());
         let retriever = Retriever::new(store.clone(), embedder, llm, cfg.clone());
-        Self { cfg, store, pipeline, retriever, vault, sync_lock: Arc::new(tokio::sync::Mutex::new(())) }
+        Self {
+            cfg,
+            store,
+            pipeline,
+            retriever,
+            vault,
+            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            watch_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     pub async fn enqueue(&self, kind: &str, payload: Value, key: String) -> Result<Job> {
@@ -163,7 +174,7 @@ impl Runtime {
     }
 
     /// Worker paralel sampai `shutdown` bernilai true.
-    pub async fn run_workers(&self, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run_workers(&self, mut shutdown: Receiver<bool>) {
         let requeued = self.store.requeue_stale_jobs().await.unwrap_or(0);
         if requeued > 0 {
             tracing::info!(requeued, "job tertinggal diantre ulang");
@@ -285,7 +296,7 @@ impl Runtime {
         Ok(n)
     }
 
-    pub async fn run_scheduler(&self, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run_scheduler(&self, mut shutdown: Receiver<bool>) {
         let retry_every = Duration::from_secs(self.cfg.schedule.retry_failed_minutes * 60);
         let mut last_retry: Option<std::time::Instant> = None;
         let mut last_sync: Option<std::time::Instant> = None;
@@ -341,6 +352,39 @@ impl Runtime {
             out.insert(format!("{st:?}").to_lowercase(), json!(jobs.len()));
         }
         Ok(Value::Object(out))
+    }
+
+    /// Pantau perubahan di semua folder penting secara berkala.
+    pub async fn watch_folders(&self, mut shutdown: Receiver<bool>) {
+        let poll_secs = self.cfg.schedule.watch_poll_secs;
+        if poll_secs == 0 {
+            return;
+        }
+        loop {
+            match watch::scan_all(self, None, false, 3).await {
+                Ok(outcomes) => {
+                    for o in outcomes {
+                        if let Some(err) = &o.error {
+                            tracing::warn!(folder = %o.label, error = %err, "pemindaian folder penting gagal");
+                        } else if o.changed {
+                            tracing::info!(
+                                folder = %o.label,
+                                added = o.added,
+                                modified = o.modified,
+                                removed = o.removed,
+                                source = o.source_id.as_deref().unwrap_or(""),
+                                "perubahan folder penting di-ingest ke memori"
+                            );
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "pemantau folder penting gagal"),
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(poll_secs.max(5))) => {}
+                _ = shutdown.changed() => break,
+            }
+        }
     }
 }
 

@@ -246,6 +246,8 @@ pub struct ScheduleConfig {
     pub compact_hours: u64,
     pub export_hours: u64,
     pub inbox_poll_secs: u64,
+    /// Interval cek perubahan folder penting (detik, 0 = hanya manual).
+    pub watch_poll_secs: u64,
     /// Interval proses ulang otomatis sumber yang gagal (menit, 0 = mati).
     pub retry_failed_minutes: u64,
     /// Batas proses ulang otomatis per sumber; setelahnya hanya manual.
@@ -254,7 +256,17 @@ pub struct ScheduleConfig {
 
 impl Default for ScheduleConfig {
     fn default() -> Self {
-        Self { consolidate_hours: 24, distill_hours: 24, voice_hours: 168, compact_hours: 168, export_hours: 24, inbox_poll_secs: 10, retry_failed_minutes: 10, retry_failed_max: 20 }
+        Self {
+            consolidate_hours: 24,
+            distill_hours: 24,
+            voice_hours: 168,
+            compact_hours: 168,
+            export_hours: 24,
+            inbox_poll_secs: 10,
+            watch_poll_secs: 30,
+            retry_failed_minutes: 10,
+            retry_failed_max: 20,
+        }
     }
 }
 

@@ -158,6 +158,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SyncCmd,
     },
+    /// Kelola & pantau folder penting (konteks diekstrak menggunakan agy CLI).
+    Watch {
+        #[command(subcommand)]
+        cmd: WatchCmd,
+    },
     /// Hitung ulang semua embedding (setelah ganti model).
     Reembed,
     /// Statistik subjek.
@@ -273,6 +278,38 @@ enum SyncCmd {
 }
 
 #[derive(Subcommand)]
+enum WatchCmd {
+    /// Tampilkan daftar folder penting yang dipantau.
+    List,
+    /// Tambahkan folder penting baru lalu baca konteksnya menggunakan agy CLI.
+    Add {
+        path: PathBuf,
+        /// Nama/label untuk folder ini (default: nama folder).
+        #[arg(long)]
+        label: Option<String>,
+        /// Hanya daftarkan folder tanpa langsung memindai sekarang.
+        #[arg(long)]
+        no_scan: bool,
+        /// Hanya antrekan hasil bacaan ke job tanpa langsung menjalankan worker.
+        #[arg(long)]
+        no_process: bool,
+    },
+    /// Hapus folder penting dari daftar pantauan (berdasarkan ID atau path).
+    Remove { target: String },
+    /// Pindai perubahan di folder penting (satu atau semua) dan perbarui memori lewat agy CLI.
+    Scan {
+        /// ID atau path folder (kosongkan untuk memindai semua folder penting).
+        target: Option<String>,
+        /// Paksa baca ulang lewat agy CLI walaupun berkas belum berubah.
+        #[arg(long)]
+        force: bool,
+        /// Hanya antrekan hasil bacaan tanpa langsung menjalankan worker.
+        #[arg(long)]
+        no_process: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum JobsCmd {
     /// Jalankan semua job yang siap sampai antrean kosong.
     Run,
@@ -355,6 +392,8 @@ async fn background(rt: &Runtime, stop: &tokio::sync::watch::Receiver<bool>, inb
         let imp = importer(rt);
         let (subj, poll, s) = (rt.cfg.vault.default_subject.clone(), rt.cfg.schedule.inbox_poll_secs, stop.clone());
         hs.push(tokio::spawn(async move { imp.watch_inbox(subj, poll, s).await }));
+        let (r, s) = (rt.clone(), stop.clone());
+        hs.push(tokio::spawn(async move { r.watch_folders(s).await }));
     }
     hs
 }
@@ -709,6 +748,103 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Reembed => println!("{} embedding dihitung ulang.", memory_jobs::archive::reembed(&rt).await?),
+        Cmd::Watch { cmd } => {
+            use memory_jobs::watch;
+            match cmd {
+                WatchCmd::List => {
+                    let st = watch::status(&rt, Some(&subject));
+                    print(j, &st, || {
+                        let agy_info = st.agy_path.as_deref().unwrap_or("TIDAK DITEMUKAN");
+                        let mut out = format!("agy CLI: {agy_info} | interval pantau: {} detik\n", st.poll_secs);
+                        if st.folders.is_empty() {
+                            out.push_str("Belum ada folder penting. Tambahkan dengan `engram watch add <folder>`.");
+                        } else {
+                            for f in &st.folders {
+                                out.push_str(&format!(
+                                    "{}\t{}\t({} berkas)\t{}\tperubahan terakhir: {}{}\n",
+                                    f.id,
+                                    f.label,
+                                    f.file_count,
+                                    f.path.display(),
+                                    f.last_change_at.as_deref().unwrap_or("-"),
+                                    f.last_error.as_ref().map(|e| format!(" [GALAT: {e}]")).unwrap_or_default()
+                                ));
+                            }
+                        }
+                        out.trim_end().to_string()
+                    });
+                }
+                WatchCmd::Add { path, label, no_scan, no_process } => {
+                    rt.pipeline.ensure_subject(&subject, None).await?;
+                    let f = watch::add_folder(&rt.vault, &subject, &path, label.as_deref())?;
+                    eprintln!("Folder penting terdaftar: {} ({})", f.label, f.path.display());
+                    if !no_scan {
+                        let rep = watch::scan_one(&rt, &f.id, false, 0).await?;
+                        if let Some(err) = &rep.error {
+                            bail!("gagal membaca konteks folder lewat agy CLI: {err}");
+                        }
+                        if rep.changed && !no_process {
+                            let n = rt.drain().await?;
+                            eprintln!("{n} job ekstraksi memori dijalankan.");
+                        }
+                        print(j, &rep, || {
+                            format!(
+                                "{}: {} berkas dibaca via agy CLI -> sumber {}",
+                                rep.label,
+                                rep.files,
+                                rep.source_id.as_deref().unwrap_or("-")
+                            )
+                        });
+                    } else {
+                        print(j, &f, || format!("Terdaftar: {} ({})", f.label, f.id));
+                    }
+                }
+                WatchCmd::Remove { target } => {
+                    if watch::remove_folder(&rt.vault, &target)? {
+                        println!("Folder penting dihapus dari daftar pantauan.");
+                    } else {
+                        bail!("folder penting tidak ditemukan: {target}");
+                    }
+                }
+                WatchCmd::Scan { target, force, no_process } => {
+                    let outcomes = match target {
+                        Some(t) => vec![watch::scan_one(&rt, &t, force, 0).await?],
+                        None => watch::scan_all(&rt, Some(&subject), force, 0).await?,
+                    };
+                    let any_changed = outcomes.iter().any(|o| o.changed && o.error.is_none());
+                    if any_changed && !no_process {
+                        let n = rt.drain().await?;
+                        eprintln!("{n} job ekstraksi memori dijalankan.");
+                    }
+                    print(j, &outcomes, || {
+                        if outcomes.is_empty() {
+                            return "Tidak ada folder penting yang dipantau.".into();
+                        }
+                        outcomes
+                            .iter()
+                            .map(|o| {
+                                if let Some(err) = &o.error {
+                                    format!("{}: GALAT - {err}", o.label)
+                                } else if o.changed {
+                                    format!(
+                                        "{}: diperbarui ({} berkas; +{} ~{} -{}) -> sumber {}",
+                                        o.label,
+                                        o.files,
+                                        o.added,
+                                        o.modified,
+                                        o.removed,
+                                        o.source_id.as_deref().unwrap_or("-")
+                                    )
+                                } else {
+                                    format!("{}: tidak ada perubahan ({} berkas)", o.label, o.files)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    });
+                }
+            }
+        }
         Cmd::Stats => {
             let s = rt.store.stats(&subject).await?;
             print(j, &s, || format!("{s:#?}"));

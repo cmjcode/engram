@@ -45,6 +45,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/sources/{id}/retry", post(retry_source))
         .route("/api/jobs/retry-failed", post(retry_failed))
         .route("/api/subjects/{s}/import", post(import))
+        .route("/api/subjects/{s}/watched-folders", get(watched_folders_list).post(watched_folders_add))
+        .route("/api/subjects/{s}/watched-folders/scan", post(watched_folders_scan_all))
+        .route("/api/watched-folders/{id}/scan", post(watched_folder_scan))
+        .route("/api/watched-folders/{id}/remove", post(watched_folder_remove))
         .route("/api/subjects/{s}/batches", get(batches))
         .route("/api/batches/{id}", get(batch))
         .route("/api/jobs", get(jobs))
@@ -817,5 +821,80 @@ async fn open_target(State(st): State<AppState>, Json(b): Json<OpenIn>) -> ApiRe
         t => return Err(ApiError::BadRequest(format!("target tidak dikenal: {t}"))),
     };
     c.open(&target).map_err(ApiError::BadRequest)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+// ---------------------------------------------------------------- folder penting (watched folders via agy CLI)
+
+async fn watched_folders_list(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<memory_jobs::watch::WatchStatus> {
+    check(&s)?;
+    let rt = st.rt.clone();
+    Ok(Json(tokio::task::spawn_blocking(move || memory_jobs::watch::status(&rt, Some(&s))).await.map_err(blocking_err)?))
+}
+
+#[derive(Deserialize)]
+struct WatchedFolderIn {
+    path: String,
+    #[serde(default)]
+    label: Option<String>,
+    /// Langsung pindai & ambil konteks lewat agy CLI sekarang.
+    #[serde(default)]
+    scan: Option<bool>,
+}
+
+async fn watched_folders_add(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<WatchedFolderIn>) -> ApiResult<Value> {
+    check(&s)?;
+    let raw_path = b.path.trim().to_string();
+    if raw_path.is_empty() {
+        return Err(ApiError::BadRequest("path folder kosong".into()));
+    }
+    st.rt.pipeline.ensure_subject(&s, None).await?;
+    let folder = memory_jobs::watch::add_folder(&st.rt.vault, &s, std::path::Path::new(&raw_path), b.label.as_deref())
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let scan = if b.scan.unwrap_or(false) {
+        Some(memory_jobs::watch::scan_one(&st.rt, &folder.id, false, 0).await.map_err(|e| ApiError::BadRequest(e.to_string()))?)
+    } else {
+        None
+    };
+    let status = memory_jobs::watch::status(&st.rt, Some(&s));
+    Ok(Json(json!({"folder": folder, "scan": scan, "status": status})))
+}
+
+#[derive(Deserialize, Default)]
+struct ScanIn {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn watched_folder_scan(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+     b: Option<Json<ScanIn>>,
+) -> ApiResult<memory_jobs::watch::FolderScanOutcome> {
+    let force = b.map(|x| x.force).unwrap_or(false);
+    memory_jobs::watch::scan_one(&st.rt, &id, force, 0)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
+async fn watched_folders_scan_all(
+    State(st): State<AppState>,
+    Path(s): Path<String>,
+    b: Option<Json<ScanIn>>,
+) -> ApiResult<Vec<memory_jobs::watch::FolderScanOutcome>> {
+    check(&s)?;
+    let force = b.map(|x| x.force).unwrap_or(false);
+    memory_jobs::watch::scan_all(&st.rt, Some(&s), force, 0)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
+async fn watched_folder_remove(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let removed = memory_jobs::watch::remove_folder(&st.rt.vault, &id).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if !removed {
+        return Err(ApiError::NotFound("folder penting tidak ditemukan".into()));
+    }
     Ok(Json(json!({"ok": true})))
 }

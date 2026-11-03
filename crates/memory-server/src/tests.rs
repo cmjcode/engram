@@ -341,3 +341,43 @@ async fn settings_read_only_without_config_path() {
     let r = c.put(format!("{base}/api/settings")).json(&json!({"values": {"pipeline": {"workers": 3}}})).send().await.unwrap();
     assert_eq!(r.status(), 400);
 }
+
+#[tokio::test]
+async fn watched_folders_api() {
+    let (base, _st, _d) = spawn(None).await;
+    let c = reqwest::Client::new();
+    let important = tempfile::tempdir().unwrap();
+    std::fs::write(important.path().join("catatan.md"), "Budi mencatat arsitektur sistem memori.").unwrap();
+
+    let added = post(
+        &c,
+        format!("{base}/api/subjects/budi/watched-folders"),
+        json!({"path": important.path(), "label": "Catatan Arsitektur", "scan": false}),
+    )
+    .await;
+    let fid = added["folder"]["id"].as_str().unwrap().to_string();
+    assert_eq!(added["folder"]["label"], "Catatan Arsitektur");
+
+    let list: Value = c
+        .get(format!("{base}/api/subjects/budi/watched-folders"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["folders"].as_array().unwrap().len(), 1);
+
+    let removed = post(&c, format!("{base}/api/watched-folders/{fid}/remove"), json!({})).await;
+    assert_eq!(removed["ok"], true);
+
+    let list_after: Value = c
+        .get(format!("{base}/api/subjects/budi/watched-folders"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(list_after["folders"].as_array().unwrap().is_empty());
+}

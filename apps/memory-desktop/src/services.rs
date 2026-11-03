@@ -51,7 +51,7 @@ impl Kind {
             Kind::Server => "Melayani jendela aplikasi dan agent AI lewat MCP.",
             Kind::Workers => "Memproses antrean job: import, ekstraksi, dan embedding.",
             Kind::Scheduler => "Menjadwalkan pemeliharaan dan mencoba ulang job yang gagal.",
-            Kind::Inbox => "Mengimpor berkas baru yang ditaruh di folder inbox.",
+            Kind::Inbox => "Mengimpor berkas di folder inbox dan memantau perubahan folder penting lewat agy CLI.",
         }
     }
 
@@ -137,8 +137,15 @@ impl Services {
             }
             Kind::Inbox => {
                 let imp = self.importer.clone();
+                let rt = self.rt.clone();
                 let (subj, poll) = (self.rt.cfg.vault.default_subject.clone(), self.rt.cfg.schedule.inbox_poll_secs);
-                tauri::async_runtime::spawn(async move { imp.watch_inbox(subj, poll, stop).await })
+                let stop_watch = stop.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::join!(
+                        imp.watch_inbox(subj, poll, stop),
+                        rt.watch_folders(stop_watch),
+                    );
+                })
             }
         };
         handles.insert(kind, task);

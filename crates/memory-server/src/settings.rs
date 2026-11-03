@@ -108,6 +108,7 @@ const FIELDS: &[(&str, &str, Ty)] = &[
     ("transcription", "language", Ty::OptStr),
     ("pipeline", "workers", Ty::Int(1, 32)),
     ("schedule", "inbox_poll_secs", Ty::Int(1, 3600)),
+    ("schedule", "watch_poll_secs", Ty::Int(0, 3600)),
     ("schedule", "retry_failed_minutes", Ty::Int(0, 10080)),
     ("schedule", "retry_failed_max", Ty::Int(0, 10000)),
     ("score", "stream_ttl_days", Ty::Int(1, 36500)),

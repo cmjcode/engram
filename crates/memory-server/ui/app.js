@@ -605,8 +605,30 @@ async function viewReview(el) {
 }
 
 async function viewSources(el) {
-  const [sources, batches] = await Promise.all([api(`/api/subjects/${S()}/sources?limit=300`), api(`/api/subjects/${S()}/batches`)]);
+  const [sources, batches, watched, storage] = await Promise.all([
+    api(`/api/subjects/${S()}/sources?limit=300`),
+    api(`/api/subjects/${S()}/batches`),
+    api(`/api/subjects/${S()}/watched-folders`),
+    api("/api/storage").catch(() => ({ can_change: false })),
+  ]);
+  const canPick = !!storage?.can_change;
+  const agyBadge = watched.agy_available
+    ? `<span class="badge now" title="${esc(watched.agy_path || "")}">agy CLI siap</span>`
+    : `<span class="badge conflict">agy CLI tidak ditemukan</span>`;
   el.innerHTML = `<h1>Sumber & import</h1>
+    <h2>${icon("folder")} Folder penting <span class="small">${agyBadge}</span></h2>
+    <div class="card">
+      <p class="small muted" style="margin-top:0">Engram membaca seluruh isi folder penting (proyek koding maupun dokumen/catatan) menggunakan <code>agy</code> CLI, mengambil konteksnya sebagai memori, dan otomatis meng-update memori setiap ada perubahan berkas${watched.poll_secs ? ` (dicek tiap ${watched.poll_secs} detik)` : " (mode manual)"}.</p>
+      <form id="wf-form" class="row" style="margin-bottom:8px">
+        <input type="text" id="wf-path" placeholder="Path folder penting, mis. /Users/nama/Documents/proyek-utama" style="flex:2" required>
+        ${canPick ? `<button type="button" id="wf-pick">${icon("folder")} Pilih folder</button>` : ""}
+        <input type="text" id="wf-label" placeholder="Nama/label (opsional)" style="flex:1">
+        <button class="primary" type="submit" id="wf-add">${icon("plus")} Tambah &amp; baca</button>
+      </form>
+      <div class="small" id="wf-msg"></div>
+      <div id="wf-list">${watched.folders.length ? watched.folders.map(watchedFolderRow).join("") : '<p class="small muted" style="margin:6px 0 0">Belum ada folder penting yang dipantau.</p>'}</div>
+    </div>
+    <h2>${icon("upload")} Upload &amp; inbox berkas</h2>
     <div class="card"><div class="drop" id="drop">${icon("upload")} Seret berkas ke sini atau <label class="btn">pilih berkas<input type="file" id="files" multiple hidden></label>
       <p class="small">Teks/Markdown, ekspor WhatsApp (.txt), Telegram (result.json), ChatGPT/Claude (conversations.json), email (.mbox/.eml), foto + caption (.jpg + .txt bernama sama), audio (butuh Whisper).</p>
       <div class="row" style="justify-content:center"><label>Jenis untuk teks biasa <select id="kind"><option value="">otomatis</option><option value="interview">wawancara</option><option value="memoir">memoar</option><option value="note">catatan</option><option value="lifelog">lifelog</option></select></label></div></div>
@@ -615,6 +637,7 @@ async function viewSources(el) {
     <h2>Sumber (${sources.length})</h2>
     <table><tr><th>Judul</th><th>Jenis</th><th>Status</th><th>Hasil</th></tr>${sources.map((s) => `<tr data-source="${esc(s.id)}" style="cursor:pointer"><td>${esc(s.title)}<div class="small muted">${esc(s.created_at.slice(0, 10))}${s.occurred_from ? " · terjadi " + esc(s.occurred_from) : ""}</div></td><td>${esc(s.kind)}</td><td><span class="badge ${s.status === "failed" ? "conflict" : s.status === "done" ? "now" : ""}">${esc(s.status)}</span></td><td class="small">${s.stats.episodes} cerita, ${s.stats.stream_items} WM, ${s.stats.dropped} noise</td></tr>`).join("")}</table>`;
   bindCites(el);
+  bindWatchedFolders(el);
   const drop = $("#drop");
   const upload = async (files) => {
     if (!files.length) return;
@@ -633,6 +656,88 @@ async function viewSources(el) {
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
   drop.ondragleave = () => drop.classList.remove("over");
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); upload([...e.dataTransfer.files]); };
+}
+
+function watchedFolderRow(f) {
+  const statusBadge = f.last_error
+    ? `<span class="badge conflict">galat</span>`
+    : f.last_change_at
+      ? `<span class="badge now">dipantau (${f.file_count} berkas)</span>`
+      : `<span class="badge warn">belum dibaca</span>`;
+  return `<div class="fact" id="wf-${esc(f.id)}" data-wf="${esc(f.id)}">
+    <div class="row" style="justify-content:space-between">
+      <div>
+        <b>${esc(f.label)}</b> ${statusBadge}
+        <div class="small muted"><code>${esc(f.path)}</code></div>
+        <div class="small muted">Diperiksa: ${esc(fmtTime(f.last_scan_at))} &middot; Konteks diperbarui: ${esc(fmtTime(f.last_change_at))}${f.last_source_id ? ` &middot; <a class="cite" data-source="${esc(f.last_source_id)}">lihat sumber</a>` : ""}</div>
+        ${f.last_error ? `<div class="small" style="color:var(--bad)">${esc(f.last_error)}</div>` : ""}
+      </div>
+      <div class="row">
+        <button type="button" data-wf-scan="${esc(f.id)}" title="Pindai perubahan atau baca ulang konteks folder ini lewat agy CLI">${icon("refresh")} Baca ulang</button>
+        <button type="button" class="ghost" data-wf-del="${esc(f.id)}" title="Hapus dari daftar folder penting">${icon("x")}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function bindWatchedFolders(el) {
+  const pick = $("#wf-pick", el);
+  if (pick) {
+    pick.onclick = async () => {
+      try {
+        const p = await pickFolder("Pilih folder penting untuk dipantau engram");
+        if (p) $("#wf-path", el).value = p;
+      } catch (e) { toast(e.message); }
+    };
+  }
+  const runScan = async (id, force, btn) => {
+    const msg = $("#wf-msg", el);
+    if (btn) btn.disabled = true;
+    if (msg) msg.innerHTML = `<span class="muted">Membaca folder dan mengekstrak konteks via <code>agy</code> CLI...</span>`;
+    try {
+      const r = await api(`/api/watched-folders/${encodeURIComponent(id)}/scan`, { method: "POST", json: { force } });
+      if (r.error) toast(`Gagal: ${r.error}`);
+      else if (r.changed) toast(`Konteks "${r.label}" diperbarui (${r.files} berkas) dan masuk antrean memori`);
+      else toast(`Folder "${r.label}" belum berubah (${r.files} berkas)`);
+      if (location.hash.startsWith("#sumber")) await viewSources($("#view"));
+    } catch (e) {
+      if (msg) msg.innerHTML = errLine(e.message);
+      if (btn) btn.disabled = false;
+    }
+  };
+  const form = $("#wf-form", el);
+  if (form) {
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const path = $("#wf-path", el).value.trim();
+      const label = $("#wf-label", el).value.trim() || null;
+      if (!path) return;
+      const addBtn = $("#wf-add", el);
+      addBtn.disabled = true;
+      try {
+        const r = await api(`/api/subjects/${S()}/watched-folders`, { method: "POST", json: { path, label, scan: false } });
+        toast(`Folder "${r.folder.label}" ditambahkan; membaca konteks via agy CLI...`);
+        await viewSources($("#view"));
+        await runScan(r.folder.id, true, null);
+      } catch (err) {
+        $("#wf-msg", el).innerHTML = errLine(err.message);
+        addBtn.disabled = false;
+      }
+    };
+  }
+  el.querySelectorAll("[data-wf-scan]").forEach((b) => {
+    b.onclick = () => runScan(b.dataset.wfScan, true, b);
+  });
+  el.querySelectorAll("[data-wf-del]").forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await api(`/api/watched-folders/${encodeURIComponent(b.dataset.wfDel)}/remove`, { method: "POST" });
+        toast("Folder penting dihapus dari pantauan");
+        await viewSources($("#view"));
+      } catch (e) { toast(e.message); b.disabled = false; }
+    };
+  });
 }
 
 function batchRow(b) {
@@ -944,6 +1049,7 @@ const F_TR = [
 const F_PROC = [
   ["pipeline", "workers", "Pekerja paralel", "int", "Jumlah job yang diproses bersamaan. Naikkan bila server LLM kuat."],
   ["schedule", "inbox_poll_secs", "Cek folder inbox tiap (detik)", "int"],
+  ["schedule", "watch_poll_secs", "Cek perubahan folder penting tiap (detik)", "int", "0 = hanya manual. Perubahan di folder penting akan dibaca ulang menggunakan agy CLI."],
   ["schedule", "retry_failed_minutes", "Proses ulang sumber gagal tiap (menit)", "int", "0 = mati. Berguna bila server LLM kadang mati."],
   ["schedule", "retry_failed_max", "Batas proses ulang otomatis per sumber", "int"],
   ["score", "stream_ttl_days", "Simpan obrolan ringan selama (hari)", "int", "Working memory luruh setelah ini; berkas sumber asli tetap ada."],
