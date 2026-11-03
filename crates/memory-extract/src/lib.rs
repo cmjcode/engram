@@ -5,6 +5,7 @@
 //! Pekerjaan terjadwal: [`consolidate`] (working memory, fase hidup),
 //! [`distill`] (prinsip & disposisi dengan verifikasi), [`voice`] (gaya tutur).
 
+pub mod compact;
 pub mod consolidate;
 pub mod distill;
 pub mod ingest;

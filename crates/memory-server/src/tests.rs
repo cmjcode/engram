@@ -20,6 +20,7 @@ fn llm(req: &ChatRequest) -> memory_llm::Result<String> {
         }
         "extract" => json!({"title": "Toko batik", "summary": "Pakde membuka toko batik",
             "entities": [{"name": "Budi", "kind": "person", "is_self": true}, {"name": "Pakde Karno", "kind": "person", "aliases": ["Karno"]}],
+            "facts": [{"subject": "Pakde Karno", "predicate": "membuka", "object": "toko batik di Solo", "category": "pekerjaan", "quote": "Pakde Karno membuka toko batik di Solo"}],
             "kin": [{"person": "Pakde Karno", "term": "pakde", "quote": "Pakde Karno"}]}).to_string(),
         "interview" => json!({"text": "Ceritakan masa kecil Bapak?"}).to_string(),
         _ => json!({"text": "ok"}).to_string(),
@@ -75,6 +76,17 @@ async fn http_api_and_mcp_end_to_end() {
 
     let stats: Value = c.get(format!("{base}/api/subjects/budi/stats")).send().await.unwrap().json().await.unwrap();
     assert_eq!(stats["stats"]["episodes"], 1);
+    let eps: Value = c.get(format!("{base}/api/subjects/budi/episodes")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(eps.as_array().unwrap().len(), 1);
+    let stream: Value = c.get(format!("{base}/api/subjects/budi/stream")).send().await.unwrap().json().await.unwrap();
+    assert!(stream.is_array());
+    let facts: Value = c.get(format!("{base}/api/subjects/budi/facts")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(facts.as_array().unwrap().len(), 1);
+    assert_eq!(facts[0]["entity_name"], "Pakde Karno");
+    let kin: Value = c.get(format!("{base}/api/subjects/budi/kin")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(kin.as_array().unwrap().len(), 1);
+    assert_eq!(kin[0]["from_name"], "Pakde Karno");
+    assert_eq!(kin[0]["relation_label"], "pakde");
     let rec = post(&c, format!("{base}/api/subjects/budi/recall"), json!({"query": "toko batik Pakde Karno"})).await;
     assert_eq!(rec["found"], true);
     let fam: Value = c.get(format!("{base}/api/subjects/budi/family")).send().await.unwrap().json().await.unwrap();
@@ -102,9 +114,11 @@ async fn http_api_and_mcp_end_to_end() {
     assert_eq!(notif.status(), 202);
     let tools = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for n in ["recall", "who_is", "timeline", "principles", "persona_context", "family_tree", "remember", "memory_gaps"] {
+    for n in ["recall", "who_is", "timeline", "principles", "persona_context", "family_tree", "remember", "memory_gaps", "compact"] {
         assert!(names.contains(&n), "{n}");
     }
+    let comp = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": {"name": "compact", "arguments": {"mode": "candidates"}}})).await;
+    assert_eq!(comp["result"]["isError"], false, "{comp}");
     let call = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "who_is", "arguments": {"name": "Karno"}}})).await;
     let text = call["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("pakde dari subjek"), "{text}");

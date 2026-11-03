@@ -118,6 +118,12 @@ enum Cmd {
     },
     /// Konsolidasi: working memory & fase hidup.
     Consolidate,
+    /// Rangkum & padatkan memori (episode roll-up & dedup fakta) secara non-destruktif.
+    Compact {
+        /// Hanya tampilkan kandidat klaster episode & fakta tanpa mengubah data.
+        #[arg(long)]
+        candidates: bool,
+    },
     /// Distilasi prinsip & disposisi.
     Distill,
     /// Bangun profil gaya tutur.
@@ -568,6 +574,33 @@ async fn main() -> Result<()> {
         Cmd::Consolidate => {
             let r = rt.pipeline.consolidate(&subject).await?;
             print(j, &r, || format!("kedaluwarsa {}, dipromosikan {}, fase diperbarui {}", r.expired, r.promoted, r.phases_updated));
+        }
+        Cmd::Compact { candidates } => {
+            if candidates {
+                let c = rt.pipeline.compact_candidates(&subject).await?;
+                print(j, &c, || {
+                    format!(
+                        "{} klaster episode, {} grup fakta entitas, {} review terbuka",
+                        c.episode_clusters.len(),
+                        c.entity_fact_groups.len(),
+                        c.open_reviews.len()
+                    )
+                });
+            } else {
+                let r = rt.pipeline.compact(&subject).await?;
+                print(j, &r, || {
+                    format!(
+                        "klaster {}, episode kanonik {}, episode dipadatkan {}, fakta digabung {}, fakta ditutup {}, fakta ditolak {}, review {}",
+                        r.episode_clusters,
+                        r.canonical_episodes_created,
+                        r.episodes_compacted,
+                        r.facts_merged,
+                        r.facts_closed,
+                        r.facts_rejected,
+                        r.reviews_resolved
+                    )
+                });
+            }
         }
         Cmd::Distill => {
             let r = rt.pipeline.distill(&subject).await?;

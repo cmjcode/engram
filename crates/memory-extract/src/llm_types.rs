@@ -156,3 +156,46 @@ pub struct Verification {
 pub struct TextOut {
     pub text: String,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CompactEpisodesOut {
+    #[serde(default)]
+    pub rollups: Vec<EpisodeRollupOut>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EpisodeRollupOut {
+    pub episode_ids: Vec<String>,
+    pub title: String,
+    pub summary: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CompactFactsOut {
+    #[serde(default)]
+    pub merges: Vec<FactMergeOut>,
+    #[serde(default)]
+    pub closures: Vec<FactClosureOut>,
+    #[serde(default)]
+    pub rejections: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct FactMergeOut {
+    pub keep_id: String,
+    pub absorb_ids: Vec<String>,
+    #[serde(default)]
+    pub predicate: Option<String>,
+    #[serde(default)]
+    pub object_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct FactClosureOut {
+    pub fact_id: String,
+    #[serde(default)]
+    pub valid_to: Option<String>,
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+}

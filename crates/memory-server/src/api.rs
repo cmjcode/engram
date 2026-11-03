@@ -24,9 +24,13 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects", get(list_subjects).post(upsert_subject))
         .route("/api/subjects/{s}/stats", get(stats))
         .route("/api/subjects/{s}/timeline", get(timeline))
+        .route("/api/subjects/{s}/episodes", get(episodes))
         .route("/api/subjects/{s}/episodes/{id}", get(episode))
+        .route("/api/subjects/{s}/stream", get(stream_items))
         .route("/api/subjects/{s}/entities", get(entities))
         .route("/api/subjects/{s}/entities/{id}", get(entity))
+        .route("/api/subjects/{s}/facts", get(facts))
+        .route("/api/subjects/{s}/kin", get(kin))
         .route("/api/subjects/{s}/family", get(family))
         .route("/api/subjects/{s}/principles", get(principles))
         .route("/api/subjects/{s}/dispositions", get(dispositions))
@@ -48,6 +52,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects/{s}/interview/next", get(interview_next))
         .route("/api/subjects/{s}/interview/answer", post(interview_answer))
         .route("/api/subjects/{s}/maintenance/{kind}", post(maintenance))
+        .route("/api/subjects/{s}/compact/candidates", get(compact_candidates))
+        .route("/api/subjects/{s}/compact/apply", post(compact_apply))
         .route("/api/mcp/clients", get(mcp_clients))
         .route("/api/mcp/clients/{id}/install", post(mcp_install))
         .route("/api/mcp/clients/{id}/uninstall", post(mcp_uninstall))
@@ -133,6 +139,36 @@ async fn timeline(State(st): State<AppState>, Path(s): Path<String>, Query(q): Q
     Ok(Json(st.rt.retriever.timeline(&s, q.entity.as_deref(), q.phase.as_deref(), q.from.as_deref(), q.to.as_deref(), q.limit.unwrap_or(500)).await?))
 }
 
+async fn episodes(State(st): State<AppState>, Path(s): Path<String>, Query(p): Query<Page>) -> ApiResult<Vec<Episode>> {
+    check(&s)?;
+    let status = match p.status.as_deref() {
+        Some("retelling") => Some(EpisodeStatus::Retelling),
+        Some("quarantined") => Some(EpisodeStatus::Quarantined),
+        Some("all") => None,
+        _ => Some(EpisodeStatus::Active),
+    };
+    Ok(Json(
+        st.rt
+            .store
+            .list_episodes(
+                &s,
+                &EpisodeFilter {
+                    status,
+                    limit: p.limit.unwrap_or(500).min(2000),
+                    offset: p.offset.unwrap_or(0),
+                    ..Default::default()
+                },
+            )
+            .await?,
+    ))
+}
+
+async fn stream_items(State(st): State<AppState>, Path(s): Path<String>, Query(p): Query<Page>) -> ApiResult<Vec<StreamItem>> {
+    check(&s)?;
+    let only_open = p.status.as_deref() == Some("open");
+    Ok(Json(st.rt.store.stream_items(&s, only_open, p.limit.unwrap_or(500).min(2000)).await?))
+}
+
 async fn episode(State(st): State<AppState>, Path((s, id)): Path<(String, String)>) -> ApiResult<Value> {
     check(&s)?;
     let e = st.rt.store.get_episode(&id).await?.filter(|e| e.subject == s).ok_or_else(|| ApiError::NotFound("episode tidak ada".into()))?;
@@ -168,6 +204,64 @@ async fn entities(State(st): State<AppState>, Path(s): Path<String>, Query(p): Q
 async fn entity(State(st): State<AppState>, Path((s, id)): Path<(String, String)>) -> ApiResult<memory_retrieve::WhoIs> {
     check(&s)?;
     st.rt.retriever.who_is_id(&s, &id).await?.map(Json).ok_or_else(|| ApiError::NotFound("entitas tidak ada".into()))
+}
+
+async fn facts(State(st): State<AppState>, Path(s): Path<String>, Query(p): Query<Page>) -> ApiResult<Vec<Value>> {
+    check(&s)?;
+    let status = match p.status.as_deref() {
+        Some("all") => None,
+        Some("conflict") => Some(FactStatus::Conflict),
+        Some("quarantined") => Some(FactStatus::Quarantined),
+        Some("rejected") => Some(FactStatus::Rejected),
+        _ => Some(FactStatus::Active),
+    };
+    let rows = st.rt.store.list_facts(&s, status, p.limit.unwrap_or(500).min(2000)).await?;
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for f in rows {
+        let entity_name = match names.get(&f.entity_id) {
+            Some(n) => n.clone(),
+            None => {
+                let n = st.rt.store.resolve_entity(&f.entity_id).await?.map(|e| e.name).unwrap_or_default();
+                names.insert(f.entity_id.clone(), n.clone());
+                n
+            }
+        };
+        let mut v = serde_json::to_value(&f).unwrap_or_default();
+        v["entity_name"] = json!(entity_name);
+        v["statement"] = json!(f.statement(&entity_name));
+        v["current"] = json!(f.status == FactStatus::Active && f.valid_at(&today));
+        v["time"] = json!(f.time.label());
+        out.push(v);
+    }
+    Ok(Json(out))
+}
+
+async fn kin(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<Vec<Value>> {
+    check(&s)?;
+    let rows = st.rt.store.kin_for_subject(&s).await?;
+    let mut ents: std::collections::HashMap<String, Entity> = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for k in rows {
+        for id in [&k.from, &k.to] {
+            if !ents.contains_key(id)
+                && let Some(e) = st.rt.store.resolve_entity(id).await?
+            {
+                ents.insert(id.clone(), e);
+            }
+        }
+        let from_name = ents.get(&k.from).map(|e| e.name.clone()).unwrap_or_else(|| "?".into());
+        let to_name = ents.get(&k.to).map(|e| e.name.clone()).unwrap_or_else(|| "?".into());
+        let g = ents.get(&k.from).and_then(|e| e.gender).or(k.gender);
+        let label = k.relation.label_id(g, k.older).to_string();
+        let mut v = serde_json::to_value(&k).unwrap_or_default();
+        v["from_name"] = json!(from_name);
+        v["to_name"] = json!(to_name);
+        v["relation_label"] = json!(label);
+        out.push(v);
+    }
+    Ok(Json(out))
 }
 
 async fn family(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<memory_retrieve::FamilyTree> {
@@ -385,10 +479,25 @@ async fn maintenance(State(st): State<AppState>, Path((s, kind)): Path<(String, 
         "consolidate" => memory_jobs::CONSOLIDATE,
         "distill" => memory_jobs::DISTILL,
         "voice" => memory_jobs::VOICE,
+        "compact" => memory_jobs::COMPACT,
         other => return Err(ApiError::BadRequest(format!("jenis tidak dikenal: {other}"))),
     };
     let job = st.rt.enqueue(kind, json!({"subject": s}), format!("{kind}:{s}:manual:{}", memory_core::new_id())).await?;
     Ok(Json(json!({"job_id": job.id})))
+}
+
+async fn compact_candidates(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<memory_extract::compact::CompactCandidates> {
+    check(&s)?;
+    Ok(Json(st.rt.pipeline.compact_candidates(&s).await?))
+}
+
+async fn compact_apply(
+    State(st): State<AppState>,
+    Path(s): Path<String>,
+    Json(plan): Json<memory_extract::compact::CompactPlan>,
+) -> ApiResult<memory_extract::compact::CompactReport> {
+    check(&s)?;
+    Ok(Json(st.rt.pipeline.compact_apply(&s, plan).await?))
 }
 
 // ---------------------------------------------------------------- pasang MCP ke agent AI

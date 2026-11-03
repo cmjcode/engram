@@ -136,6 +136,10 @@ pub struct PipelineConfig {
     pub max_window_chars: usize,
     /// Kemiripan >= ini dengan episode lama -> dianggap penceritaan ulang.
     pub merge_similarity: f32,
+    /// Kemiripan >= ini untuk kandidat rangkuman episode saat compact.
+    pub compact_similarity: f32,
+    /// Minimal jumlah episode dalam satu cluster untuk dirangkum saat compact.
+    pub compact_min_episodes: usize,
     /// Kemiripan nama entitas >= ini -> gabung otomatis (entitas confirmed).
     pub entity_auto_merge: f32,
     /// Kemiripan di [review, auto_merge) -> adjudikasi LLM / review manusia.
@@ -155,6 +159,8 @@ impl Default for PipelineConfig {
         Self {
             max_window_chars: 6000,
             merge_similarity: 0.92,
+            compact_similarity: 0.78,
+            compact_min_episodes: 2,
             entity_auto_merge: 0.9,
             entity_review: 0.75,
             min_fact_confidence: 0.5,
@@ -237,6 +243,7 @@ pub struct ScheduleConfig {
     pub consolidate_hours: u64,
     pub distill_hours: u64,
     pub voice_hours: u64,
+    pub compact_hours: u64,
     pub export_hours: u64,
     pub inbox_poll_secs: u64,
     /// Interval proses ulang otomatis sumber yang gagal (menit, 0 = mati).
@@ -247,7 +254,7 @@ pub struct ScheduleConfig {
 
 impl Default for ScheduleConfig {
     fn default() -> Self {
-        Self { consolidate_hours: 24, distill_hours: 24, voice_hours: 168, export_hours: 24, inbox_poll_secs: 10, retry_failed_minutes: 10, retry_failed_max: 20 }
+        Self { consolidate_hours: 24, distill_hours: 24, voice_hours: 168, compact_hours: 168, export_hours: 24, inbox_poll_secs: 10, retry_failed_minutes: 10, retry_failed_max: 20 }
     }
 }
 

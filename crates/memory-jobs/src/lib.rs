@@ -25,6 +25,7 @@ pub const PROMOTE_STREAM: &str = "promote_stream";
 pub const CONSOLIDATE: &str = "consolidate";
 pub const DISTILL: &str = "distill";
 pub const VOICE: &str = "voice";
+pub const COMPACT: &str = "compact";
 pub const EXPORT: &str = "export";
 pub const REVIEW: &str = "review";
 
@@ -111,6 +112,7 @@ impl Runtime {
             CONSOLIDATE => json!(self.pipeline.consolidate(&s("subject")?).await?),
             DISTILL => json!(self.pipeline.distill(&s("subject")?).await?),
             VOICE => json!(self.pipeline.build_voice_profile(&s("subject")?).await?),
+            COMPACT => json!(self.pipeline.compact(&s("subject")?).await?),
             EXPORT => json!(archive::export(self, None).await?.display().to_string()),
             REVIEW => {
                 let d = if job.payload["decision"].as_str() == Some("approve") { Decision::Approve } else { Decision::Reject };
@@ -264,7 +266,15 @@ impl Runtime {
         let mut n = 0;
         let bucket = |hours: u64| now / (hours.max(1) * 3600);
         for subject in self.store.list_subjects().await? {
-            for (kind, hours) in [(CONSOLIDATE, sc.consolidate_hours), (DISTILL, sc.distill_hours), (VOICE, sc.voice_hours)] {
+            for (kind, hours) in [
+                (CONSOLIDATE, sc.consolidate_hours),
+                (DISTILL, sc.distill_hours),
+                (VOICE, sc.voice_hours),
+                (COMPACT, sc.compact_hours),
+            ] {
+                if hours == 0 {
+                    continue;
+                }
                 let key = format!("{kind}:{}:{}", subject.id, bucket(hours));
                 let (_, created) = self.store.enqueue(&Job::new(kind, json!({"subject": subject.id}), key, None)).await?;
                 n += u32::from(created);

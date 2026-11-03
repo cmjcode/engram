@@ -68,6 +68,22 @@ fn llm(req: &ChatRequest) -> memory_llm::Result<String> {
             Ok(out.to_string())
         }
         "same_entity" => Ok(json!({"same": false, "confidence": 0.2}).to_string()),
+        "compact_episodes" => {
+            let ids: Vec<String> = user
+                .lines()
+                .filter_map(|l| l.strip_prefix('[')?.split_once(']').map(|(id, _)| id.to_string()))
+                .collect();
+            Ok(json!({
+                "rollups": [{
+                    "episode_ids": ids,
+                    "title": "Rangkuman Kerja Proyek",
+                    "summary": "Ringkasan keputusan teknis proyek.",
+                    "text": "Dalam proyek ini diputuskan pemakaian RocksDB dan perbaikan validasi tanggal."
+                }]
+            })
+            .to_string())
+        }
+        "compact_facts" => Ok(json!({"merges": [], "closures": [], "rejections": []}).to_string()),
         other => Ok(json!({"text": format!("tiruan {other}")}).to_string()),
     }
 }
@@ -212,4 +228,153 @@ async fn offline_llm_falls_back_and_commits_episode() {
     let eps = p.store.list_episodes("budi", &Default::default()).await.unwrap();
     assert_eq!(eps.len(), 1);
     assert!(eps[0].text.contains("RocksDB"));
+}
+
+#[tokio::test]
+async fn compact_rolls_up_episodes_and_compacts_facts_non_destructively() {
+    let (p, _d) = setup().await;
+    // Dua percakapan agent dari proyek yang sama, ditambah fakta afiliasi politik.
+    let s1 = p
+        .ingest(IngestDoc {
+            subject: "budi".into(),
+            kind: SourceKind::AgentConversation,
+            title: "Diingat agent: antigravity:VOLTUNES".into(),
+            text: "Waktu umur 20 saya pendukung Partai A dan memperbaiki modul tanggal di proyek VOLTUNES.".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    p.process_source(&s1.source.id, None).await.unwrap();
+
+    let s2 = p
+        .ingest(IngestDoc {
+            subject: "budi".into(),
+            kind: SourceKind::AgentConversation,
+            title: "Diingat agent: antigravity:VOLTUNES".into(),
+            text: "Waktu usaha rugi, karyawan tetap digaji dulu sambil menyelesaikan unit test di proyek VOLTUNES.".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    p.process_source(&s2.source.id, None).await.unwrap();
+
+    let cands = p.compact_candidates("budi").await.unwrap();
+    assert_eq!(cands.episode_clusters.len(), 1, "dua episode AgentConversation seproyek masuk kandidat klaster");
+    assert_eq!(cands.episode_clusters[0].episodes.len(), 2);
+
+    // Jalankan compact otomatis: 2 episode mikro menjadi 1 episode kanonik aktif + 2 retelling.
+    let rep = p.compact("budi").await.unwrap();
+    assert_eq!(rep.canonical_episodes_created, 1);
+    assert_eq!(rep.episodes_compacted, 2);
+
+    let active_eps = p
+        .store
+        .list_episodes("budi", &memory_store::EpisodeFilter { status: Some(EpisodeStatus::Active), ..Default::default() })
+        .await
+        .unwrap();
+    assert_eq!(active_eps.len(), 1);
+    let canon = &active_eps[0];
+    assert_eq!(canon.title, "Rangkuman Kerja Proyek");
+    assert_eq!(canon.decisions.len(), 1, "keputusan dari episode anggota ikut terwarisi ke episode kanonik");
+    assert_eq!(canon.trait_signals.len(), 1, "sinyal sifat ikut terwarisi ke episode kanonik");
+
+    let all_eps = p.store.list_episodes("budi", &Default::default()).await.unwrap();
+    assert_eq!(all_eps.len(), 3, "episode asli tidak dihapus dari penyimpanan");
+    for m in all_eps.iter().filter(|e| e.id != canon.id) {
+        assert_eq!(m.status, EpisodeStatus::Retelling);
+        assert_eq!(m.retelling_of.as_deref(), Some(canon.id.as_str()));
+    }
+
+    // Uji pemadatan fakta (merge duplikat, close fakta lama, reject fakta sesaat).
+    let sid = self_id(&p).await;
+    let f_keep = Fact {
+        id: "f_keep".into(),
+        subject: "budi".into(),
+        entity_id: sid.clone(),
+        predicate: "mengembangkan".into(),
+        category: "proyek".into(),
+        object_entity: None,
+        object_text: "Tabular".into(),
+        kind: FactKind::Fact,
+        exclusive: false,
+        time: memory_core::TimeRef::Unknown,
+        valid_from: Some("2026-02-01".into()),
+        valid_to: None,
+        ongoing: true,
+        time_confidence: 1.0,
+        observed_at: "2026-02-01".into(),
+        confidence: 0.8,
+        evidence: vec![Evidence { episode_id: all_eps[0].id.clone(), quote: "Tabular".into() }],
+        status: FactStatus::Active,
+        superseded_by: None,
+        supersedes: None,
+        created_at: "2026-02-01T00:00:00Z".into(),
+    };
+    let f_dup = Fact {
+        id: "f_dup".into(),
+        valid_from: Some("2026-01-15".into()),
+        confidence: 0.95,
+        predicate: "memiliki proyek".into(),
+        evidence: vec![Evidence { episode_id: all_eps[1].id.clone(), quote: "proyek Tabular".into() }],
+        ..f_keep.clone()
+    };
+    let f_old = Fact {
+        id: "f_old".into(),
+        predicate: "mengerjakan".into(),
+        object_text: "migrasi awal".into(),
+        ..f_keep.clone()
+    };
+    let f_noise = Fact {
+        id: "f_noise".into(),
+        predicate: "sedang menjalankan".into(),
+        object_text: "kompilasi Gradle".into(),
+        ..f_keep.clone()
+    };
+    for f in [&f_keep, &f_dup, &f_old, &f_noise] {
+        p.store.put_fact(f).await.unwrap();
+    }
+
+    let apply_rep = p
+        .compact_apply(
+            "budi",
+            crate::compact::CompactPlan {
+                episode_rollups: vec![],
+                fact_merges: vec![crate::llm_types::FactMergeOut {
+                    keep_id: "f_keep".into(),
+                    absorb_ids: vec!["f_dup".into()],
+                    predicate: Some("mengembangkan proyek".into()),
+                    object_text: Some("Tabular".into()),
+                }],
+                fact_closures: vec![crate::llm_types::FactClosureOut {
+                    fact_id: "f_old".into(),
+                    valid_to: Some("2026-03-01".into()),
+                    superseded_by: None,
+                }],
+                fact_rejections: vec!["f_noise".into()],
+                review_decisions: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(apply_rep.facts_merged, 1);
+    assert_eq!(apply_rep.facts_closed, 1);
+    assert_eq!(apply_rep.facts_rejected, 1);
+
+    let kept = p.store.get_fact("f_keep").await.unwrap().unwrap();
+    assert_eq!(kept.evidence.len(), 2, "bukti fakta duplikat digabung ke fakta utama");
+    assert_eq!(kept.valid_from.as_deref(), Some("2026-01-15"));
+    assert_eq!(kept.confidence, 0.95);
+    assert_eq!(kept.predicate, "mengembangkan proyek");
+
+    let dup = p.store.get_fact("f_dup").await.unwrap().unwrap();
+    assert_eq!(dup.status, FactStatus::Rejected);
+    assert_eq!(dup.superseded_by.as_deref(), Some("f_keep"));
+
+    let closed = p.store.get_fact("f_old").await.unwrap().unwrap();
+    assert_eq!(closed.status, FactStatus::Active);
+    assert_eq!(closed.valid_to.as_deref(), Some("2026-03-01"));
+    assert!(!closed.is_current(), "fakta yang ditutup berpindah menjadi riwayat masa lalu");
+
+    let rejected = p.store.get_fact("f_noise").await.unwrap().unwrap();
+    assert_eq!(rejected.status, FactStatus::Rejected);
 }

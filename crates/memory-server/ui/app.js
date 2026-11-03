@@ -214,14 +214,26 @@ async function showSource(id) {
 async function viewHome(el) {
   const r = await api(`/api/subjects/${S()}/stats`);
   const st = r.stats;
-  const items = [["Cerita", st.episodes], ["Diceritakan ulang", st.retellings], ["Working memory", st.stream_items], ["Orang & tempat", st.entities],
-    ["Fakta", st.facts], ["Relasi keluarga", st.kin], ["Prinsip", st.principles], ["Sifat & nilai", st.dispositions], ["Menunggu review", st.open_reviews], ["Sumber", st.sources]];
+  const items = [
+    ["episodes", "Cerita", st.episodes],
+    ["retellings", "Diceritakan ulang", st.retellings],
+    ["stream", "Working memory", st.stream_items],
+    ["entities", "Orang & tempat", st.entities],
+    ["facts", "Fakta", st.facts],
+    ["kin", "Relasi keluarga", st.kin],
+    ["principles", "Prinsip", st.principles],
+    ["dispositions", "Sifat & nilai", st.dispositions],
+    ["reviews", "Menunggu review", st.open_reviews],
+    ["sources", "Sumber", st.sources],
+  ];
   el.innerHTML = `<h1>${esc(r.subject?.name || state.subject)}</h1>
-    <p class="muted">${r.subject?.anchors?.birth ? "Lahir " + esc(r.subject.anchors.birth) + " · " : ""}${r.pending_jobs} pekerjaan dalam antrean</p>
-    <div class="grid">${items.map(([k, v]) => `<div class="card stat"><b>${v}</b><span>${k}</span></div>`).join("")}</div>
+    <p class="muted">${r.subject?.anchors?.birth ? "Lahir " + esc(r.subject.anchors.birth) + " · " : ""}<a class="cite" id="show-jobs">${r.pending_jobs} pekerjaan dalam antrean</a></p>
+    <div class="grid">${items.map(([k, label, v]) => `<div class="card stat" role="button" tabindex="0" data-stat="${k}" data-label="${esc(label)}"><b>${v}</b><span>${label}</span></div>`).join("")}</div>
+    <div id="stat-panel"></div>
     <h2>Perawatan</h2>
     <div class="row">
       <button data-m="consolidate">${icon("refresh")} Konsolidasi</button>
+      <button data-m="compact">${icon("book")} Padatkan memori</button>
       <button data-m="distill">${icon("compass")} Distilasi prinsip</button>
       <button data-m="voice">${icon("mic")} Profil gaya tutur</button>
       <button id="retry-failed">${icon("refresh")} Proses ulang yang gagal</button>
@@ -232,6 +244,33 @@ async function viewHome(el) {
       <button class="primary" id="save-birth">Simpan</button>
       <span class="muted small">Dipakai untuk menerjemahkan "umur 20" dan "waktu SD" menjadi tahun.</span>
     </div></div>`;
+  let activeKey = null;
+  const selectStat = (key, label, cardEl) => {
+    const panel = $("#stat-panel");
+    if (activeKey === key) {
+      activeKey = null;
+      el.querySelectorAll(".card.stat").forEach((c) => c.classList.remove("active"));
+      panel.innerHTML = "";
+      return;
+    }
+    activeKey = key;
+    el.querySelectorAll(".card.stat").forEach((c) => c.classList.toggle("active", c === cardEl));
+    showStatDetail(panel, key, label, () => {
+      activeKey = null;
+      el.querySelectorAll(".card.stat").forEach((c) => c.classList.remove("active"));
+      panel.innerHTML = "";
+    });
+  };
+  el.querySelectorAll("[data-stat]").forEach((card) => {
+    card.onclick = () => selectStat(card.dataset.stat, card.dataset.label, card);
+    card.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        selectStat(card.dataset.stat, card.dataset.label, card);
+      }
+    };
+  });
+  $("#show-jobs").onclick = () => selectStat("jobs", "Pekerjaan dalam antrean", null);
   el.querySelectorAll("[data-m]").forEach((b) => { b.onclick = async () => { await api(`/api/subjects/${S()}/maintenance/${b.dataset.m}`, { method: "POST" }); toast("Masuk antrean"); }; });
   $("#retry-failed").onclick = async () => {
     try {
@@ -243,6 +282,166 @@ async function viewHome(el) {
     await api("/api/subjects", { method: "POST", json: { id: state.subject, name: r.subject.name, birth: $("#birth").value } });
     toast("Tersimpan");
   };
+}
+
+async function showStatDetail(panel, key, label, onClose) {
+  panel.innerHTML = `<div class="card" style="margin-top:12px"><div class="empty">Memuat ${esc(label.toLowerCase())}...</div></div>`;
+  const kinds = { person: "Orang", place: "Tempat", org: "Organisasi", event: "Peristiwa", object: "Benda", concept: "Konsep" };
+  const revKinds = { gray_zone: "Layak jadi cerita?", conflict: "Fakta bertentangan", entity_merge: "Orang yang sama?", quarantine: "Fakta meragukan", reflective: "Konfirmasi prinsip/sifat" };
+  let rows = [];
+  let extraHead = "";
+  let matchFn = () => true;
+  let renderFn = () => "";
+
+  try {
+    if (key === "episodes" || key === "retellings") {
+      const st = key === "retellings" ? "retelling" : "active";
+      rows = await api(`/api/subjects/${S()}/episodes?status=${st}&limit=500`);
+      if (key === "episodes") extraHead = `<a class="btn small" href="#timeline">${icon("clock")} Buka Timeline</a>`;
+      matchFn = (e, q) => [e.title, e.summary, e.text, e.life_phase, labelTime(e)].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => list.map((e) => `<div class="tl-item" data-ep="${esc(e.id)}">
+        <span class="tl-time">${esc(labelTime(e))}${e.life_phase ? `<br><span class="small">${esc(e.life_phase)}</span>` : ""}</span>
+        <span><b>${esc(e.title || "Tanpa judul")}</b><br><span class="small muted">${esc(e.summary || e.text.slice(0, 220))}</span>
+        ${e.retelling_of ? `<br><span class="small">Penceritaan ulang dari <a class="cite" data-ep="${esc(e.retelling_of)}">[ep:${esc(e.retelling_of.slice(0, 6))}]</a></span>` : ""}</span>
+      </div>`).join("");
+    } else if (key === "stream") {
+      rows = await api(`/api/subjects/${S()}/stream?limit=500`);
+      matchFn = (s, q) => [s.text, s.speaker].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => list.map((s) => `<div class="fact">
+        <div>${esc(s.text)}</div>
+        <div class="small muted">${s.speaker ? `Penutur: ${esc(s.speaker)} · ` : ""}skor ${(s.importance * 100).toFixed(0)}% · dibuat ${esc((s.created_at || "").slice(0, 10))} · luruh ${esc((s.expires_at || "").slice(0, 10))}
+          · <a class="cite" data-source="${esc(s.source_id)}">sumber</a>
+          ${s.promoted_to ? ` · diangkat jadi <a class="cite" data-ep="${esc(s.promoted_to)}">cerita</a>` : ""}</div>
+      </div>`).join("");
+    } else if (key === "entities") {
+      rows = await api(`/api/subjects/${S()}/entities?limit=500`);
+      extraHead = `<a class="btn small" href="#orang">${icon("users")} Buka Orang &amp; Silsilah</a>`;
+      matchFn = (e, q) => [e.name, e.description, kinds[e.kind] || e.kind, ...(e.aliases || [])].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => `<table><tr><th>Nama</th><th>Jenis</th><th>Alias &amp; keterangan</th><th>Sebutan</th></tr>
+        ${list.map((e) => `<tr data-entity="${esc(e.id)}" style="cursor:pointer">
+          <td><b>${esc(e.name)}</b> ${e.status === "provisional" ? '<span class="badge warn">baru sekali disebut</span>' : ""}</td>
+          <td><span class="badge">${esc(kinds[e.kind] || e.kind)}</span></td>
+          <td class="small muted">${esc((e.aliases || []).join(", "))}${e.aliases?.length && e.description ? " · " : ""}${esc(e.description || "")}</td>
+          <td class="small">${e.mention_count} cerita</td>
+        </tr>`).join("")}</table>`;
+    } else if (key === "facts") {
+      rows = await api(`/api/subjects/${S()}/facts?limit=500`);
+      matchFn = (f, q) => [f.entity_name, f.predicate, f.object_text, f.category, f.statement, ...(f.evidence || []).map((e) => e.quote)].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => list.map((f) => {
+        const span = f.valid_to ? `${yr(f.valid_from)}–${yr(f.valid_to)}` : `sejak ${yr(f.valid_from)}`;
+        const ev = (f.evidence || []).map((e) => `<a class="cite" data-ep="${esc(e.episode_id || e)}">bukti</a>`).join(" ");
+        const quote = f.evidence?.[0]?.quote ? `<div class="quote small">${esc(f.evidence[0].quote)}</div>` : "";
+        return `<div class="fact">${factBadge(f)}${f.category ? `<span class="badge">${esc(f.category)}</span>` : ""}
+          <a class="cite" data-entity="${esc(f.entity_id)}"><b>${esc(f.entity_name || f.entity_id)}</b></a> ${esc(f.predicate)} ${esc(f.object_text)}
+          <span class="muted small">(${esc(span)}${f.time ? "; " + esc(f.time) : ""})</span> ${ev}${quote}</div>`;
+      }).join("");
+    } else if (key === "kin") {
+      rows = await api(`/api/subjects/${S()}/kin`);
+      extraHead = `<a class="btn small" href="#orang">${icon("users")} Buka Bagan Silsilah</a>`;
+      matchFn = (k, q) => [k.from_name, k.to_name, k.relation_label, k.term].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => list.map((k) => {
+        const ev = (k.evidence || []).map((e) => `<a class="cite" data-ep="${esc(e.episode_id || e)}">bukti</a>`).join(" ");
+        const quote = k.evidence?.[0]?.quote ? `<div class="quote small">${esc(k.evidence[0].quote)}</div>` : "";
+        return `<div class="fact">
+          <a class="cite" data-entity="${esc(k.from)}"><b>${esc(k.from_name)}</b></a> adalah <b>${esc(k.relation_label)}</b> dari <a class="cite" data-entity="${esc(k.to)}"><b>${esc(k.to_name)}</b></a>
+          ${k.term && k.term !== k.relation_label ? `<span class="badge">${esc(k.term)}</span>` : ""}
+          ${k.inferred ? '<span class="muted small">(turunan)</span>' : ""} ${ev}${quote}</div>`;
+      }).join("");
+    } else if (key === "principles") {
+      rows = await api(`/api/subjects/${S()}/principles`);
+      extraHead = `<a class="btn small" href="#berpikir">${icon("compass")} Buka Cara berpikir</a>`;
+      matchFn = (p, q) => [p.principle.statement, p.principle.domain, p.principle.origin].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => list.map((p) => `<div class="fact">
+        <b>${esc(p.principle.statement)}</b>
+        <div class="small muted">${esc(p.principle.domain)}${p.principle.origin ? " · asal: " + esc(p.principle.origin) : ""} · keyakinan ${(p.principle.confidence * 100).toFixed(0)}% · ${p.evidence.length} cerita pendukung</div>
+        ${p.evidence.map((e) => `<div class="tl-item" data-ep="${esc(e.id)}"><span class="tl-time">${esc(e.time)}</span><span>${esc(e.title || e.excerpt)}</span></div>`).join("")}
+      </div>`).join("");
+    } else if (key === "dispositions") {
+      const all = await api(`/api/subjects/${S()}/dispositions`);
+      rows = all.filter((d) => d.status === "active");
+      extraHead = `<a class="btn small" href="#berpikir">${icon("compass")} Buka Cara berpikir</a>`;
+      matchFn = (d, q) => [d.label, d.description].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => list.map((d) => {
+        const ev = (d.evidence || []).map((e) => `<a class="cite" data-ep="${esc(e.episode_id || e)}">bukti</a>`).join(" ");
+        return `<div class="fact"><b>${esc(d.label)}</b> <span class="badge">${d.kind === "value" ? "nilai" : "sifat"}</span>
+          <span class="small muted">${esc(yr(d.valid_from))} – ${d.valid_to ? esc(yr(d.valid_to)) : "sekarang"}</span> ${ev}
+          <div class="small">${esc(d.description)}</div></div>`;
+      }).join("");
+    } else if (key === "reviews") {
+      rows = await api(`/api/subjects/${S()}/reviews`);
+      extraHead = `<a class="btn small" href="#review">${icon("flag")} Buka halaman Review</a>`;
+      matchFn = (r, q) => [r.summary, r.kind, r.payload?.text].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => list.map((r) => `<div class="fact" data-rev="${esc(r.id)}">
+        <span class="badge">${esc(revKinds[r.kind] || r.kind)}</span> <span>${esc(r.summary)}</span>
+        ${r.payload?.text ? `<pre class="src small" style="margin:6px 0">${esc(r.payload.text)}</pre>` : ""}
+        <div class="row" style="margin-top:6px"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button><button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button></div>
+      </div>`).join("");
+    } else if (key === "sources") {
+      rows = await api(`/api/subjects/${S()}/sources?limit=500`);
+      extraHead = `<a class="btn small" href="#sumber">${icon("inbox")} Buka Sumber &amp; import</a>`;
+      matchFn = (s, q) => [s.title, s.kind, s.status].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => `<table><tr><th>Judul</th><th>Jenis</th><th>Status</th><th>Hasil</th></tr>
+        ${list.map((s) => `<tr data-source="${esc(s.id)}" style="cursor:pointer">
+          <td>${esc(s.title)}<div class="small muted">${esc((s.created_at || "").slice(0, 10))}${s.occurred_from ? " · terjadi " + esc(s.occurred_from) : ""}</div></td>
+          <td>${esc(s.kind)}</td>
+          <td><span class="badge ${s.status === "failed" ? "conflict" : s.status === "done" ? "now" : ""}">${esc(s.status)}</span></td>
+          <td class="small">${s.stats.episodes} cerita, ${s.stats.stream_items} WM, ${s.stats.dropped} noise</td>
+        </tr>`).join("")}</table>`;
+    } else if (key === "jobs") {
+      const res = await api("/api/jobs?limit=200");
+      rows = res.jobs || [];
+      matchFn = (j, q) => [j.kind, j.status, j.stage, j.error].some((x) => (x || "").toLowerCase().includes(q));
+      renderFn = (list) => `<table><tr><th>Jenis</th><th>Status</th><th>Tahap</th><th>Waktu</th></tr>
+        ${list.map((j) => `<tr>
+          <td><b>${esc(j.kind)}</b></td>
+          <td><span class="badge ${j.status === "failed" ? "conflict" : j.status === "done" ? "now" : j.status === "running" ? "warn" : ""}">${esc(j.status)}</span></td>
+          <td class="small">${esc(j.stage || "")}${j.progress_total ? ` (${j.progress_done}/${j.progress_total})` : ""}${j.error ? `<div style="color:var(--bad)">${esc(j.error)}</div>` : ""}</td>
+          <td class="small muted">${esc((j.updated_at || j.created_at || "").slice(0, 19).replace("T", " "))}</td>
+        </tr>`).join("")}</table>`;
+    }
+  } catch (e) {
+    panel.innerHTML = `<div class="card" style="margin-top:12px">Gagal memuat: ${esc(e.message)}</div>`;
+    return;
+  }
+
+  panel.innerHTML = `<div class="card" style="margin-top:12px">
+    <div class="row" style="justify-content:space-between;margin-bottom:8px">
+      <div class="row"><h2 style="margin:0">${esc(label)} (<span id="stat-count">${rows.length}</span>)</h2>${extraHead}</div>
+      <div class="row">
+        ${rows.length > 3 ? `<input type="search" id="stat-q" placeholder="Saring ${esc(label.toLowerCase())}...">` : ""}
+        <button class="ghost" id="stat-close" title="Tutup">${icon("x")}</button>
+      </div>
+    </div>
+    <div id="stat-body"></div>
+  </div>`;
+
+  $("#stat-close").onclick = onClose;
+  const body = $("#stat-body");
+  const draw = () => {
+    const q = ($("#stat-q")?.value || "").trim().toLowerCase();
+    const filtered = q ? rows.filter((r) => matchFn(r, q)) : rows;
+    $("#stat-count").textContent = filtered.length;
+    body.innerHTML = filtered.length ? renderFn(filtered) : `<div class="empty">Tidak ada data.</div>`;
+    bindCites(body);
+    if (key === "reviews") {
+      body.querySelectorAll("[data-d]").forEach((b) => {
+        b.onclick = async () => {
+          const item = b.closest("[data-rev]");
+          b.disabled = true;
+          try {
+            await api(`/api/reviews/${encodeURIComponent(b.dataset.id)}`, { method: "POST", json: { decision: b.dataset.d, note: item.querySelector("[data-note]").value || null } });
+            rows = rows.filter((x) => x.id !== b.dataset.id);
+            const statB = document.querySelector('[data-stat="reviews"] b');
+            if (statB) statB.textContent = rows.length;
+            toast("Tersimpan");
+            draw();
+          } catch (e) { toast(e.message); b.disabled = false; }
+        };
+      });
+    }
+  };
+  if ($("#stat-q")) $("#stat-q").oninput = draw;
+  draw();
 }
 
 async function viewTimeline(el) {

@@ -1,6 +1,7 @@
 //! Menerapkan keputusan review manusia. Semua keputusan reversibel di
 //! tingkat data: tidak ada record yang dihapus, hanya status yang berubah.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -9,7 +10,7 @@ use memory_core::model::*;
 
 use crate::{ExtractError, Pipeline, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     Approve,

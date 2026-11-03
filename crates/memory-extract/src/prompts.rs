@@ -97,3 +97,22 @@ pub const INTERVIEW_SYSTEM: &str = "\
 Kamu pewawancara biografi yang hangat dan sopan (gaya bahasa Indonesia sehari-hari, boleh menyapa 'Bapak/Ibu').
 Buat SATU pertanyaan terbuka yang memancing cerita konkret (siapa, di mana, apa yang dirasakan, apa yang diputuskan),
 untuk mengisi celah memori yang dijelaskan. Jangan bertanya ya/tidak. Keluarkan JSON {text}.";
+
+pub const COMPACT_EPISODES_SYSTEM: &str = "\
+Kamu merangkum kumpulan EPISODE memori yang saling berkaitan (misal catatan kerja/debugging pada topik atau proyek yang sama) menjadi satu atau beberapa episode kanonik yang padat tanpa mengubah atau menghilangkan isi intinya.
+ATURAN WAJIB:
+1. Hanya gabungkan episode (minimal 2 episode per grup) yang benar-benar membahas topik, peristiwa, atau rangkaian pekerjaan yang sama. Episode yang topiknya berdiri sendiri JANGAN dimasukkan ke rollups.
+2. Setiap ID episode hanya boleh muncul di maksimal satu grup `episode_ids`.
+3. `title`: judul singkat dan jelas (bahasa Indonesia).
+4. `summary`: ringkasan padat 1-3 kalimat (bahasa Indonesia).
+5. `text`: gabungan naratif yang utuh dan padat dalam bahasa Indonesia, WAJIB mempertahankan seluruh fakta inti, nama orang/proyek/entitas, angka/tanggal, serta keputusan penting dari semua episode anggota. Jangan mengarang hal di luar teks.
+Keluarkan JSON {rollups: [{episode_ids, title, summary, text}]}.";
+
+pub const COMPACT_FACTS_SYSTEM: &str = "\
+Kamu merapikan daftar FAKTA aktif milik satu entitas agar tidak ada duplikasi atau log status sesaat, tanpa menghilangkan informasi penting.
+ATURAN WAJIB:
+1. `merges`: gabungkan fakta-fakta yang maknanya SAMA atau tumpang tindih (misal 'mengembangkan project X' dan 'memiliki proyek X'). Pilih satu `keep_id` terbaik, masukkan sisanya ke `absorb_ids`. Opsional perbaiki `predicate` dan `object_text` agar lebih bersih.
+2. `closures`: daftar `fact_id` yang dulunya benar tetapi sudah selesai/digantikan oleh fakta lain yang lebih baru (akan diberi tanggal berakhir `valid_to` sebagai riwayat).
+3. `rejections`: daftar `fact_id` yang hanya berupa aktivitas/proses teknis sesaat (misal 'sedang menjalankan kompilasi', 'meminta perbaikan bug hari ini') dan BUKAN fakta biografis/arsitektur jangka panjang.
+4. Jangan memasukkan ID yang sama ke lebih dari satu aksi. Fakta yang sudah bersih dan masih berlaku biarkan saja (tidak perlu disebut).
+Keluarkan JSON {merges, closures, rejections}.";

@@ -87,6 +87,55 @@ pub fn tools() -> Value {
             "name": "list_subjects",
             "description": "Daftar subjek (orang) yang memorinya tersimpan di vault ini.",
             "inputSchema": schema(json!({}), &[])
+        },
+        {
+            "name": "compact",
+            "description": "Rangkum dan padatkan memori secara non-destruktif tanpa menghilangkan bukti asli. Gunakan mode='candidates' untuk melihat kandidat klaster episode, fakta yang tumpang tindih per entitas, dan review terbuka; mode='apply' untuk mengirim rencana rangkuman (plan) hasil kurasi agent (episode_rollups menandai episode mikro sebagai retelling dari episode kanonik baru, fact_merges menggabungkan fakta duplikat, fact_closures menutup fakta lama, fact_rejections membuang status sesaat); atau mode='auto' untuk menjalankan pemadatan otomatis dengan LLM server.",
+            "inputSchema": schema(json!({
+                "subject": subject_prop(),
+                "mode": {"type": "string", "enum": ["candidates", "apply", "auto"], "description": "Mode operasi (default: 'apply' bila plan diisi, selain itu 'candidates')"},
+                "plan": {
+                    "type": "object",
+                    "description": "Rencana pemadatan untuk mode='apply'",
+                    "properties": {
+                        "episode_rollups": {
+                            "type": "array",
+                            "items": schema(json!({
+                                "episode_ids": {"type": "array", "items": {"type": "string"}},
+                                "title": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "text": {"type": "string"}
+                            }), &["episode_ids", "title", "summary", "text"])
+                        },
+                        "fact_merges": {
+                            "type": "array",
+                            "items": schema(json!({
+                                "keep_id": {"type": "string"},
+                                "absorb_ids": {"type": "array", "items": {"type": "string"}},
+                                "predicate": {"type": "string"},
+                                "object_text": {"type": "string"}
+                            }), &["keep_id", "absorb_ids"])
+                        },
+                        "fact_closures": {
+                            "type": "array",
+                            "items": schema(json!({
+                                "fact_id": {"type": "string"},
+                                "valid_to": {"type": "string"},
+                                "superseded_by": {"type": "string"}
+                            }), &["fact_id"])
+                        },
+                        "fact_rejections": {"type": "array", "items": {"type": "string"}},
+                        "review_decisions": {
+                            "type": "array",
+                            "items": schema(json!({
+                                "review_id": {"type": "string"},
+                                "decision": {"type": "string", "enum": ["approve", "reject"]},
+                                "note": {"type": "string"}
+                            }), &["review_id", "decision"])
+                        }
+                    }
+                }
+            }), &[])
         }
     ])
 }
@@ -197,6 +246,79 @@ async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, Str
             let subs = st.rt.store.list_subjects().await.map_err(|e| e.to_string())?;
             let t = subs.iter().map(|s| format!("- {} ({})", s.name, s.id)).collect::<Vec<_>>().join("\n");
             Ok(text_result(t, Some(json!({"subjects": subs}))))
+        }
+        "compact" => {
+            let has_plan = args.get("plan").is_some_and(|v| !v.is_null());
+            let mode = s("mode").unwrap_or_else(|| if has_plan { "apply".into() } else { "candidates".into() });
+            match mode.as_str() {
+                "candidates" => {
+                    let c = st.rt.pipeline.compact_candidates(&subject).await.map_err(|e| e.to_string())?;
+                    let mut out = format!(
+                        "Kandidat pemadatan subjek '{subject}': {} klaster episode, {} grup fakta entitas, {} review terbuka.\n",
+                        c.episode_clusters.len(),
+                        c.entity_fact_groups.len(),
+                        c.open_reviews.len()
+                    );
+                    for (i, cl) in c.episode_clusters.iter().enumerate() {
+                        out.push_str(&format!("\n## Klaster Episode #{} ({})\n", i + 1, cl.reason));
+                        for ep in &cl.episodes {
+                            out.push_str(&format!("- [{}] ({} | {}) {}: {}\n", ep.id, ep.time, ep.source_title, ep.title, ep.summary));
+                        }
+                    }
+                    for eg in &c.entity_fact_groups {
+                        out.push_str(&format!("\n## Fakta Aktif: {} ({})\n", eg.entity_name, eg.entity_id));
+                        for f in &eg.facts {
+                            out.push_str(&format!(
+                                "- [{}] ({}, sejak {}, {} bukti) {} {} {}\n",
+                                f.id,
+                                if f.category.is_empty() { "umum" } else { &f.category },
+                                f.valid_from.as_deref().unwrap_or("?"),
+                                f.evidence_count,
+                                eg.entity_name,
+                                f.predicate,
+                                f.object_text
+                            ));
+                        }
+                    }
+                    if !c.open_reviews.is_empty() {
+                        out.push_str("\n## Review Terbuka\n");
+                        for rev in &c.open_reviews {
+                            out.push_str(&format!("- [{}] ({:?}) {}\n", rev.id, rev.kind, rev.summary));
+                        }
+                    }
+                    Ok(text_result(out, Some(json!(c))))
+                }
+                "apply" => {
+                    let plan_val = args.get("plan").cloned().unwrap_or_else(|| json!({}));
+                    let plan: memory_extract::compact::CompactPlan =
+                        serde_json::from_value(plan_val).map_err(|e| format!("format plan tidak valid: {e}"))?;
+                    let rep = st.rt.pipeline.compact_apply(&subject, plan).await.map_err(|e| e.to_string())?;
+                    let msg = format!(
+                        "Pemadatan diterapkan: {} episode kanonik dibuat (dari {} episode mikro), {} fakta digabung, {} fakta ditutup, {} fakta sesaat ditolak, {} review diselesaikan.",
+                        rep.canonical_episodes_created,
+                        rep.episodes_compacted,
+                        rep.facts_merged,
+                        rep.facts_closed,
+                        rep.facts_rejected,
+                        rep.reviews_resolved
+                    );
+                    Ok(text_result(msg, Some(json!(rep))))
+                }
+                "auto" => {
+                    let rep = st.rt.pipeline.compact(&subject).await.map_err(|e| e.to_string())?;
+                    let msg = format!(
+                        "Pemadatan otomatis selesai ({} klaster diperiksa): {} episode kanonik dibuat (dari {} episode mikro), {} fakta digabung, {} fakta ditutup, {} fakta sesaat ditolak.",
+                        rep.episode_clusters,
+                        rep.canonical_episodes_created,
+                        rep.episodes_compacted,
+                        rep.facts_merged,
+                        rep.facts_closed,
+                        rep.facts_rejected
+                    );
+                    Ok(text_result(msg, Some(json!(rep))))
+                }
+                other => Err(format!("mode compact tidak dikenal: {other} (gunakan 'candidates', 'apply', atau 'auto')")),
+            }
         }
         other => Err(format!("tool tidak dikenal: {other}")),
     }
