@@ -174,3 +174,38 @@ berarti salinan di Drive tidak bisa dibuka; data lokal tetap aman.
 - `engram restore backup.tar.gz.age --identity kunci.txt` memulihkan ke vault baru.
 - Ganti model embedding: ubah `[embedding]`, lalu `engram reembed`.
 - `engram bench --episodes 100000` mengukur kecepatan sebelum data membesar.
+
+## Mengukur kualitas penyaringan
+
+`engram bench eval` memeriksa apakah potongan chat yang penting benar-benar jadi
+episode dan basa-basi terbuang. Vault asli tidak disentuh (evaluasi memakai
+database sementara di memori).
+
+1. Buat folder kasus, mis. `eval/wa-keluarga/` (folder `/eval` sudah di-`.gitignore`
+   karena berisi chat asli), berisi `source.txt` (ekspor chat) dan `gold.toml`:
+
+   ```toml
+   kind = "chat"
+   subject_name = "Nama Subjek"
+
+   [[important]]          # harus jadi episode
+   quote = "akhirnya aku memutuskan pindah ke Jogja"
+   [[noise]]              # harus terbuang
+   quote = "oke siap otw"
+   ```
+
+   Atau buat langsung dari keputusan review yang sudah ada:
+   `engram bench export-gold --out eval/dari-review` (hentikan aplikasi desktop/`serve` dulu).
+
+2. `engram bench eval eval/` menampilkan recall (penting yang jadi episode),
+   +review (termasuk zona abu-abu), bocor (noise yang jadi episode), dan daftar
+   item yang salah jalur beserta skornya.
+3. `engram bench tune eval/` mencoba ratusan kombinasi ambang `[score]` tanpa
+   memanggil LLM lagi (hasil segmentasi di-cache di `<kasus>/.cache/`) dan
+   mengusulkan nilai untuk `memory.toml`. Atur dengan `--max-leak 0.1` dan
+   `--grid "promote=0.40..0.70:0.05,gray=0.30..0.55:0.05"`.
+
+Catatan: setiap segmen dinilai seolah vault kosong (tanpa bonus kebaruan atau
+sebutan orang yang sudah dikenal), jadi angkanya sedikit lebih ketat daripada
+saat import sungguhan. Pakai `--refresh` setelah mengganti model atau prompt
+segmentasi. Usulan tuning dari label yang sedikit (< 40) mudah overfit.

@@ -158,8 +158,11 @@ enum Cmd {
     Stats,
     /// Cek koneksi LLM & embedding.
     Smoke,
-    /// Benchmark penyimpanan & pencarian vektor.
+    /// Benchmark penyimpanan & pencarian vektor; `eval`/`tune`/`export-gold` untuk kualitas.
+    #[command(args_conflicts_with_subcommands = true)]
     Bench {
+        #[command(subcommand)]
+        cmd: Option<BenchCmd>,
         #[arg(long, default_value_t = 20_000)]
         episodes: usize,
         #[arg(long, default_value_t = 200)]
@@ -170,6 +173,41 @@ enum Cmd {
         /// Folder vault sementara (default: folder temp sistem).
         #[arg(long)]
         dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchCmd {
+    /// Lapis A: apakah potongan penting lolos & noise terbuang (gold set di folder kasus).
+    Eval {
+        /// Folder satu kasus (berisi gold.toml) atau folder berisi banyak kasus.
+        path: PathBuf,
+        /// Simpan laporan JSON ke berkas ini.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Abaikan cache segmentasi dan panggil LLM lagi.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Cari ambang skor terbaik secara offline dari cache segmentasi.
+    Tune {
+        path: PathBuf,
+        /// Mis. "promote=0.40..0.70:0.05,gray=0.30..0.55:0.05,noise=0.4|0.6,min_chars=40".
+        #[arg(long)]
+        grid: Option<String>,
+        /// Batas maksimum noise yang boleh lolos jadi episode (0..1).
+        #[arg(long, default_value_t = 0.10)]
+        max_leak: f32,
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
+    /// Ekspor keputusan review GrayZone menjadi gold set `[[segment]]`.
+    ExportGold {
+        /// Folder tujuan (dibuat bila belum ada); berisi teks chat asli.
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 1000)]
+        limit: usize,
     },
 }
 
@@ -350,9 +388,19 @@ async fn main() -> Result<()> {
             VaultCmd::Move { to } => move_vault(&cli.config, &cfg, to),
         };
     }
-    if let Cmd::Bench { episodes, queries, index, dir } = &cli.cmd {
+    if let Cmd::Bench { cmd, episodes, queries, index, dir } = &cli.cmd {
         let cfg = load_config(&cli.config)?;
-        return bench::run(&cfg, *episodes, *queries, index, dir.clone()).await;
+        return match cmd {
+            None => bench::speed::run(&cfg, *episodes, *queries, index, dir.clone()).await,
+            Some(BenchCmd::Eval { path, out, refresh }) => bench::eval::run(&cfg, &bench::gold::discover(path)?, *refresh, out.as_deref(), cli.json).await,
+            Some(BenchCmd::Tune { path, grid, max_leak, top }) => {
+                bench::tune::run(&cfg, &bench::gold::discover(path)?, grid.as_deref(), *max_leak, *top, cli.json).await
+            }
+            Some(BenchCmd::ExportGold { out, limit }) => {
+                let subject = cli.subject.clone().unwrap_or_else(|| cfg.vault.default_subject.clone());
+                bench::export::run(cfg, &subject, out, *limit).await
+            }
+        };
     }
 
     let cfg = load_config(&cli.config)?;

@@ -12,3 +12,6 @@
 .claude
 __pycache__/
 *.pyc
+
+# Gold set evaluasi (berisi chat asli)
+/eval

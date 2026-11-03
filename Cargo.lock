@@ -3800,8 +3800,10 @@ name = "memory-cli"
 version = "0.0.11"
 dependencies = [
  "anyhow",
+ "blake3",
  "chrono",
  "clap",
+ "futures",
  "memory-core",
  "memory-extract",
  "memory-import",
