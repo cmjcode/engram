@@ -76,12 +76,71 @@ const IGNORED_FILES: &[&str] = &[
 
 /// Ekstensi biner/media/database yang tidak dibaca sebagai teks konteks.
 const IGNORED_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "tiff", "mp3", "mp4", "wav", "ogg", "flac",
-    "m4a", "mov", "avi", "mkv", "webm", "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "age",
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "exe", "dll", "so", "dylib", "wasm",
-    "rlib", "rmeta", "o", "a", "obj", "class", "pyc", "pyo", "jar", "db", "sqlite", "sqlite3",
-    "sst", "ldb", "log", "woff", "woff2", "ttf", "otf", "eot", "part", "tmp", "bak", "swp",
-    "crdownload", "download",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+    "ico",
+    "bmp",
+    "tiff",
+    "mp3",
+    "mp4",
+    "wav",
+    "ogg",
+    "flac",
+    "m4a",
+    "mov",
+    "avi",
+    "mkv",
+    "webm",
+    "zip",
+    "tar",
+    "gz",
+    "tgz",
+    "bz2",
+    "xz",
+    "7z",
+    "rar",
+    "age",
+    "pdf",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "exe",
+    "dll",
+    "so",
+    "dylib",
+    "wasm",
+    "rlib",
+    "rmeta",
+    "o",
+    "a",
+    "obj",
+    "class",
+    "pyc",
+    "pyo",
+    "jar",
+    "db",
+    "sqlite",
+    "sqlite3",
+    "sst",
+    "ldb",
+    "log",
+    "woff",
+    "woff2",
+    "ttf",
+    "otf",
+    "eot",
+    "part",
+    "tmp",
+    "bak",
+    "swp",
+    "crdownload",
+    "download",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +219,10 @@ pub struct TreeDiff {
 
 impl TreeDiff {
     pub fn has_changes(&self) -> bool {
-        self.initial || !self.added.is_empty() || !self.modified.is_empty() || !self.removed.is_empty()
+        self.initial
+            || !self.added.is_empty()
+            || !self.modified.is_empty()
+            || !self.removed.is_empty()
     }
 }
 
@@ -237,9 +299,16 @@ pub fn status(rt: &Runtime, subject: Option<&str>) -> WatchStatus {
 
 /// Tambahkan folder penting baru untuk `subject`. Bila path yang sama sudah terdaftar
 /// untuk subjek tersebut, mengembalikan entri yang sudah ada (dan mengaktifkannya kembali).
-pub fn add_folder(vault: &Vault, subject: &str, path: &Path, label: Option<&str>) -> Result<WatchedFolder> {
+pub fn add_folder(
+    vault: &Vault,
+    subject: &str,
+    path: &Path,
+    label: Option<&str>,
+) -> Result<WatchedFolder> {
     if !is_valid_id(subject) {
-        return Err(JobError::Invalid(format!("id subjek tidak valid: {subject}")));
+        return Err(JobError::Invalid(format!(
+            "id subjek tidak valid: {subject}"
+        )));
     }
     let abs = if path.is_absolute() {
         path.to_path_buf()
@@ -247,15 +316,26 @@ pub fn add_folder(vault: &Vault, subject: &str, path: &Path, label: Option<&str>
         std::path::absolute(path)?
     };
     if !abs.exists() {
-        return Err(JobError::Invalid(format!("folder tidak ditemukan: {}", abs.display())));
+        return Err(JobError::Invalid(format!(
+            "folder tidak ditemukan: {}",
+            abs.display()
+        )));
     }
     if !abs.is_dir() {
-        return Err(JobError::Invalid(format!("bukan folder: {}", abs.display())));
+        return Err(JobError::Invalid(format!(
+            "bukan folder: {}",
+            abs.display()
+        )));
     }
     let canon = abs.canonicalize().unwrap_or(abs);
-    let vault_canon = vault.root().canonicalize().unwrap_or_else(|_| vault.root().to_path_buf());
+    let vault_canon = vault
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| vault.root().to_path_buf());
     if canon.starts_with(&vault_canon) || vault_canon.starts_with(&canon) {
-        return Err(JobError::Invalid("folder penting tidak boleh berada di dalam vault (atau sebaliknya)".into()));
+        return Err(JobError::Invalid(
+            "folder penting tidak boleh berada di dalam vault (atau sebaliknya)".into(),
+        ));
     }
 
     let id = det_id(&["watch", subject, &canon.to_string_lossy()]);
@@ -271,7 +351,11 @@ pub fn add_folder(vault: &Vault, subject: &str, path: &Path, label: Option<&str>
         .to_string();
 
     let mut st = load_store(vault);
-    if let Some(existing) = st.folders.iter_mut().find(|f| f.id == id || (f.subject == subject && f.path == canon)) {
+    if let Some(existing) = st
+        .folders
+        .iter_mut()
+        .find(|f| f.id == id || (f.subject == subject && f.path == canon))
+    {
         existing.enabled = true;
         if label.is_some_and(|l| !l.trim().is_empty()) {
             existing.label = chosen_label;
@@ -361,7 +445,10 @@ fn is_ignored_file(path: &Path, name: &str) -> bool {
 /// Pindai seluruh berkas teks/kode/dokumen yang relevan di bawah `root`.
 pub fn scan_folder_tree(root: &Path, min_age_secs: u64) -> Result<TreeSnapshot> {
     if !root.is_dir() {
-        return Err(JobError::Invalid(format!("folder tidak bisa diakses: {}", root.display())));
+        return Err(JobError::Invalid(format!(
+            "folder tidak bisa diakses: {}",
+            root.display()
+        )));
     }
     let mut snap = TreeSnapshot::default();
     let now = SystemTime::now();
@@ -394,7 +481,9 @@ fn walk_dir(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
         if meta.file_type().is_symlink() {
             continue;
         }
@@ -415,19 +504,29 @@ fn walk_dir(
             {
                 snap.settling = true;
             }
-            let Ok(bytes) = std::fs::read(&p) else { continue };
+            let Ok(bytes) = std::fs::read(&p) else {
+                continue;
+            };
             // Lewati berkas biner (mengandung byte NUL di 8 KB pertama).
             if bytes.iter().take(8192).any(|&b| b == 0) {
                 continue;
             }
-            let Ok(rel_path) = p.strip_prefix(root) else { continue };
+            let Ok(rel_path) = p.strip_prefix(root) else {
+                continue;
+            };
             let rel = rel_path
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
             let hash = blake3::hash(&bytes).to_hex().to_string();
-            snap.files.insert(rel, WatchedFile { hash, size: meta.len() });
+            snap.files.insert(
+                rel,
+                WatchedFile {
+                    hash,
+                    size: meta.len(),
+                },
+            );
         }
     }
     Ok(())
@@ -465,7 +564,12 @@ pub fn diff_trees(
             removed.push(k.clone());
         }
     }
-    TreeDiff { initial: false, added, modified, removed }
+    TreeDiff {
+        initial: false,
+        added,
+        modified,
+        removed,
+    }
 }
 
 // ---------------------------------------------------------------- agy CLI
@@ -487,7 +591,10 @@ fn search_paths() -> Vec<PathBuf> {
             home.join(".cargo/bin"),
         ]);
     }
-    v.extend([PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
+    v.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]);
     v
 }
 
@@ -500,7 +607,11 @@ pub fn find_agy_cli() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let names: &[&str] = if cfg!(windows) { &["agy.exe", "agy.cmd"] } else { &["agy"] };
+    let names: &[&str] = if cfg!(windows) {
+        &["agy.exe", "agy.cmd"]
+    } else {
+        &["agy"]
+    };
     search_paths()
         .into_iter()
         .flat_map(|d| names.iter().map(move |n| d.join(n)))
@@ -515,7 +626,11 @@ fn collect_file_excerpts(root: &Path, rel_paths: &[String], max_chars: usize) ->
         let low = p.to_lowercase();
         if low.starts_with("readme") || low.ends_with("/readme.md") {
             0
-        } else if low.ends_with(".md") || low.ends_with(".txt") || low.ends_with(".toml") || low.ends_with("package.json") {
+        } else if low.ends_with(".md")
+            || low.ends_with(".txt")
+            || low.ends_with(".toml")
+            || low.ends_with("package.json")
+        {
             1
         } else {
             2
@@ -528,7 +643,9 @@ fn collect_file_excerpts(root: &Path, rel_paths: &[String], max_chars: usize) ->
             break;
         }
         let full = root.join(rel);
-        let Ok(content) = std::fs::read_to_string(&full) else { continue };
+        let Ok(content) = std::fs::read_to_string(&full) else {
+            continue;
+        };
         let clean = content.trim();
         if clean.is_empty() {
             continue;
@@ -578,7 +695,8 @@ fn build_agy_prompt(
         if changed_files.is_empty() {
             changed_files.extend(snap.files.keys().take(20).cloned());
         }
-        let excerpts = collect_file_excerpts(&folder.path, &changed_files, MAX_PROMPT_EXCERPT_CHARS);
+        let excerpts =
+            collect_file_excerpts(&folder.path, &changed_files, MAX_PROMPT_EXCERPT_CHARS);
         let prev_summary = folder.last_summary.as_deref().unwrap_or("-");
         format!(
             "Kamu adalah agen pembaru konteks untuk sistem memori Engram.\n\
@@ -601,11 +719,23 @@ fn build_agy_prompt(
             label = folder.label,
             path = folder.path.display(),
             n_add = diff.added.len(),
-            added = if diff.added.is_empty() { "-".into() } else { diff.added.join(", ") },
+            added = if diff.added.is_empty() {
+                "-".into()
+            } else {
+                diff.added.join(", ")
+            },
             n_mod = diff.modified.len(),
-            modified = if diff.modified.is_empty() { "-".into() } else { diff.modified.join(", ") },
+            modified = if diff.modified.is_empty() {
+                "-".into()
+            } else {
+                diff.modified.join(", ")
+            },
             n_rem = diff.removed.len(),
-            removed = if diff.removed.is_empty() { "-".into() } else { diff.removed.join(", ") },
+            removed = if diff.removed.is_empty() {
+                "-".into()
+            } else {
+                diff.removed.join(", ")
+            },
             total = snap.files.len(),
         )
     }
@@ -624,19 +754,18 @@ pub async fn run_agy_context(
         )
     })?;
     let prompt = build_agy_prompt(subject_name, folder, snap, diff);
-    let path_env = std::env::join_paths(search_paths()).map_err(|e| JobError::Invalid(e.to_string()))?;
+    let print_arg = format!("--print={prompt}");
+    let path_env =
+        std::env::join_paths(search_paths()).map_err(|e| JobError::Invalid(e.to_string()))?;
 
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.current_dir(&folder.path)
         .args([
-            "--print",
             "--add-dir",
             &folder.path.to_string_lossy(),
             "--disable-slash-commands",
-            "--mode",
-            "auto",
             "--dangerously-skip-permissions",
-            &prompt,
+            &print_arg,
         ])
         .env("PATH", &path_env)
         .stdin(std::process::Stdio::null())
@@ -650,19 +779,29 @@ pub async fn run_agy_context(
 
     let out = tokio::time::timeout(Duration::from_secs(AGY_TIMEOUT_SECS), cmd.output())
         .await
-        .map_err(|_| JobError::Invalid(format!("agy CLI tidak selesai dalam {AGY_TIMEOUT_SECS} detik")))?
+        .map_err(|_| {
+            JobError::Invalid(format!(
+                "agy CLI tidak selesai dalam {AGY_TIMEOUT_SECS} detik"
+            ))
+        })?
         .map_err(JobError::Io)?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let detail = if !stderr.is_empty() { stderr } else { stdout };
-        return Err(JobError::Invalid(format!("agy CLI gagal ({}): {}", out.status, truncate_chars(&detail, 400))));
+        return Err(JobError::Invalid(format!(
+            "agy CLI gagal ({}): {}",
+            out.status,
+            truncate_chars(&detail, 400)
+        )));
     }
 
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if text.is_empty() {
-        return Err(JobError::Invalid("agy CLI mengembalikan keluaran kosong".into()));
+        return Err(JobError::Invalid(
+            "agy CLI mengembalikan keluaran kosong".into(),
+        ));
     }
     Ok(text)
 }
@@ -671,7 +810,12 @@ pub async fn run_agy_context(
 
 /// Periksa satu folder penting: bila ada perubahan (atau `force == true`), ambil konteksnya
 /// lewat `agy` CLI lalu ingest ke pipeline memori Engram.
-pub async fn scan_one(rt: &Runtime, id_or_path: &str, force: bool, min_age_secs: u64) -> Result<FolderScanOutcome> {
+pub async fn scan_one(
+    rt: &Runtime,
+    id_or_path: &str,
+    force: bool,
+    min_age_secs: u64,
+) -> Result<FolderScanOutcome> {
     let _guard = rt
         .watch_lock
         .try_lock()
@@ -685,8 +829,9 @@ async fn scan_one_locked(
     force: bool,
     min_age_secs: u64,
 ) -> Result<FolderScanOutcome> {
-    let mut folder = get_folder(&rt.vault, id_or_path)
-        .ok_or_else(|| JobError::Invalid(format!("folder penting tidak ditemukan: {id_or_path}")))?;
+    let mut folder = get_folder(&rt.vault, id_or_path).ok_or_else(|| {
+        JobError::Invalid(format!("folder penting tidak ditemukan: {id_or_path}"))
+    })?;
 
     let mut outcome = FolderScanOutcome {
         folder_id: folder.id.clone(),
@@ -831,11 +976,11 @@ pub async fn scan_all(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use memory_core::MemoryConfig;
     use memory_llm::HashEmbedder;
     use memory_llm::mock::ScriptedLlm;
     use memory_store::Store;
+    use std::sync::Arc;
 
     #[test]
     fn tree_scan_ignores_noise_and_detects_diffs() {
@@ -852,7 +997,11 @@ mod tests {
         std::fs::write(root.join("gambar.png"), [0x89u8, 0x50, 0x00]).unwrap();
 
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("README.md"), "# Proyek Penting\nCatatan arsitektur.").unwrap();
+        std::fs::write(
+            root.join("README.md"),
+            "# Proyek Penting\nCatatan arsitektur.",
+        )
+        .unwrap();
         std::fs::write(root.join("src/lib.rs"), "pub fn halo() {}").unwrap();
 
         let snap1 = scan_folder_tree(root, 0).unwrap();
@@ -869,7 +1018,11 @@ mod tests {
         assert!(!d_same.has_changes());
 
         // Ubah satu berkas, tambah satu berkas, hapus satu berkas.
-        std::fs::write(root.join("README.md"), "# Proyek Penting v2\nFitur baru ditambahkan.").unwrap();
+        std::fs::write(
+            root.join("README.md"),
+            "# Proyek Penting v2\nFitur baru ditambahkan.",
+        )
+        .unwrap();
         std::fs::write(root.join("catatan.txt"), "Keputusan penting hari ini.").unwrap();
         std::fs::remove_file(root.join("src/lib.rs")).unwrap();
 
@@ -901,6 +1054,12 @@ mod tests {
         std::fs::write(
             &fake_agy,
             "#!/bin/sh\n\
+             for arg in \"$@\"; do\n\
+               case \"$arg\" in\n\
+                 --print=*) has_print=1 ;;\n\
+               esac\n\
+             done\n\
+             if [ -z \"$has_print\" ]; then echo \"missing --print=<prompt>\" >&2; exit 2; fi\n\
              echo \"Budi mengelola folder penting proyek-penting untuk menyimpan rancangan arsitektur keluarga. Saat ini Budi menggunakan Rust dan SurrealDB sebagai fondasi penyimpanan.\"\n",
         )
         .unwrap();
@@ -957,4 +1116,3 @@ mod tests {
         assert!(list_folders(&rt.vault, Some("budi")).is_empty());
     }
 }
-
