@@ -28,7 +28,7 @@ impl From<&Episode> for EpisodeRef {
         Self {
             id: e.id.clone(),
             title: e.title.clone(),
-            time: e.time.label(),
+            time: e.time_label(),
             time_start: e.time_start.clone(),
             excerpt: if e.summary.is_empty() { e.text.chars().take(300).collect() } else { e.summary.clone() },
         }
@@ -295,7 +295,7 @@ impl Retriever {
                 label: if e.title.is_empty() { e.text.chars().take(80).collect() } else { e.title.clone() },
                 id: e.id.clone(),
                 life_phase: e.life_phase.clone(),
-                time: e.time.label(),
+                time: e.time_label(),
             });
         }
         if let Some(name) = entity

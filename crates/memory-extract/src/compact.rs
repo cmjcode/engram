@@ -23,7 +23,9 @@ use memory_llm::{ModelRole, complete_json};
 use memory_store::EpisodeFilter;
 
 use crate::distill::greedy_clusters;
-use crate::llm_types::{CompactEpisodesOut, CompactFactsOut, EpisodeRollupOut, FactClosureOut, FactMergeOut};
+use crate::llm_types::{
+    CompactEpisodesOut, CompactFactsOut, EpisodeRollupOut, FactClosureOut, FactMergeOut,
+};
 use crate::review::Decision as ReviewDecision;
 use crate::{Pipeline, Result, det_id, prompts, today_iso};
 
@@ -114,7 +116,14 @@ impl Pipeline {
     pub async fn compact_candidates(&self, subject: &str) -> Result<CompactCandidates> {
         let eps = self
             .store
-            .list_episodes(subject, &EpisodeFilter { status: Some(EpisodeStatus::Active), limit: 5000, ..Default::default() })
+            .list_episodes(
+                subject,
+                &EpisodeFilter {
+                    status: Some(EpisodeStatus::Active),
+                    limit: 5000,
+                    ..Default::default()
+                },
+            )
             .await?;
         let sources: HashMap<String, Source> = self
             .store
@@ -157,7 +166,10 @@ impl Pipeline {
                         c_eps.push(to_ep_candidate(e, &sources));
                     }
                     episode_clusters.push(EpisodeClusterCandidate {
-                        reason: format!("kemiripan semantik >= {:.2}", self.cfg.pipeline.compact_similarity),
+                        reason: format!(
+                            "kemiripan semantik >= {:.2}",
+                            self.cfg.pipeline.compact_similarity
+                        ),
                         episodes: c_eps,
                     });
                 }
@@ -171,10 +183,16 @@ impl Pipeline {
                 continue;
             }
             if let Some(src) = sources.get(&ep.source_id)
-                && matches!(src.kind, SourceKind::AgentConversation | SourceKind::Chat | SourceKind::Lifelog)
+                && matches!(
+                    src.kind,
+                    SourceKind::AgentConversation | SourceKind::Chat | SourceKind::Lifelog
+                )
                 && !src.title.trim().is_empty()
             {
-                by_source_title.entry(src.title.clone()).or_default().push(ep);
+                by_source_title
+                    .entry(src.title.clone())
+                    .or_default()
+                    .push(ep);
             }
         }
         for (title, group) in by_source_title {
@@ -194,7 +212,10 @@ impl Pipeline {
         }
 
         // 3. Kelompokkan fakta aktif yang masih berlaku (`is_current`) per entitas.
-        let active_facts = self.store.list_facts(subject, Some(FactStatus::Active), 5000).await?;
+        let active_facts = self
+            .store
+            .list_facts(subject, Some(FactStatus::Active), 5000)
+            .await?;
         let entities: HashMap<String, String> = self
             .store
             .list_entities(subject, None, 2000, 0)
@@ -204,15 +225,26 @@ impl Pipeline {
             .collect();
         let mut facts_by_entity: BTreeMap<String, Vec<Fact>> = BTreeMap::new();
         for f in active_facts.into_iter().filter(Fact::is_current) {
-            facts_by_entity.entry(f.entity_id.clone()).or_default().push(f);
+            facts_by_entity
+                .entry(f.entity_id.clone())
+                .or_default()
+                .push(f);
         }
         let mut entity_fact_groups = Vec::new();
         for (entity_id, mut list) in facts_by_entity {
             if list.len() < 2 {
                 continue;
             }
-            list.sort_by(|a, b| a.category.cmp(&b.category).then_with(|| a.predicate.cmp(&b.predicate)).then_with(|| a.created_at.cmp(&b.created_at)));
-            let entity_name = entities.get(&entity_id).cloned().unwrap_or_else(|| entity_id.clone());
+            list.sort_by(|a, b| {
+                a.category
+                    .cmp(&b.category)
+                    .then_with(|| a.predicate.cmp(&b.predicate))
+                    .then_with(|| a.created_at.cmp(&b.created_at))
+            });
+            let entity_name = entities
+                .get(&entity_id)
+                .cloned()
+                .unwrap_or_else(|| entity_id.clone());
             let facts = list
                 .into_iter()
                 .map(|f| FactCandidate {
@@ -227,11 +259,23 @@ impl Pipeline {
                     evidence_count: f.evidence.len(),
                 })
                 .collect();
-            entity_fact_groups.push(EntityFactCandidate { entity_id, entity_name, facts });
+            entity_fact_groups.push(EntityFactCandidate {
+                entity_id,
+                entity_name,
+                facts,
+            });
         }
 
-        let open_reviews = self.store.list_reviews(subject, ReviewStatus::Open, None, 200).await?;
-        Ok(CompactCandidates { subject: subject.to_string(), episode_clusters, entity_fact_groups, open_reviews })
+        let open_reviews = self
+            .store
+            .list_reviews(subject, ReviewStatus::Open, None, 200)
+            .await?;
+        Ok(CompactCandidates {
+            subject: subject.to_string(),
+            episode_clusters,
+            entity_fact_groups,
+            open_reviews,
+        })
     }
 
     /// Terapkan rencana pemadatan memori secara non-destruktif dan idempoten.
@@ -239,7 +283,15 @@ impl Pipeline {
         let mut report = CompactReport::default();
 
         for rollup in plan.episode_rollups {
-            let n = self.rollup_episodes(subject, &rollup.episode_ids, &rollup.title, &rollup.summary, &rollup.text).await?;
+            let n = self
+                .rollup_episodes(
+                    subject,
+                    &rollup.episode_ids,
+                    &rollup.title,
+                    &rollup.summary,
+                    &rollup.text,
+                )
+                .await?;
             if n > 0 {
                 report.canonical_episodes_created += 1;
                 report.episodes_compacted += n;
@@ -257,7 +309,9 @@ impl Pipeline {
                 if m.absorb_ids.is_empty() || touched_facts.contains(&m.keep_id) {
                     continue;
                 }
-                let Some(mut keep) = self.store.get_fact(&m.keep_id).await? else { continue };
+                let Some(mut keep) = self.store.get_fact(&m.keep_id).await? else {
+                    continue;
+                };
                 if keep.subject != subject || keep.status == FactStatus::Rejected {
                     continue;
                 }
@@ -266,12 +320,18 @@ impl Pipeline {
                     if aid == &m.keep_id || touched_facts.contains(aid) {
                         continue;
                     }
-                    let Some(mut abs) = self.store.get_fact(aid).await? else { continue };
+                    let Some(mut abs) = self.store.get_fact(aid).await? else {
+                        continue;
+                    };
                     if abs.subject != subject || abs.status == FactStatus::Rejected {
                         continue;
                     }
                     for ev in &abs.evidence {
-                        if !keep.evidence.iter().any(|x| x.episode_id == ev.episode_id && x.quote == ev.quote) {
+                        if !keep
+                            .evidence
+                            .iter()
+                            .any(|x| x.episode_id == ev.episode_id && x.quote == ev.quote)
+                        {
                             keep.evidence.push(ev.clone());
                         }
                     }
@@ -290,10 +350,20 @@ impl Pipeline {
                     absorbed_any = true;
                 }
                 if absorbed_any {
-                    if let Some(pred) = m.predicate.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    if let Some(pred) = m
+                        .predicate
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
                         keep.predicate = pred.to_string();
                     }
-                    if let Some(obj) = m.object_text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    if let Some(obj) = m
+                        .object_text
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
                         keep.object_text = obj.to_string();
                     }
                     self.store.put_fact(&keep).await?;
@@ -306,14 +376,19 @@ impl Pipeline {
                 if touched_facts.contains(&c.fact_id) {
                     continue;
                 }
-                let Some(mut f) = self.store.get_fact(&c.fact_id).await? else { continue };
+                let Some(mut f) = self.store.get_fact(&c.fact_id).await? else {
+                    continue;
+                };
                 if f.subject != subject || f.status != FactStatus::Active || f.valid_to.is_some() {
                     continue;
                 }
                 let end = c
                     .valid_to
                     .filter(|s| !s.trim().is_empty())
-                    .or_else(|| (!f.observed_at.is_empty()).then(|| f.observed_at.chars().take(10).collect()))
+                    .or_else(|| {
+                        (!f.observed_at.is_empty())
+                            .then(|| f.observed_at.chars().take(10).collect())
+                    })
                     .unwrap_or_else(today_iso);
                 f.valid_to = Some(end);
                 f.ongoing = false;
@@ -330,7 +405,9 @@ impl Pipeline {
                 if touched_facts.contains(&fid) {
                     continue;
                 }
-                let Some(mut f) = self.store.get_fact(&fid).await? else { continue };
+                let Some(mut f) = self.store.get_fact(&fid).await? else {
+                    continue;
+                };
                 if f.subject != subject || f.status == FactStatus::Rejected {
                     continue;
                 }
@@ -344,7 +421,11 @@ impl Pipeline {
 
         // 4. Selesaikan review item bila ada.
         for rev in plan.review_decisions {
-            if self.resolve_review(&rev.review_id, rev.decision, rev.note).await.is_ok() {
+            if self
+                .resolve_review(&rev.review_id, rev.decision, rev.note)
+                .await
+                .is_ok()
+            {
                 report.reviews_resolved += 1;
             }
         }
@@ -357,7 +438,14 @@ impl Pipeline {
 
     /// Gabungkan beberapa episode aktif menjadi 1 episode kanonik, dan tandai
     /// episode anggota sebagai `Retelling` dari episode kanonik tersebut.
-    pub async fn rollup_episodes(&self, subject: &str, episode_ids: &[String], title: &str, summary: &str, text: &str) -> Result<u32> {
+    pub async fn rollup_episodes(
+        &self,
+        subject: &str,
+        episode_ids: &[String],
+        title: &str,
+        summary: &str,
+        text: &str,
+    ) -> Result<u32> {
         if text.trim().is_empty() {
             return Ok(0);
         }
@@ -383,7 +471,16 @@ impl Pipeline {
         if members.len() < 2 {
             return Ok(0);
         }
-        members.sort_by(|a, b| a.time_start.cmp(&b.time_start).then_with(|| a.created_at.cmp(&b.created_at)).then_with(|| a.id.cmp(&b.id)));
+        members.sort_by(|a, b| {
+            match (&a.time_start, &b.time_start) {
+                (Some(ta), Some(tb)) => ta.cmp(tb),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| a.created_at.cmp(&b.created_at))
+            .then_with(|| a.id.cmp(&b.id))
+        });
 
         let mut sorted_ids: Vec<&str> = members.iter().map(|e| e.id.as_str()).collect();
         sorted_ids.sort();
@@ -393,18 +490,67 @@ impl Pipeline {
 
         let now = now_rfc3339();
         let first = &members[0];
-        let time_start = members.iter().filter_map(|e| e.time_start.clone()).min();
-        let time_end = members.iter().filter_map(|e| e.time_end.clone()).max().or_else(|| time_start.clone());
+        let parse_iso_date = |s: &str| -> Option<chrono::NaiveDate> {
+            chrono::NaiveDate::parse_from_str(s.get(..10)?, "%Y-%m-%d").ok()
+        };
+        let obs_dates: Vec<String> = members
+            .iter()
+            .filter_map(|e| {
+                parse_iso_date(&e.observed_at).map(|d| d.format("%Y-%m-%d").to_string())
+            })
+            .collect();
+        let time_start = members
+            .iter()
+            .filter_map(|e| e.time_start.clone())
+            .min()
+            .or_else(|| obs_dates.iter().min().cloned());
+        let time_end = members
+            .iter()
+            .filter_map(|e| e.time_end.clone())
+            .max()
+            .or_else(|| obs_dates.iter().max().cloned())
+            .or_else(|| time_start.clone());
         let time_ongoing = members.iter().any(|e| e.time_ongoing);
-        let time_confidence = members.iter().map(|e| e.time_confidence).fold(0.0_f32, f32::max);
-        let importance = (members.iter().map(|e| e.importance).fold(0.0_f32, f32::max) + 0.05).min(1.0);
-        let life_phase = members.iter().find_map(|e| e.life_phase.clone().filter(|p| !p.trim().is_empty()));
+        let time_confidence = members
+            .iter()
+            .map(|e| e.time_confidence)
+            .fold(0.0_f32, f32::max)
+            .max(if time_start.is_some() { 0.8 } else { 0.0 });
+        let canon_time = match members
+            .iter()
+            .find(|e| e.time != memory_core::TimeRef::Unknown)
+        {
+            Some(e) => e.time.clone(),
+            None => match (
+                time_start.as_deref().and_then(parse_iso_date),
+                time_end.as_deref().and_then(parse_iso_date),
+            ) {
+                (Some(s), Some(e)) if s == e && !time_ongoing => {
+                    memory_core::TimeRef::Exact { date: s }
+                }
+                (Some(s), e) => memory_core::TimeRef::Range {
+                    start: Some(s),
+                    end: e,
+                    ongoing: time_ongoing,
+                },
+                _ => first.time.clone(),
+            },
+        };
+        let importance =
+            (members.iter().map(|e| e.importance).fold(0.0_f32, f32::max) + 0.05).min(1.0);
+        let life_phase = members
+            .iter()
+            .find_map(|e| e.life_phase.clone().filter(|p| !p.trim().is_empty()));
         let observed_at = members
             .iter()
             .filter_map(|e| (!e.observed_at.is_empty()).then(|| e.observed_at.clone()))
             .max()
             .unwrap_or_else(today_iso);
-        let retell_count: u32 = members.iter().map(|e| e.retell_count + 1).sum::<u32>().saturating_sub(1);
+        let retell_count: u32 = members
+            .iter()
+            .map(|e| e.retell_count + 1)
+            .sum::<u32>()
+            .saturating_sub(1);
 
         let mut emotions: Vec<Emotion> = Vec::new();
         let mut languages: Vec<String> = Vec::new();
@@ -427,7 +573,10 @@ impl Pipeline {
                 }
             }
             for d in &m.decisions {
-                if !decisions.iter().any(|x| x.situation == d.situation && x.action == d.action) {
+                if !decisions
+                    .iter()
+                    .any(|x| x.situation == d.situation && x.action == d.action)
+                {
                     decisions.push(d.clone());
                 }
             }
@@ -437,7 +586,10 @@ impl Pipeline {
                 }
             }
             for ts in &m.trait_signals {
-                if !trait_signals.iter().any(|x| x.label == ts.label && x.polarity == ts.polarity) {
+                if !trait_signals
+                    .iter()
+                    .any(|x| x.label == ts.label && x.polarity == ts.polarity)
+                {
                     trait_signals.push(ts.clone());
                 }
             }
@@ -470,7 +622,7 @@ impl Pipeline {
             text: text.trim().to_string(),
             summary: clean_summary,
             title: clean_title,
-            time: first.time.clone(),
+            time: canon_time,
             time_start,
             time_end,
             time_ongoing,
@@ -492,7 +644,11 @@ impl Pipeline {
         };
 
         let emb = self.embedder.embed_one(&canonical.text).await.ok();
-        let member_ids: Vec<String> = members.iter().filter(|m| m.id != canon_id).map(|m| m.id.clone()).collect();
+        let member_ids: Vec<String> = members
+            .iter()
+            .filter(|m| m.id != canon_id)
+            .map(|m| m.id.clone())
+            .collect();
 
         let mut tx = self.store.tx();
         tx.upsert("episode", &canon_id, &canonical, emb.as_deref())?;
@@ -539,7 +695,11 @@ impl Pipeline {
                     )
                 })
                 .collect();
-            let user = format!("SUBJEK: {subject}\nALASAN KLASTER: {}\n\nEPISODE:\n{}", cluster.reason, listing.join("\n\n"));
+            let user = format!(
+                "SUBJEK: {subject}\nALASAN KLASTER: {}\n\nEPISODE:\n{}",
+                cluster.reason,
+                listing.join("\n\n")
+            );
             match complete_json::<CompactEpisodesOut>(
                 self.llm.as_ref(),
                 ModelRole::Extract,
@@ -578,7 +738,11 @@ impl Pipeline {
                     format!(
                         "- [{}] ({}, sejak {}, dicatat {}) {} {} {}",
                         f.id,
-                        if f.category.is_empty() { "umum" } else { &f.category },
+                        if f.category.is_empty() {
+                            "umum"
+                        } else {
+                            &f.category
+                        },
                         f.valid_from.as_deref().unwrap_or("?"),
                         f.observed_at,
                         eg.entity_name,
@@ -587,7 +751,11 @@ impl Pipeline {
                     )
                 })
                 .collect();
-            let user = format!("ENTITAS: {}\nFAKTA AKTIF:\n{}", eg.entity_name, lines.join("\n"));
+            let user = format!(
+                "ENTITAS: {}\nFAKTA AKTIF:\n{}",
+                eg.entity_name,
+                lines.join("\n")
+            );
             match complete_json::<CompactFactsOut>(
                 self.llm.as_ref(),
                 ModelRole::Extract,
@@ -601,7 +769,8 @@ impl Pipeline {
                 Ok(out) => {
                     for mut m in out.merges {
                         let keep = m.keep_id.trim().to_string();
-                        m.absorb_ids.retain(|id| allowed.contains(id.trim()) && id.trim() != keep);
+                        m.absorb_ids
+                            .retain(|id| allowed.contains(id.trim()) && id.trim() != keep);
                         if allowed.contains(keep.as_str()) && !m.absorb_ids.is_empty() {
                             m.keep_id = keep;
                             plan.fact_merges.push(m);
@@ -619,7 +788,9 @@ impl Pipeline {
                         }
                     }
                 }
-                Err(e) => tracing::warn!(entity = %eg.entity_name, error = %e, "pemadatan fakta entitas gagal; dilewati"),
+                Err(e) => {
+                    tracing::warn!(entity = %eg.entity_name, error = %e, "pemadatan fakta entitas gagal; dilewati")
+                }
             }
         }
 
@@ -646,4 +817,3 @@ fn to_ep_candidate(e: &Episode, sources: &HashMap<String, Source>) -> EpisodeCan
         importance: e.importance,
     }
 }
-

@@ -345,11 +345,20 @@ impl Pipeline {
         // Waktu episode.
         let mut time = ext.time.to_time_ref();
         let mut rt = time.resolve(anchors, observed_date);
-        if !rt.is_known() && !src.kind.is_biographic()
-            && let Some(d) = seg.date.as_deref().and_then(parse_date) {
+        if !rt.is_known() && time == TimeRef::Unknown {
+            let fallback_date = seg
+                .date
+                .as_deref()
+                .and_then(parse_date)
+                .or_else(|| src.occurred_from.as_deref().and_then(parse_date))
+                .or_else(|| src.kind.defaults_to_observed_date().then_some(observed_date));
+            if (!src.kind.is_biographic() || src.kind.defaults_to_observed_date() || src.occurred_from.is_some())
+                && let Some(d) = fallback_date
+            {
                 time = TimeRef::Exact { date: d };
                 rt = time.resolve(anchors, observed_date);
             }
+        }
         let life_phase = rt
             .start
             .and_then(|s| anchors.age_at(s))

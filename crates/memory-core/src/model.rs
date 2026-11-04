@@ -62,6 +62,19 @@ impl SourceKind {
         )
     }
 
+    /// Sumber yang isinya umumnya terjadi pada tanggal sumber direkam/diamati
+    /// bila teks tidak menyebut waktu masa lalu secara eksplisit.
+    pub fn defaults_to_observed_date(self) -> bool {
+        matches!(
+            self,
+            SourceKind::AgentConversation
+                | SourceKind::Document
+                | SourceKind::Chat
+                | SourceKind::Lifelog
+                | SourceKind::Email
+        )
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         serde_json::from_value(serde_json::Value::String(s.to_lowercase())).ok()
     }
@@ -274,6 +287,38 @@ pub struct Episode {
     pub observed_at: String,
     #[serde(default)]
     pub created_at: String,
+}
+
+impl Episode {
+    /// Label waktu manusiawi dengan fallback ke `time_start`, `observed_at`, atau `created_at`
+    /// bila `time` bernilai `TimeRef::Unknown`.
+    pub fn time_label(&self) -> String {
+        if self.time != TimeRef::Unknown {
+            return self.time.label();
+        }
+        let fmt_iso = |s: &str| -> Option<String> {
+            let d = chrono::NaiveDate::parse_from_str(s.get(..10)?, "%Y-%m-%d").ok()?;
+            Some(d.format("%d-%m-%Y").to_string())
+        };
+        if let Some(s) = self.time_start.as_deref() {
+            if let Some(e) = self.time_end.as_deref()
+                && e.get(..4) != s.get(..4)
+                && let (Some(sy), Some(ey)) = (s.get(..4), e.get(..4))
+            {
+                return format!("{sy}–{ey}");
+            }
+            if let Some(f) = fmt_iso(s) {
+                return f;
+            }
+        }
+        if let Some(f) = fmt_iso(&self.observed_at) {
+            return f;
+        }
+        if let Some(f) = fmt_iso(&self.created_at) {
+            return f;
+        }
+        self.time.label()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]

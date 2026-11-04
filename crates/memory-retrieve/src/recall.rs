@@ -244,7 +244,7 @@ impl Retriever {
                 title: e.title.clone(),
                 summary: e.summary.clone(),
                 excerpt: truncate_chars(&e.text, 600),
-                time: e.time.label(),
+                time: e.time_label(),
                 time_start: e.time_start.clone(),
                 life_phase: e.life_phase.clone(),
                 retell_count: e.retell_count,

@@ -228,6 +228,8 @@ async fn offline_llm_falls_back_and_commits_episode() {
     let eps = p.store.list_episodes("budi", &Default::default()).await.unwrap();
     assert_eq!(eps.len(), 1);
     assert!(eps[0].text.contains("RocksDB"));
+    assert!(eps[0].time_start.is_some(), "AgentConversation tanpa waktu di teks memakai tanggal pencatatan");
+    assert_ne!(eps[0].time_label(), "waktu tidak diketahui");
 }
 
 #[tokio::test]
@@ -275,6 +277,8 @@ async fn compact_rolls_up_episodes_and_compacts_facts_non_destructively() {
     assert_eq!(active_eps.len(), 1);
     let canon = &active_eps[0];
     assert_eq!(canon.title, "Rangkuman Kerja Proyek");
+    assert!(canon.time_start.is_some());
+    assert_ne!(canon.time_label(), "waktu tidak diketahui");
     assert_eq!(canon.decisions.len(), 1, "keputusan dari episode anggota ikut terwarisi ke episode kanonik");
     assert_eq!(canon.trait_signals.len(), 1, "sinyal sifat ikut terwarisi ke episode kanonik");
 

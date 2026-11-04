@@ -156,10 +156,16 @@ async function showEpisode(id) {
     ${r.source ? `<p class="small">Sumber: <a class="cite" data-source="${esc(r.source.id)}">${esc(r.source.title)}</a></p>` : ""}`);
 }
 
+function fmtIsoDate(iso) {
+  if (!iso || iso.length < 10) return "";
+  const [y, m, d] = iso.slice(0, 10).split("-");
+  return y && m && d ? `${d}-${m}-${y}` : iso.slice(0, 10);
+}
+
 function labelTime(e) {
   const t = e.time || {};
   switch (t.kind) {
-    case "exact": return t.date;
+    case "exact": return fmtIsoDate(t.date) || t.date;
     case "approx": return "sekitar " + (t.around || "").slice(0, 4);
     case "range": return `${yr(t.start)}–${t.ongoing ? "sekarang" : yr(t.end)}`;
     case "age": return t.to && t.to !== t.from ? `umur ${t.from}–${t.to}` : `umur ${t.from}`;
@@ -167,7 +173,16 @@ function labelTime(e) {
     case "life_phase": return "masa " + t.phase;
     case "current": return "sekarang";
     case "past": return "dulu";
-    default: return e.time_start ? e.time_start.slice(0, 4) : "waktu tidak diketahui";
+    default: {
+      if (e.time_start) {
+        return e.time_end && e.time_end.slice(0, 4) !== e.time_start.slice(0, 4)
+          ? `${e.time_start.slice(0, 4)}–${e.time_end.slice(0, 4)}`
+          : fmtIsoDate(e.time_start);
+      }
+      if (e.observed_at) return fmtIsoDate(e.observed_at);
+      if (e.created_at) return fmtIsoDate(e.created_at);
+      return "waktu tidak diketahui";
+    }
   }
 }
 
@@ -460,17 +475,19 @@ async function viewTimeline(el) {
       ${phaseSummary.get(phase) ? `<p class="muted">${esc(phaseSummary.get(phase))}</p>` : ""}
       ${items.map((it) => `<div class="tl-item" ${it.kind === "episode" ? `data-ep="${esc(it.id)}"` : ""}><span class="tl-time ${fuzzy(it.time) ? "fuzzy" : ""}">${esc(it.time)}<br><span class="small">${esc(it.date || "")}</span></span><span>${esc(it.label)}</span></div>`).join("")}
     </section>`).join("") || '<div class="empty">Belum ada cerita bertanggal.</div>'}
-    ${t.undated.length ? `<h2>Waktu belum diketahui (${t.undated.length})</h2>${t.undated.map((e) => `<div class="tl-item" data-ep="${esc(e.id)}"><span class="tl-time">?</span><span>${esc(e.title || e.excerpt)}</span></div>`).join("")}` : ""}`;
+    ${ t.undated.length ? `<h2>Waktu belum diketahui (${t.undated.length})</h2>${t.undated.map((e) => `<div class="tl-item" data-ep="${esc(e.id)}"><span class="tl-time">${esc(e.time && e.time !== "waktu tidak diketahui" ? e.time : "?")}</span><span>${esc(e.title || e.excerpt)}</span></div>`).join("")}` : "" } `;
   bindCites(el);
 }
 
 async function viewPeople(el) {
-  const [tree, ents] = await Promise.all([api(`/api/subjects/${S()}/family`), api(`/api/subjects/${S()}/entities?limit=500`)]);
+  const [tree, ents] = await Promise.all([api(`/ api / subjects / ${ S() } /family`), api(`/api / subjects / ${ S() }/entities?limit=500`)]);
   const self = tree.nodes.find((n) => n.is_self);
   const rel = new Map();
   if (self) for (const e of tree.edges) if (e.to === self.id && !rel.has(e.from)) rel.set(e.from, e);
-  const gen = { 2: ["buyut"], 1: ["kakek", "nenek", "kakek/nenek"], 0.5: ["ayah", "ibu", "orang tua", "pakde", "bude", "paman", "bibi", "paman/bibi", "mertua", "orang tua angkat"],
-    0: ["suami", "istri", "pasangan", "kakak", "adik", "kakak laki-laki", "kakak perempuan", "saudara kandung", "sepupu", "ipar", "besan"], "-1": ["anak", "menantu", "keponakan", "anak angkat"], "-2": ["cucu", "cicit"] };
+  const gen = {
+    2: ["buyut"], 1: ["kakek", "nenek", "kakek/nenek"], 0.5: ["ayah", "ibu", "orang tua", "pakde", "bude", "paman", "bibi", "paman/bibi", "mertua", "orang tua angkat"],
+    0: ["suami", "istri", "pasangan", "kakak", "adik", "kakak laki-laki", "kakak perempuan", "saudara kandung", "sepupu", "ipar", "besan"], "-1": ["anak", "menantu", "keponakan", "anak angkat"], "-2": ["cucu", "cicit"]
+  };
   const level = (label) => Number(Object.keys(gen).find((k) => gen[k].includes(label)) ?? 0);
   const rows = {};
   for (const n of tree.nodes) {
@@ -518,11 +535,11 @@ async function viewThinking(el) {
       ${p.evidence.map((e) => `<div class="tl-item" data-ep="${esc(e.id)}"><span class="tl-time">${esc(e.time)}</span><span>${esc(e.title || e.excerpt)}</span></div>`).join("")}</div>`).join("") || '<p class="muted">Belum ada prinsip yang cukup bukti (minimal beberapa cerita dari periode berbeda).</p>'}
     <h2>Sifat & nilai dari waktu ke waktu</h2>
     ${ds.map((d) => {
-      const a = d.valid_from ? pos(+d.valid_from.slice(0, 4)) : 0, b = d.valid_to ? pos(+d.valid_to.slice(0, 4)) : 100;
-      return `<div class="card"><b>${esc(d.label)}</b> <span class="badge">${d.kind === "value" ? "nilai" : "sifat"}</span>${d.status === "pending_review" ? '<span class="badge warn">menunggu konfirmasi</span>' : ""}
+    const a = d.valid_from ? pos(+d.valid_from.slice(0, 4)) : 0, b = d.valid_to ? pos(+d.valid_to.slice(0, 4)) : 100;
+    return `<div class="card"><b>${esc(d.label)}</b> <span class="badge">${d.kind === "value" ? "nilai" : "sifat"}</span>${d.status === "pending_review" ? '<span class="badge warn">menunggu konfirmasi</span>' : ""}
         <div class="bar" title="${esc(d.valid_from || "?")} – ${esc(d.valid_to || "sekarang")}"><span style="left:${a}%;width:${Math.max(2, b - a)}%"></span></div>
         <div class="small muted">${esc(yr(d.valid_from))} – ${d.valid_to ? esc(yr(d.valid_to)) : "sekarang"} · ${d.evidence.length} bukti</div><p>${esc(d.description)}</p></div>`;
-    }).join("") || '<p class="muted">Belum ada.</p>'}
+  }).join("") || '<p class="muted">Belum ada.</p>'}
     <h2>Gaya bertutur</h2>
     ${voice ? `<div class="card"><p>${esc(voice.style || "Belum dideskripsikan.")}</p>
       <p>${(voice.idioms || []).map(([k, n]) => `<span class="badge">${esc(k)} (${n}x)</span>`).join(" ")}</p>
@@ -585,8 +602,10 @@ async function viewInterview(el) {
 async function viewReview(el) {
   const items = await api(`/api/subjects/${S()}/reviews`);
   const kinds = { gray_zone: "Layak jadi cerita?", conflict: "Fakta bertentangan", entity_merge: "Orang yang sama?", quarantine: "Fakta meragukan", reflective: "Konfirmasi prinsip/sifat" };
-  const help = { gray_zone: "Setuju = angkat jadi cerita. Tolak = biarkan meluruh.", conflict: "Setuju = fakta baru menggantikan yang lama. Tolak = fakta baru dibuang.",
-    entity_merge: "Setuju = gabungkan. Tolak = orang berbeda.", quarantine: "Setuju = fakta dipakai. Tolak = dibuang.", reflective: "Setuju = aktif. Tolak = dibuang." };
+  const help = {
+    gray_zone: "Setuju = angkat jadi cerita. Tolak = biarkan meluruh.", conflict: "Setuju = fakta baru menggantikan yang lama. Tolak = fakta baru dibuang.",
+    entity_merge: "Setuju = gabungkan. Tolak = orang berbeda.", quarantine: "Setuju = fakta dipakai. Tolak = dibuang.", reflective: "Setuju = aktif. Tolak = dibuang."
+  };
   el.innerHTML = `<h1>Review (${items.length})</h1><p class="muted">Keputusan Anda juga menjadi contoh bagi sistem untuk menilai data berikutnya.</p>
     ${items.map((r) => `<div class="card" id="r-${esc(r.id)}"><span class="badge">${esc(kinds[r.kind] || r.kind)}</span><p>${esc(r.summary)}</p>
       ${r.payload?.text ? `<pre class="src">${esc(r.payload.text)}</pre>` : ""}<p class="small muted">${esc(help[r.kind] || "")}</p>
@@ -843,9 +862,9 @@ async function connectAgents() {
     <p class="muted small">Daftarkan memori ini sebagai server MCP <b>${esc(r.name)}</b> agar agent AI bisa mengingat dan mencari cerita.
       Alamat: <code>${esc(r.url)}</code></p>
     ${r.clients.map((c) => {
-      const [cls, label] = MCP_STATE[c.state] || ["", c.state];
-      const has = c.state === "installed" || c.state === "outdated";
-      return `<div class="card" data-client="${esc(c.id)}">
+    const [cls, label] = MCP_STATE[c.state] || ["", c.state];
+    const has = c.state === "installed" || c.state === "outdated";
+    return `<div class="card" data-client="${esc(c.id)}">
         <div class="row" style="justify-content:space-between">
           <div><b>${esc(c.label)}</b> <span class="badge ${cls}">${esc(label)}</span>${c.detected ? "" : ' <span class="small muted">(tidak terdeteksi)</span>'}</div>
           <div class="row">
@@ -856,7 +875,7 @@ async function connectAgents() {
         <div class="small muted">${esc(c.config_path)}</div>
         <div class="small msg"></div>
       </div>`;
-    }).join("")}
+  }).join("")}
     <p class="small muted">Token akses ikut ditulis ke config tersebut. Cadangan berkas lama disimpan sebagai <code>.bak</code>.</p>`;
   $("#st-body").querySelectorAll("[data-act]").forEach((b) => {
     b.onclick = async () => {
@@ -937,7 +956,7 @@ async function showDataSync() {
       ${sync.last_warnings.map((w) => `<div class="small" style="color:var(--warn)">${icon("alert")} ${esc(w)}</div>`).join("")}
       ${sync.devices.length ? `<table><tr><th>Komputer</th><th>Record</th><th>Diperbarui</th></tr>
         ${sync.devices.map((d) => `<tr><td>${esc(d.name)}${d.this_device ? ' <span class="badge now">ini</span>' : ""}${d.encrypted ? "" : ' <span class="badge warn">tanpa enkripsi</span>'}</td><td>${d.rows}</td><td class="small">${esc(fmtTime(d.updated_at))}</td></tr>`).join("")}</table>`
-      : `<p class="small muted">Belum ada data di folder sync. Klik Sync sekarang.</p>`}
+        : `<p class="small muted">Belum ada data di folder sync. Klik Sync sekarang.</p>`}
     </div>` : ""}`;
 
   const msg = (sel, html) => { $(sel).innerHTML = html; };
@@ -1010,7 +1029,7 @@ async function showDataSync() {
 // disimpan ke memory.toml dan berlaku setelah aplikasi dibuka ulang.
 // Tab Layanan hanya di aplikasi desktop (svc.list kosong di `engram serve`).
 const settingsTabs = () => [["umum", "Umum"], ["model", "Model AI"], ["proses", "Pemrosesan"], ["data", "Data & Sync"], ["agent", "Agent AI"],
-  ...(svc.list.length ? [["layanan", svc.list.some((x) => !x.running) ? "Layanan (berhenti)" : "Layanan"]] : []), ["tentang", "Tentang & update"]];
+...(svc.list.length ? [["layanan", svc.list.some((x) => !x.running) ? "Layanan (berhenti)" : "Layanan"]] : []), ["tentang", "Tentang & update"]];
 const settings = { tab: "umum", about: null, data: null, update: null, models: [] };
 
 // [bagian, kunci, label, jenis, petunjuk, pilihan]
@@ -1059,7 +1078,7 @@ const F_PROC = [
 
 function getTheme() { try { return localStorage.getItem("theme") || "system"; } catch (e) { return "system"; } }
 function setTheme(t) {
-  try { if (t === "system") localStorage.removeItem("theme"); else localStorage.setItem("theme", t); } catch (e) {}
+  try { if (t === "system") localStorage.removeItem("theme"); else localStorage.setItem("theme", t); } catch (e) { }
   if (t === "system") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
 }
 

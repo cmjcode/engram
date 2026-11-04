@@ -24,23 +24,36 @@ pub struct ConsolidateReport {
 
 impl Pipeline {
     pub async fn consolidate(&self, subject: &str) -> Result<ConsolidateReport> {
-        let mut report = ConsolidateReport { expired: self.store.delete_expired_stream(&now_rfc3339()).await?, ..Default::default() };
+        let mut report = ConsolidateReport {
+            expired: self.store.delete_expired_stream(&now_rfc3339()).await?,
+            ..Default::default()
+        };
         let items = self.store.stream_items(subject, true, 5000).await?;
         let keys = self.known_alias_keys(subject).await?;
         let now = chrono::Utc::now();
         for item in items {
             let padded = format!(" {} ", normalize(&item.text));
-            let refs = keys.iter().filter(|k| padded.contains(&format!(" {k} "))).count() as u32;
+            let refs = keys
+                .iter()
+                .filter(|k| padded.contains(&format!(" {k} ")))
+                .count() as u32;
             let new_refs = refs.saturating_sub(item.back_refs);
             let age_days = chrono::DateTime::parse_from_rfc3339(&item.created_at)
                 .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() as f64 / 24.0)
                 .unwrap_or(0.0);
-            let imp = decayed_importance(item.importance, age_days, self.cfg.score.half_life_days, new_refs);
+            let imp = decayed_importance(
+                item.importance,
+                age_days,
+                self.cfg.score.half_life_days,
+                new_refs,
+            );
             if new_refs > 0 && imp >= self.cfg.score.promote_threshold {
                 match self.promote_stream_item(&item.id).await {
                     Ok(Some(_)) => report.promoted += 1,
                     Ok(None) => {}
-                    Err(e) => tracing::warn!(item = %item.id, error = %e, "promosi stream item gagal"),
+                    Err(e) => {
+                        tracing::warn!(item = %item.id, error = %e, "promosi stream item gagal")
+                    }
                 }
             }
         }
@@ -52,7 +65,14 @@ impl Pipeline {
     pub async fn update_life_phases(&self, subject: &str) -> Result<u32> {
         let eps = self
             .store
-            .list_episodes(subject, &EpisodeFilter { status: Some(EpisodeStatus::Active), limit: 20_000, ..Default::default() })
+            .list_episodes(
+                subject,
+                &EpisodeFilter {
+                    status: Some(EpisodeStatus::Active),
+                    limit: 20_000,
+                    ..Default::default()
+                },
+            )
             .await?;
         let mut groups: BTreeMap<String, Vec<Episode>> = BTreeMap::new();
         for e in eps {
@@ -80,14 +100,42 @@ impl Pipeline {
             ranked.sort_by(|a, b| a.time_start.cmp(&b.time_start));
             let lines: Vec<String> = ranked
                 .iter()
-                .map(|e| format!("- [{}] {}: {}", e.time.label(), e.title, truncate_chars(if e.summary.is_empty() { &e.text } else { &e.summary }, 300)))
+                .map(|e| {
+                    format!(
+                        "- [{}] {}: {}",
+                        e.time_label(),
+                        e.title,
+                        truncate_chars(
+                            if e.summary.is_empty() {
+                                &e.text
+                            } else {
+                                &e.summary
+                            },
+                            300
+                        )
+                    )
+                })
                 .collect();
             let user = format!("Fase hidup: {name}\nEpisode:\n{}", lines.join("\n"));
-            let summary = match complete_json::<TextOut>(self.llm.as_ref(), ModelRole::Extract, "life_phase", prompts::LIFE_PHASE_SYSTEM, &user, 1).await {
+            let summary = match complete_json::<TextOut>(
+                self.llm.as_ref(),
+                ModelRole::Extract,
+                "life_phase",
+                prompts::LIFE_PHASE_SYSTEM,
+                &user,
+                1,
+            )
+            .await
+            {
                 Ok(t) => t.text,
                 Err(e) => {
                     tracing::warn!(error = %e, phase = %name, "ringkasan fase gagal; memakai daftar judul");
-                    ranked.iter().map(|e| e.title.clone()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("; ")
+                    ranked
+                        .iter()
+                        .map(|e| e.title.clone())
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 }
             };
             let phase = LifePhase {
