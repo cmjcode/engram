@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use memory_core::kin::normalize_kin_term;
 use memory_core::model::*;
-use memory_core::text::normalize;
+use memory_core::text::{are_distinct_technical_names, normalize};
 use memory_core::{ids::now_rfc3339, new_id};
 use memory_llm::{ModelRole, complete_json};
 use memory_store::VectorIndex;
@@ -30,6 +30,13 @@ pub fn entity_embed_text(e: &Entity) -> String {
         s.push_str(&format!(" — {}", e.description));
     }
     s
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Adjudication {
+    Same,
+    Different,
+    Uncertain,
 }
 
 /// Entitas yang disentuh dalam satu episode.
@@ -220,27 +227,65 @@ impl<'a> Resolver<'a> {
             if !candidates.is_empty() && !candidates.iter().any(|c| c.id == cand.id) {
                 continue;
             }
-            let auto = hit.similarity >= pc.entity_auto_merge && cand.status == EntityStatus::Confirmed;
-            let same = if auto { true } else { self.adjudicate(&probe, &cand).await };
-            if same {
-                let mut e = cand;
-                let changed = Self::add_aliases(&mut e, &names);
-                return Ok(self.touch(e, false, changed));
+            // Guardrail teknis: jangan pernah menggabungkan atau meminta review untuk dua
+            // microservice/repo/file/komponen yang secara struktural berbeda.
+            if are_distinct_technical_names(&probe.name, &cand.name) {
+                continue;
             }
-            // Ragu: buat entitas baru, minta manusia memutuskan.
-            self.reviews.push(ReviewItem {
-                id: crate::det_id(&["merge", &probe.name, &cand.id, episode_id]),
-                subject: self.subject.id.clone(),
-                kind: ReviewKind::EntityMerge,
-                summary: format!("Apakah \"{}\" sama dengan \"{}\"? (kemiripan {:.2})", probe.name, cand.name, hit.similarity),
-                targets: vec![probe.id.clone(), cand.id.clone()],
-                payload: json!({"new": probe.id, "existing": cand.id, "similarity": hit.similarity}),
-                status: ReviewStatus::Open,
-                note: None,
-                created_at: now_rfc3339(),
-                resolved_at: None,
-            });
-            break;
+            let auto = hit.similarity >= pc.entity_auto_merge
+                && cand.status == EntityStatus::Confirmed
+                && !kind.is_technical();
+            let verdict = if auto {
+                Adjudication::Same
+            } else {
+                self.adjudicate(&probe, &cand).await
+            };
+            match verdict {
+                Adjudication::Same => {
+                    let mut e = cand;
+                    let changed = Self::add_aliases(&mut e, &names);
+                    return Ok(self.touch(e, false, changed));
+                }
+                Adjudication::Different => {
+                    // LLM yakin keduanya berbeda -> jangan kotori antrean review manusia.
+                    continue;
+                }
+                Adjudication::Uncertain => {
+                    // Ragu: buat entitas baru, minta manusia memutuskan.
+                    let summary = if kind == EntityKind::Person {
+                        format!(
+                            "Apakah \"{}\" sama dengan \"{}\"? (kemiripan {:.2})",
+                            probe.name, cand.name, hit.similarity
+                        )
+                    } else {
+                        format!(
+                            "Apakah {} \"{}\" sama dengan \"{}\"? (kemiripan {:.2})",
+                            kind.merge_prompt_noun(),
+                            probe.name,
+                            cand.name,
+                            hit.similarity
+                        )
+                    };
+                    self.reviews.push(ReviewItem {
+                        id: crate::det_id(&["merge", &probe.name, &cand.id, episode_id]),
+                        subject: self.subject.id.clone(),
+                        kind: ReviewKind::EntityMerge,
+                        summary,
+                        targets: vec![probe.id.clone(), cand.id.clone()],
+                        payload: json!({
+                            "new": probe.id,
+                            "existing": cand.id,
+                            "similarity": hit.similarity,
+                            "entity_kind": kind,
+                        }),
+                        status: ReviewStatus::Open,
+                        note: None,
+                        created_at: now_rfc3339(),
+                        resolved_at: None,
+                    });
+                    break;
+                }
+            }
         }
         // Bila ada >1 kandidat alias tapi tidak ada yang cocok embedding, ambil
         // yang paling sering disebut (alias persis tetap sinyal kuat).
@@ -250,18 +295,29 @@ impl<'a> Resolver<'a> {
         Ok(self.touch(probe, true, true))
     }
 
-    async fn adjudicate(&self, a: &Entity, b: &Entity) -> bool {
+    async fn adjudicate(&self, a: &Entity, b: &Entity) -> Adjudication {
         let user = format!(
             "Subjek: {}\nSebutan A: {}\nSebutan B: {}",
             self.subject.name,
             entity_embed_text(a),
             entity_embed_text(b)
         );
-        match complete_json::<SameEntityVerdict>(self.p.llm.as_ref(), ModelRole::Light, "same_entity", prompts::SAME_ENTITY_SYSTEM, &user, 1).await {
-            Ok(v) => v.same && v.confidence >= 0.8,
+        match complete_json::<SameEntityVerdict>(
+            self.p.llm.as_ref(),
+            ModelRole::Light,
+            "same_entity",
+            prompts::SAME_ENTITY_SYSTEM,
+            &user,
+            1,
+        )
+        .await
+        {
+            Ok(v) if v.same && v.confidence >= 0.8 => Adjudication::Same,
+            Ok(v) if !v.same && v.confidence >= 0.75 => Adjudication::Different,
+            Ok(_) => Adjudication::Uncertain,
             Err(e) => {
-                tracing::warn!(error = %e, "adjudikasi entitas gagal; dianggap berbeda");
-                false
+                tracing::warn!(error = %e, "adjudikasi entitas gagal; masuk antrean review");
+                Adjudication::Uncertain
             }
         }
     }

@@ -50,6 +50,17 @@ pub fn newer(latest: &str, current: &str) -> bool {
 pub async fn check_github() -> Result<UpdateInfo, String> {
     let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).user_agent(concat!("engram/", env!("CARGO_PKG_VERSION"))).build().map_err(|e| e.to_string())?;
     let resp = http.get(LATEST_JSON).send().await.map_err(|e| format!("tidak bisa menghubungi GitHub: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(UpdateInfo {
+            current: VERSION.into(),
+            latest: Some(VERSION.into()),
+            available: false,
+            notes: None,
+            date: None,
+            can_install: false,
+            url: format!("{REPO_URL}/releases/latest"),
+        });
+    }
     if !resp.status().is_success() {
         return Err(format!("GitHub menjawab {}", resp.status()));
     }

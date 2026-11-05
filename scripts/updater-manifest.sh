@@ -15,7 +15,22 @@ VERSION="${TAG#v}"
 
 command -v jq >/dev/null || { echo "jq belum terpasang" >&2; exit 1; }
 
-RELEASE="$(gh release view "$TAG" -R "$REPO" --json assets,body)"
+# Retry perintah gh (mengatasi HTTP 502/503 sementara dari GitHub API, terutama
+# saat --clobber menghapus latest.json lama sebelum mengunggah yang baru).
+retry() {
+  local n=1 max=5 delay=3
+  until "$@"; do
+    if (( n >= max )); then
+      return 1
+    fi
+    echo "gagal (percobaan $n/$max), coba lagi dalam ${delay}d..." >&2
+    sleep "$delay"
+    (( n++ ))
+    (( delay *= 2 ))
+  done
+}
+
+RELEASE="$(retry gh release view "$TAG" -R "$REPO" --json assets,body)"
 NOTES="$(jq -r '.body // ""' <<<"$RELEASE")"
 
 # nama paket -> kunci platform (dipisah spasi). Plugin mencari
@@ -46,7 +61,7 @@ while IFS= read -r sig_name; do
     echo "lewati $sig_name (paket $pkg tidak ada di release)" >&2
     continue
   fi
-  signature="$(gh release download "$TAG" -R "$REPO" -p "$sig_name" -O -)"
+  signature="$(retry gh release download "$TAG" -R "$REPO" -p "$sig_name" -O -)"
   for key in $keys; do
     PLATFORMS="$(jq --arg k "$key" --arg u "$url" --arg s "$signature" \
       '. + {($k): {url: $u, signature: $s}}' <<<"$PLATFORMS")"
@@ -62,5 +77,5 @@ fi
 OUT="$(mktemp -d)/latest.json"
 jq -n --arg v "$VERSION" --arg n "$NOTES" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson p "$PLATFORMS" '{version: $v, notes: $n, pub_date: $d, platforms: $p}' >"$OUT"
-gh release upload "$TAG" "$OUT" -R "$REPO" --clobber
+retry gh release upload "$TAG" "$OUT" -R "$REPO" --clobber
 echo "latest.json diunggah ke $TAG ($(jq -r '.platforms | keys | join(", ")' "$OUT"))" >&2

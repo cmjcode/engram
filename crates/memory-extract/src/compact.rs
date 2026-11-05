@@ -114,6 +114,7 @@ impl Pipeline {
     /// Kumpulkan kandidat episode yang mirip/serumpun, fakta aktif yang berpotensi
     /// redundan per entitas, serta antrean review terbuka.
     pub async fn compact_candidates(&self, subject: &str) -> Result<CompactCandidates> {
+        let _ = self.sanitize_technical_entities(subject).await;
         let eps = self
             .store
             .list_episodes(
@@ -541,6 +542,9 @@ impl Pipeline {
         let life_phase = members
             .iter()
             .find_map(|e| e.life_phase.clone().filter(|p| !p.trim().is_empty()));
+        let project = members
+            .iter()
+            .find_map(|e| e.project.clone().filter(|p| !p.trim().is_empty()));
         let observed_at = members
             .iter()
             .filter_map(|e| (!e.observed_at.is_empty()).then(|| e.observed_at.clone()))
@@ -631,6 +635,7 @@ impl Pipeline {
             emotions,
             languages,
             life_phase,
+            project,
             speaker: first.speaker.clone(),
             status: EpisodeStatus::Active,
             retelling_of: None,

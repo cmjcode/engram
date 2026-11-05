@@ -114,6 +114,20 @@ pub struct PersonaContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectContext {
+    pub project: String,
+    pub found: bool,
+    pub entity: Option<Entity>,
+    pub current_facts: Vec<FactView>,
+    pub history_facts: Vec<FactView>,
+    pub decisions: Vec<Decision>,
+    pub principles: Vec<PrincipleView>,
+    pub episodes: Vec<EpisodeRef>,
+    /// Ringkasan konteks siap pakai untuk AI coding agent.
+    pub context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Answer {
     pub answer: String,
     pub found: bool,
@@ -381,6 +395,155 @@ impl Retriever {
         Ok(PersonaContext { system_prompt: p, age_at_reference: age, found: recall.found, recall })
     }
 
+    /// Konteks terpadu untuk satu proyek/workspace ditambah standar kerja & prinsip subjek
+    /// lintas AI tool (Claude Code, Antigravity, Cursor, Gemini CLI).
+    pub async fn project_context(&self, subject: &str, project: &str, task: Option<&str>) -> Result<ProjectContext> {
+        let proj = project.trim();
+        let query_str = match task.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => format!("{proj} {t}"),
+            None => format!("{proj} arsitektur tech stack konvensi keputusan aturan bug"),
+        };
+        let recall = self
+            .recall(&RecallQuery {
+                subject: subject.to_string(),
+                query: query_str,
+                project: Some(proj.to_string()),
+                limit: Some(15),
+                ..Default::default()
+            })
+            .await?;
+
+        let entity = self.find_entity(subject, proj).await?;
+        let mut current_facts: Vec<FactView> = Vec::new();
+        let mut history_facts: Vec<FactView> = Vec::new();
+        if let Some(ent) = &entity {
+            if let Ok(Some(w)) = self.who_is_id(subject, &ent.id).await {
+                current_facts = w.current_facts;
+                history_facts = w.history;
+            }
+        }
+        for fv in &recall.facts {
+            if fv.current {
+                if !current_facts.iter().any(|x| x.id == fv.id) {
+                    current_facts.push(fv.clone());
+                }
+            } else if !history_facts.iter().any(|x| x.id == fv.id) {
+                history_facts.push(fv.clone());
+            }
+        }
+
+        let mut ep_list = self
+            .store
+            .list_episodes(
+                subject,
+                &EpisodeFilter {
+                    status: Some(EpisodeStatus::Active),
+                    project: Some(proj.to_string()),
+                    limit: 20,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if let Some(ent) = &entity {
+            for ep in self.store.episodes_mentioning(&ent.id, 20).await? {
+                if !ep_list.iter().any(|x| x.id == ep.id) {
+                    ep_list.push(ep);
+                }
+            }
+        }
+        let recall_ep_ids: Vec<String> = recall
+            .episodes
+            .iter()
+            .filter(|h| !ep_list.iter().any(|x| x.id == h.id))
+            .map(|h| h.id.clone())
+            .collect();
+        for ep in self.store.episodes_by_ids(&recall_ep_ids).await? {
+            if !ep_list.iter().any(|x| x.id == ep.id) {
+                ep_list.push(ep);
+            }
+        }
+
+        let mut decisions: Vec<Decision> = Vec::new();
+        for ep in &ep_list {
+            for d in &ep.decisions {
+                if !decisions
+                    .iter()
+                    .any(|x| x.situation == d.situation && x.action == d.action)
+                {
+                    decisions.push(d.clone());
+                }
+            }
+        }
+
+        let episodes: Vec<EpisodeRef> = ep_list.iter().take(15).map(EpisodeRef::from).collect();
+        let principles = self.principles(subject, task.or(Some(proj))).await?;
+        let found = entity.is_some()
+            || !current_facts.is_empty()
+            || !decisions.is_empty()
+            || !episodes.is_empty()
+            || !principles.is_empty();
+
+        let mut ctx = format!("# Konteks Proyek & Memori Kerja: {proj}\n");
+        if let Some(ent) = &entity {
+            ctx.push_str(&format!("\nEntitas Utama: **{}** ({})", ent.name, ent.kind.label_id()));
+            if !ent.aliases.is_empty() {
+                ctx.push_str(&format!(" | Alias: {}", ent.aliases.join(", ")));
+            }
+            if !ent.description.is_empty() {
+                ctx.push_str(&format!("\nDeskripsi: {}", ent.description));
+            }
+            ctx.push('\n');
+        }
+        if !current_facts.is_empty() {
+            ctx.push_str("\n## Fakta & Arsitektur Aktif (Berlaku Sekarang)\n");
+            for f in current_facts.iter().take(25) {
+                let cite = f.evidence.iter().take(2).map(|e| format!("[ep:{e}]")).collect::<Vec<_>>().join("");
+                ctx.push_str(&format!("- [{}] {} {} {cite}\n", if f.category.is_empty() { "umum" } else { &f.category }, f.statement, if let Some(vf) = &f.valid_from { format!("(sejak {vf})") } else { String::new() }));
+            }
+        }
+        if !decisions.is_empty() {
+            ctx.push_str("\n## Keputusan Teknis & Penyelesaian Masalah\n");
+            for d in decisions.iter().take(15) {
+                let reason = d.reason.as_deref().filter(|r| !r.is_empty()).map(|r| format!(" (Alasan: {r})")).unwrap_or_default();
+                ctx.push_str(&format!("- **Situasi**: {} -> **Keputusan**: {}{}\n", d.situation, d.action, reason));
+            }
+        }
+        if !principles.is_empty() {
+            ctx.push_str("\n## Prinsip Kerja & Preferensi Subjek (Lintas Proyek/Tool)\n");
+            for p in principles.iter().take(8) {
+                let cite = p.evidence.iter().take(2).map(|e| format!("[ep:{}]", e.id)).collect::<Vec<_>>().join("");
+                ctx.push_str(&format!("- {} (domain: {}, keyakinan {:.0}%) {cite}\n", p.principle.statement, if p.principle.domain.is_empty() { "umum" } else { &p.principle.domain }, p.principle.confidence * 100.0));
+            }
+        }
+        if !episodes.is_empty() {
+            ctx.push_str("\n## Catatan Sesi & Riwayat Terkait\n");
+            for ep in &episodes {
+                ctx.push_str(&format!("- [ep:{}] ({}) **{}**: {}\n", ep.id, ep.time, ep.title, ep.excerpt));
+            }
+        }
+        if !history_facts.is_empty() {
+            ctx.push_str("\n## Riwayat Fakta Lama (Sudah Digantikan/Ditutup)\n");
+            for f in history_facts.iter().take(10) {
+                ctx.push_str(&format!("- {} (dulu: {}–{})\n", f.statement, f.valid_from.as_deref().unwrap_or("?"), f.valid_to.as_deref().unwrap_or("?")));
+            }
+        }
+        if !found {
+            ctx.push_str("\n(Belum ada catatan memori untuk proyek ini.)\n");
+        }
+
+        Ok(ProjectContext {
+            project: proj.to_string(),
+            found,
+            entity,
+            current_facts,
+            history_facts,
+            decisions,
+            principles,
+            episodes,
+            context: ctx,
+        })
+    }
+
     /// Jawab pertanyaan memakai memori (mode biasa atau persona).
     pub async fn ask(&self, subject: &str, question: &str, persona: bool, as_of: Option<&str>) -> Result<Answer> {
         let (system, recall) = if persona {
@@ -389,7 +552,7 @@ impl Retriever {
         } else {
             let r = self.recall(&RecallQuery { as_of: as_of.map(str::to_string), ..RecallQuery::new(subject, question) }).await?;
             let sys = format!(
-                "Kamu asisten arsip memori keluarga. Jawab dalam bahasa Indonesia HANYA dari MEMORI berikut, bedakan fakta yang masih berlaku dan riwayat, dan cantumkan sitasi [ep:ID]. Bila tidak ada, katakan tidak ada catatan.\n\nMEMORI:\n{}",
+                "Kamu asisten memori AI terpadu (mencakup pengetahuan proyek koding/engineering, pekerjaan profesional, dan arsip personal). Jawab dalam bahasa Indonesia HANYA dari MEMORI berikut, bedakan fakta yang masih berlaku dan riwayat, dan cantumkan sitasi [ep:ID]. Bila tidak ada, katakan tidak ada catatan.\n\nMEMORI:\n{}",
                 r.context
             );
             (sys, r)

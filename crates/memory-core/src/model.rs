@@ -136,6 +136,9 @@ pub struct Source {
     pub occurred_from: Option<String>,
     #[serde(default)]
     pub occurred_to: Option<String>,
+    /// Nama proyek/workspace asal sumber bila ada (mis. dari `antigravity:LLM-MEMORY`).
+    #[serde(default)]
+    pub project: Option<String>,
     #[serde(default)]
     pub stats: SourceStats,
     #[serde(default)]
@@ -265,6 +268,9 @@ pub struct Episode {
     pub languages: Vec<String>,
     #[serde(default)]
     pub life_phase: Option<String>,
+    /// Proyek/workspace terkait episode ini (bila berasal dari sesi kerja/coding).
+    #[serde(default)]
+    pub project: Option<String>,
     #[serde(default)]
     pub speaker: Option<String>,
     #[serde(default)]
@@ -328,6 +334,12 @@ pub enum EntityKind {
     Person,
     Place,
     Org,
+    /// Repositori, microservice, aplikasi, produk, atau proyek kerja.
+    Project,
+    /// Berkas kode, modul, package, endpoint API, tabel DB, atau fungsi.
+    Component,
+    /// Bahasa pemrograman, framework, library, database, CLI, atau AI tool.
+    Tool,
     Event,
     Object,
     Concept,
@@ -336,13 +348,159 @@ pub enum EntityKind {
 impl EntityKind {
     pub fn parse(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
-            "place" | "location" | "tempat" | "lokasi" => EntityKind::Place,
-            "org" | "organization" | "organisasi" | "company" | "party" | "partai" => EntityKind::Org,
-            "event" | "peristiwa" => EntityKind::Event,
-            "object" | "thing" | "benda" => EntityKind::Object,
-            "concept" | "idea" | "konsep" => EntityKind::Concept,
+            "place" | "location" | "tempat" | "lokasi" | "kota" | "negara" | "city" | "country" => EntityKind::Place,
+            "org" | "organization" | "organisasi" | "company" | "perusahaan" | "instansi" | "party" | "partai" | "team" | "tim" => EntityKind::Org,
+            "project" | "proyek" | "repo" | "repository" | "repositori" | "service" | "layanan" | "microservice" | "app" | "application" | "aplikasi" | "system" | "sistem" | "product" | "produk" | "workspace" => EntityKind::Project,
+            "component" | "komponen" | "file" | "berkas" | "module" | "modul" | "crate" | "package" | "paket" | "endpoint" | "api" | "route" | "table" | "tabel" | "function" | "fungsi" | "struct" | "class" | "folder" | "direktori" => EntityKind::Component,
+            "tool" | "alat" | "tech" | "technology" | "teknologi" | "language" | "bahasa" | "framework" | "library" | "pustaka" | "database" | "db" | "cli" | "ide" | "platform" | "infra" | "infrastruktur" => EntityKind::Tool,
+            "event" | "peristiwa" | "kejadian" | "insiden" | "incident" | "rilis" | "release" => EntityKind::Event,
+            "object" | "thing" | "benda" | "artefak" | "artifact" => EntityKind::Object,
+            "concept" | "idea" | "konsep" | "pola" | "pattern" | "arsitektur" | "architecture" | "konvensi" | "convention" | "domain" => EntityKind::Concept,
             _ => EntityKind::Person,
         }
+    }
+
+    /// Inferensi jenis entitas dari nama sebutan (mencegah path repo, microservice,
+    /// atau nama berkas kode jatuh ke default `EntityKind::Person`).
+    pub fn infer_from_name(name: &str) -> Option<Self> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let low = trimmed.to_lowercase();
+
+        // Pola komponen eksplisit: "berkas X pada Y", "file X", "tabel X", "endpoint X", dll.
+        const COMP_PREFIXES: &[&str] = &[
+            "berkas ", "file ", "modul ", "module ", "endpoint ", "route ", "tabel ", "table ",
+            "fungsi ", "function ", "method ", "struct ", "class ", "trait ", "enum ", "komponen ",
+            "crate ", "package ", "folder ", "direktori ", "script ",
+        ];
+        if COMP_PREFIXES.iter().any(|p| low.starts_with(p)) {
+            return Some(EntityKind::Component);
+        }
+
+        const PROJ_PREFIXES: &[&str] = &[
+            "proyek ", "project ", "repo ", "repositori ", "repository ", "microservice ",
+            "service ", "layanan ", "aplikasi ", "sistem ",
+        ];
+        if PROJ_PREFIXES.iter().any(|p| low.starts_with(p)) {
+            return Some(EntityKind::Project);
+        }
+
+        // Pola "<sesuatu> pada <path/repo>" (mis. "total_value_formulation_test.go pada BACKEND/api-data-warehouse")
+        if let Some((_, right)) = low.split_once(" pada ")
+            && (right.contains('/') || right.contains('-') || right.contains('_'))
+        {
+            return Some(EntityKind::Component);
+        }
+
+        // Token pertama atau nama tanpa spasi yang memiliki ekstensi kode/konfigurasi
+        let first_tok = low.split_whitespace().next().unwrap_or("");
+        const CODE_EXTS: &[&str] = &[
+            ".rs", ".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".toml", ".yaml", ".yml",
+            ".sql", ".sh", ".bash", ".zsh", ".md", ".html", ".css", ".scss", ".vue", ".svelte",
+            ".java", ".kt", ".swift", ".c", ".cpp", ".h", ".hpp", ".proto", ".lock", ".env",
+            ".dockerfile", ".tf", ".hcl", ".graphql", ".prisma",
+        ];
+        if CODE_EXTS.iter().any(|ext| low.ends_with(ext) || first_tok.ends_with(ext)) {
+            return Some(EntityKind::Component);
+        }
+
+        // Identifier tanpa spasi (atau path "A/B")
+        if !trimmed.contains(' ') {
+            if low.starts_with("/api/") || low.starts_with("src/") || low.starts_with("crates/") || low.starts_with("apps/") || low.starts_with("scripts/") || low.starts_with("internal/") || low.starts_with("pkg/") || low.starts_with("cmd/") {
+                return Some(EntityKind::Component);
+            }
+            if trimmed.contains('/') {
+                // mis. "BACKEND/api-master-sensor", "FRONTEND/web-dashboard", "cmjcode/engram"
+                return Some(EntityKind::Project);
+            }
+            if trimmed.contains('_') {
+                // snake_case identifier (fungsi, tabel, berkas, variabel)
+                return Some(EntityKind::Component);
+            }
+            if trimmed.contains('-') {
+                // kebab-case repo/service (mis. "api-master-sensor", "llm-memory", "memory-extract")
+                if low.starts_with("api-")
+                    || low.starts_with("svc-")
+                    || low.starts_with("service-")
+                    || low.starts_with("app-")
+                    || low.starts_with("web-")
+                    || low.starts_with("fe-")
+                    || low.starts_with("be-")
+                    || low.starts_with("backend-")
+                    || low.starts_with("frontend-")
+                    || low.starts_with("llm-")
+                {
+                    return Some(EntityKind::Project);
+                }
+                return Some(EntityKind::Component);
+            }
+        }
+
+        None
+    }
+
+    /// Parse `kind` dari keluaran LLM dengan fallback cerdas berdasarkan `name`.
+    pub fn parse_with_name(kind_str: &str, name: &str) -> Self {
+        let parsed = Self::parse(kind_str);
+        if parsed == EntityKind::Person {
+            if let Some(inferred) = Self::infer_from_name(name) {
+                return inferred;
+            }
+        }
+        parsed
+    }
+
+    pub fn is_technical(self) -> bool {
+        matches!(self, EntityKind::Project | EntityKind::Component | EntityKind::Tool)
+    }
+
+    pub fn label_id(self) -> &'static str {
+        match self {
+            EntityKind::Person => "Orang",
+            EntityKind::Place => "Tempat",
+            EntityKind::Org => "Organisasi",
+            EntityKind::Project => "Proyek & Layanan",
+            EntityKind::Component => "Komponen & Berkas",
+            EntityKind::Tool => "Tool & Teknologi",
+            EntityKind::Event => "Peristiwa",
+            EntityKind::Object => "Benda",
+            EntityKind::Concept => "Konsep",
+        }
+    }
+
+    pub fn merge_prompt_noun(self) -> &'static str {
+        match self {
+            EntityKind::Person => "orang",
+            EntityKind::Place => "tempat",
+            EntityKind::Org => "organisasi",
+            EntityKind::Project => "proyek/layanan",
+            EntityKind::Component => "komponen/berkas",
+            EntityKind::Tool => "tool/teknologi",
+            EntityKind::Event => "peristiwa",
+            EntityKind::Object => "objek",
+            EntityKind::Concept => "konsep",
+        }
+    }
+}
+
+/// Ekstrak `(client, project)` dari tag `source` berformat `<client>:<project>`
+/// (mis. `"antigravity:LLM-MEMORY"` -> `(Some("antigravity"), Some("LLM-MEMORY"))`).
+pub fn parse_source_tag(raw: &str) -> (Option<String>, Option<String>) {
+    let s = raw.trim();
+    if s.is_empty() {
+        return (None, None);
+    }
+    if let Some((client, proj)) = s.split_once(':') {
+        let c = client.trim();
+        let p = proj.trim();
+        (
+            (!c.is_empty()).then(|| c.to_string()),
+            (!p.is_empty()).then(|| p.to_string()),
+        )
+    } else {
+        (Some(s.to_string()), None)
     }
 }
 
@@ -676,7 +834,7 @@ pub enum ReviewKind {
     GrayZone,
     /// Dua fakta eksklusif sama-sama berlaku di periode yang sama.
     Conflict,
-    /// Kemungkinan dua entitas adalah orang yang sama.
+    /// Kemungkinan dua entitas merujuk hal yang sama.
     EntityMerge,
     /// Fakta/episode confidence rendah.
     Quarantine,
@@ -792,5 +950,45 @@ mod tests {
         assert_eq!(SourceKind::parse("agent_conversation"), Some(SourceKind::AgentConversation));
         assert!(SourceKind::Interview.is_biographic());
         assert!(!SourceKind::Lifelog.is_biographic());
+    }
+
+    #[test]
+    fn entity_kind_infers_technical_names() {
+        assert_eq!(
+            EntityKind::parse_with_name("person", "BACKEND/api-master-sensor"),
+            EntityKind::Project
+        );
+        assert_eq!(
+            EntityKind::parse_with_name("", "total_value_formulation_test.go pada BACKEND/api-data-warehouse"),
+            EntityKind::Component
+        );
+        assert_eq!(
+            EntityKind::parse_with_name("person", "berkas autentikasi pada BACKEND/api-trans-stock-company"),
+            EntityKind::Component
+        );
+        assert_eq!(
+            EntityKind::parse_with_name("project", "LLM-MEMORY"),
+            EntityKind::Project
+        );
+        assert_eq!(
+            EntityKind::parse_with_name("tool", "SurrealDB"),
+            EntityKind::Tool
+        );
+        assert_eq!(
+            EntityKind::parse_with_name("person", "Pakde Karno"),
+            EntityKind::Person
+        );
+    }
+
+    #[test]
+    fn parse_source_tag_extracts_client_and_project() {
+        assert_eq!(
+            parse_source_tag("antigravity:LLM-MEMORY"),
+            (Some("antigravity".into()), Some("LLM-MEMORY".into()))
+        );
+        assert_eq!(
+            parse_source_tag("claude-code"),
+            (Some("claude-code".into()), None)
+        );
     }
 }

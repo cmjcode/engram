@@ -143,6 +143,7 @@ mod repo_tests {
             emotions: vec![],
             languages: vec![],
             life_phase: None,
+            project: None,
             speaker: None,
             status: EpisodeStatus::Active,
             retelling_of: None,

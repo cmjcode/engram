@@ -53,23 +53,41 @@ impl Pipeline {
             .list_episodes(subject, &EpisodeFilter { status: Some(EpisodeStatus::Active), limit: 20_000, ..Default::default() })
             .await?;
         let current_age = subj.anchors.age_at(chrono::Utc::now().date_naive());
+        let has_biographic_phases = subj.anchors.birth.is_some()
+            || eps.iter().any(|e| e.life_phase.is_some());
         let mut gaps = Vec::new();
-        for (name, from, _) in STANDARD_PHASES {
-            if current_age.is_some_and(|a| a < *from) {
-                continue;
+        if has_biographic_phases {
+            for (name, from, _) in STANDARD_PHASES {
+                if current_age.is_some_and(|a| a < *from) {
+                    continue;
+                }
+                let n = eps.iter().filter(|e| e.life_phase.as_deref() == Some(*name)).count();
+                if n < 10 {
+                    gaps.push(Gap {
+                        gap: "phase".into(),
+                        target: Some((*name).to_string()),
+                        description: format!("Fase hidup '{name}' baru punya {n} cerita."),
+                        priority: if n < 3 { 100 - n as u32 } else { 50 - n as u32 },
+                    });
+                }
             }
-            let n = eps.iter().filter(|e| e.life_phase.as_deref() == Some(*name)).count();
-            if n < 10 {
+        }
+        for e in self.store.list_entities(subject, Some(EntityKind::Project), 500, 0).await? {
+            if e.mention_count <= 1 && !e.is_self {
                 gaps.push(Gap {
-                    gap: "phase".into(),
-                    target: Some((*name).to_string()),
-                    description: format!("Fase hidup '{name}' baru punya {n} cerita."),
-                    priority: if n < 3 { 100 - n as u32 } else { 50 - n as u32 },
+                    gap: "project".into(),
+                    target: Some(e.name.clone()),
+                    description: format!("Proyek/layanan '{}' baru tercatat sekilas; belum ada detail arsitektur, tech stack, atau aturan bisnis utamanya.", e.name),
+                    priority: 80,
                 });
             }
         }
         for e in self.store.list_entities(subject, Some(EntityKind::Person), 500, 0).await? {
-            if e.status == EntityStatus::Provisional && e.mention_count <= 1 && !e.is_self {
+            if e.status == EntityStatus::Provisional
+                && e.mention_count <= 1
+                && !e.is_self
+                && EntityKind::infer_from_name(&e.name).is_none()
+            {
                 gaps.push(Gap {
                     gap: "entity".into(),
                     target: Some(e.name.clone()),
@@ -79,7 +97,12 @@ impl Pipeline {
             }
         }
         if gaps.is_empty() {
-            gaps.push(Gap { gap: "general".into(), target: None, description: "Memori cukup lengkap; gali nilai dan nasihat hidup.".into(), priority: 10 });
+            gaps.push(Gap {
+                gap: "general".into(),
+                target: None,
+                description: "Memori cukup lengkap; gali prinsip kerja, keputusan arsitektur, atau nilai utama.".into(),
+                priority: 10,
+            });
         }
         gaps.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.target.cmp(&b.target)));
         Ok(gaps)

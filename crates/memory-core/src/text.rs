@@ -116,6 +116,11 @@ const DECISION: &[&str] = &[
     "memutuskan", "keputusan", "memilih", "pilih", "akhirnya", "nekat", "berani", "mengalah", "prinsip",
     "selalu", "harus", "jangan", "pantang", "milih", "mutuske", "nekad", "rela", "mengorbankan", "berjanji",
     "janji", "bertekad", "menolak", "mundur", "bertahan", "memaafkan", "decided", "chose",
+    // Sinyal keputusan teknis, arsitektur, dan kerja profesional:
+    "arsitektur", "architecture", "refactor", "migrasi", "migration", "konvensi", "convention",
+    "standar", "standard", "solusi", "solution", "workaround", "root", "cause", "bug", "fix",
+    "optimasi", "skema", "schema", "endpoint", "implementasi", "aturan", "rule", "validasi",
+    "formulasi", "menggunakan", "memakai", "pakai", "diganti", "mengganti", "deprecated", "pattern",
 ];
 const EMOTION: &[&str] = &[
     "sedih", "senang", "bahagia", "marah", "kecewa", "takut", "bangga", "malu", "menangis", "nangis",
@@ -149,18 +154,133 @@ pub fn noise_ratio(toks: &[String]) -> f32 {
     count_lexicon(&words, NOISE) as f32 / words.len() as f32
 }
 
-/// Jumlah kata berhuruf kapital yang bukan awal kalimat (perkiraan nama diri).
+/// Jumlah kata berhuruf kapital yang bukan awal kalimat (perkiraan nama diri)
+/// ditambah identifier teknis (path `a/b`, `snake_case`, `kebab-case`, ekstensi kode).
 pub fn proper_noun_count(text: &str) -> usize {
     let mut count = 0;
     let mut sentence_start = true;
     for w in text.split_whitespace() {
-        let first = w.chars().next();
-        if !sentence_start && first.is_some_and(char::is_uppercase) && w.chars().count() > 1 {
+        let clean = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '_' && c != '-' && c != '.');
+        let first = clean.chars().next();
+        if !sentence_start && first.is_some_and(char::is_uppercase) && clean.chars().count() > 1 {
+            count += 1;
+        } else if is_technical_token(clean) {
             count += 1;
         }
         sentence_start = w.ends_with(['.', '!', '?', ':']);
     }
     count
+}
+
+/// Apakah satu token tampak seperti identifier teknis (path, berkas kode, snake_case, kebab-case).
+pub fn is_technical_token(tok: &str) -> bool {
+    let t = tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '_' && c != '-' && c != '.');
+    if t.chars().count() < 3 || t.contains(' ') {
+        return false;
+    }
+    let has_alpha = t.chars().any(char::is_alphabetic);
+    if !has_alpha {
+        return false;
+    }
+    if t.contains('/') && !t.starts_with("http") && t.split('/').all(|s| !s.is_empty()) {
+        return true;
+    }
+    if t.contains('_') {
+        return true;
+    }
+    if t.contains('-') && t.split('-').count() >= 2 && t.chars().any(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        return true;
+    }
+    const EXTS: &[&str] = &[
+        ".rs", ".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".toml", ".yaml", ".yml",
+        ".sql", ".sh", ".md", ".html", ".css", ".vue", ".java", ".kt", ".swift", ".c", ".cpp", ".proto",
+    ];
+    let low = t.to_lowercase();
+    EXTS.iter().any(|ext| low.ends_with(ext))
+}
+
+fn strip_entity_prefix(s: &str) -> &str {
+    const PREFIXES: &[&str] = &[
+        "berkas ", "file ", "modul ", "module ", "proyek ", "project ", "repo ", "repositori ",
+        "repository ", "service ", "microservice ", "layanan ", "aplikasi ", "komponen ",
+        "tabel ", "table ", "endpoint ", "fungsi ", "function ",
+    ];
+    let mut cur = s.trim();
+    for p in PREFIXES {
+        if let Some(rest) = cur.strip_prefix(p) {
+            cur = rest.trim();
+            break;
+        }
+    }
+    cur
+}
+
+fn split_scoped_mention(s: &str) -> Option<(&str, &str)> {
+    for sep in [" pada ", " di dalam ", " di repo ", " di proyek ", " di service ", " di folder ", " in ", " of "] {
+        if let Some((left, right)) = s.split_once(sep) {
+            let l = left.trim();
+            let r = right.trim();
+            if !l.is_empty() && !r.is_empty() {
+                return Some((l, r));
+            }
+        }
+    }
+    None
+}
+
+/// Deteksi apakah dua nama entitas secara struktural adalah identifier teknis,
+/// microservice, berkas, atau komponen yang BERBEDA (sehingga tidak boleh digabung
+/// atau diajukan ke antrean review `EntityMerge`).
+pub fn are_distinct_technical_names(a: &str, b: &str) -> bool {
+    let al = a.trim().to_lowercase();
+    let bl = b.trim().to_lowercase();
+    if al.is_empty() || bl.is_empty() || normalize(&al) == normalize(&bl) {
+        return false;
+    }
+
+    // 1. Relasi bagian-dari ("X pada Y" vs "Y", atau "X pada Y" vs "Z pada Y" dengan X != Z).
+    let sa = split_scoped_mention(&al);
+    let sb = split_scoped_mention(&bl);
+    match (sa, sb) {
+        (Some((la, ra)), None) => {
+            let clean_b = strip_entity_prefix(&bl);
+            if normalize(ra) == normalize(clean_b) || is_technical_token(ra) || is_technical_token(clean_b) {
+                return normalize(la) != normalize(clean_b);
+            }
+        }
+        (None, Some((lb, rb))) => {
+            let clean_a = strip_entity_prefix(&al);
+            if normalize(rb) == normalize(clean_a) || is_technical_token(rb) || is_technical_token(clean_a) {
+                return normalize(lb) != normalize(clean_a);
+            }
+        }
+        (Some((la, ra)), Some((lb, rb))) => {
+            if normalize(la) != normalize(lb) || normalize(ra) != normalize(rb) {
+                return true;
+            }
+        }
+        (None, None) => {}
+    }
+
+    let ca = strip_entity_prefix(&al);
+    let cb = strip_entity_prefix(&bl);
+    let tech_a = is_technical_token(ca) || crate::model::EntityKind::infer_from_name(a).is_some_and(|k| k.is_technical());
+    let tech_b = is_technical_token(cb) || crate::model::EntityKind::infer_from_name(b).is_some_and(|k| k.is_technical());
+
+    if tech_a && tech_b {
+        // Bandingkan segmen terakhir (basename) bila ada path `/`.
+        let base_a = ca.rsplit('/').next().unwrap_or(ca).trim();
+        let base_b = cb.rsplit('/').next().unwrap_or(cb).trim();
+        if base_a != base_b {
+            return true;
+        }
+        // Bila basename sama tapi prefix induknya eksplisit dan berbeda (mis. "FRONTEND/app" vs "BACKEND/app")
+        if ca.contains('/') && cb.contains('/') && ca != cb {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Potong teks pada batas karakter agar aman untuk UTF-8.
@@ -214,5 +334,36 @@ mod tests {
     #[test]
     fn truncate_is_utf8_safe() {
         assert_eq!(truncate_chars("héllo", 2), "hé…");
+    }
+
+    #[test]
+    fn distinct_technical_names_blocks_false_merges() {
+        assert!(are_distinct_technical_names(
+            "BACKEND/api-master-sensor",
+            "BACKEND/api-trans-project"
+        ));
+        assert!(are_distinct_technical_names(
+            "BACKEND/api-data-warehouse",
+            "BACKEND/api-master-sensor"
+        ));
+        assert!(are_distinct_technical_names(
+            "BACKEND/api-master-product",
+            "BACKEND/api-master-sensor"
+        ));
+        assert!(are_distinct_technical_names(
+            "berkas autentikasi pada BACKEND/api-trans-stock-company",
+            "BACKEND/api-trans-stock-company"
+        ));
+        assert!(are_distinct_technical_names(
+            "total_value_formulation_test.go pada BACKEND/api-data-warehouse",
+            "BACKEND/api-data-warehouse"
+        ));
+        // Short alias of the same service is NOT blocked:
+        assert!(!are_distinct_technical_names(
+            "BACKEND/api-master-sensor",
+            "api-master-sensor"
+        ));
+        // Human names are NOT blocked by technical filter:
+        assert!(!are_distinct_technical_names("Pakde Karno", "Soekarno"));
     }
 }

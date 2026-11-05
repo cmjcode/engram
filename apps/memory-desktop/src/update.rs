@@ -93,7 +93,19 @@ async fn find(app: &AppHandle) -> Result<Option<Update>> {
         .on_before_exit(move || crate::stop_engine(&app_for_exit))
         .build()
         .context("menyiapkan updater")?;
-    updater.check().await.context("membaca info rilis")
+    match updater.check().await {
+        Ok(u) => Ok(u),
+        // Rilis baru sedang dibangun di CI: latest.json atau paket platform ini belum diunggah.
+        Err(
+            tauri_plugin_updater::Error::ReleaseNotFound
+            | tauri_plugin_updater::Error::TargetNotFound(_)
+            | tauri_plugin_updater::Error::TargetsNotFound(_),
+        ) => {
+            tracing::debug!("manifest atau paket rilis untuk platform ini belum tersedia");
+            Ok(None)
+        }
+        Err(e) => Err(e).context("membaca info rilis"),
+    }
 }
 
 /// Cek update untuk halaman Pengaturan (tanpa dialog).

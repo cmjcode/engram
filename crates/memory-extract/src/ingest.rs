@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use memory_core::model::{Job, Source, SourceKind, SourceStats, SourceStatus};
+use memory_core::model::{Job, Source, SourceKind, SourceStats, SourceStatus, parse_source_tag};
 use memory_core::text::detect_languages;
 use memory_core::{ids::now_rfc3339, new_id};
 
@@ -22,6 +22,7 @@ pub struct IngestDoc {
     pub original: Option<(String, Vec<u8>)>,
     pub occurred_from: Option<String>,
     pub occurred_to: Option<String>,
+    pub project: Option<String>,
     pub meta: Value,
     pub batch_id: Option<String>,
 }
@@ -58,6 +59,18 @@ impl Pipeline {
             self.vault.write_rel(&orig, bytes)?;
             meta["original_path"] = json!(orig);
         }
+        let project = doc
+            .project
+            .clone()
+            .or_else(|| meta["project"].as_str().map(str::to_string))
+            .or_else(|| meta["label"].as_str().map(str::to_string))
+            .or_else(|| meta["source"].as_str().and_then(|s| parse_source_tag(s).1))
+            .or_else(|| {
+                doc.title
+                    .strip_prefix("Diingat agent: ")
+                    .and_then(|s| parse_source_tag(s).1)
+            })
+            .filter(|p| !p.trim().is_empty());
         let source = Source {
             id: new_id(),
             subject: doc.subject.clone(),
@@ -73,6 +86,7 @@ impl Pipeline {
             batch_id: doc.batch_id.clone(),
             occurred_from: doc.occurred_from.clone(),
             occurred_to: doc.occurred_to.clone(),
+            project,
             stats: SourceStats::default(),
             meta,
             created_at: now_rfc3339(),

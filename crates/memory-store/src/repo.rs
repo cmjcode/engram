@@ -15,6 +15,7 @@ const EN: &str = "SELECT * OMIT embedding, alias_keys FROM entity";
 pub struct EpisodeFilter {
     pub status: Option<EpisodeStatus>,
     pub source_id: Option<String>,
+    pub project: Option<String>,
     pub life_phase: Option<String>,
     /// Jendela waktu (ISO date) yang dipotong rentang episode.
     pub from: Option<String>,
@@ -170,6 +171,10 @@ impl Store {
         if let Some(src) = &f.source_id {
             cond.push_str(" AND source_id = $src");
             b.insert("src".into(), json!(src));
+        }
+        if let Some(proj) = &f.project {
+            cond.push_str(" AND project = $proj");
+            b.insert("proj".into(), json!(proj));
         }
         if let Some(lp) = &f.life_phase {
             cond.push_str(" AND life_phase = $lp");

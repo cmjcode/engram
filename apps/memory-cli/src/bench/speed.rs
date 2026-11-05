@@ -64,6 +64,7 @@ pub async fn run(cfg: &MemoryConfig, n: usize, queries: usize, index: &str, dir:
                 emotions: vec![],
                 languages: vec!["id".into()],
                 life_phase: None,
+                project: None,
                 speaker: None,
                 status: EpisodeStatus::Active,
                 retelling_of: None,

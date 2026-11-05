@@ -19,6 +19,9 @@ pub struct RecallQuery {
     #[serde(default)]
     pub subject: String,
     pub query: String,
+    /// Filter/prioritas proyek atau workspace tertentu (mis. "LLM-MEMORY").
+    #[serde(default)]
+    pub project: Option<String>,
     /// Jendela waktu ISO (YYYY-MM-DD), opsional.
     #[serde(default)]
     pub from: Option<String>,
@@ -52,9 +55,11 @@ pub struct EpisodeHit {
     pub time: String,
     pub time_start: Option<String>,
     pub life_phase: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
     pub retell_count: u32,
     pub score: f32,
-    /// Jalur yang menemukan: vector, fulltext, graph.
+    /// Jalur yang menemukan: vector, fulltext, graph, project.
     pub via: Vec<String>,
 }
 
@@ -189,6 +194,14 @@ impl Retriever {
         let vlist: Vec<String> = vhits.iter().filter(|h| h.similarity >= rc.min_similarity * 0.8).map(|h| h.id.clone()).collect();
         let flist: Vec<String> = self.store.fulltext_episodes(&q.subject, &q.query, rc.candidate_k).await?.into_iter().map(|(id, _)| id).collect();
         let mut entities = self.entities_in_query(&q.subject, &q.query).await?;
+        let want_project = q.project.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        if let Some(proj) = want_project {
+            for e in self.store.entities_by_alias(&q.subject, proj).await? {
+                if !entities.iter().any(|x| x.id == e.id) {
+                    entities.push(e);
+                }
+            }
+        }
         if let Some(v) = &qvec {
             for h in index.search("entity", &q.subject, v, 5, "status != 'merged'").await? {
                 if h.similarity >= 0.6 && !entities.iter().any(|e| e.id == h.id)
@@ -217,7 +230,27 @@ impl Retriever {
                 }
             }
         }
-        let fused = rrf(&[vlist.clone(), flist.clone(), glist.clone(), hop2.clone()], rc.rrf_k);
+        let mut plist: Vec<String> = Vec::new();
+        if let Some(proj) = want_project {
+            for ep in self
+                .store
+                .list_episodes(
+                    &q.subject,
+                    &memory_store::EpisodeFilter {
+                        status: Some(EpisodeStatus::Active),
+                        project: Some(proj.to_string()),
+                        limit: 20,
+                        ..Default::default()
+                    },
+                )
+                .await?
+            {
+                if !plist.contains(&ep.id) {
+                    plist.push(ep.id);
+                }
+            }
+        }
+        let fused = rrf(&[vlist.clone(), flist.clone(), glist.clone(), hop2.clone(), plist.clone()], rc.rrf_k);
 
         // 2. Muat & saring temporal.
         let ids: Vec<String> = fused.iter().take(rc.candidate_k).map(|(id, _)| id.clone()).collect();
@@ -239,6 +272,16 @@ impl Retriever {
             if glist.contains(id) || hop2.contains(id) {
                 via.push("graph".to_string());
             }
+            let proj_match = want_project.is_some_and(|wp| {
+                let nwp = normalize(wp);
+                plist.contains(id)
+                    || e.project.as_deref().is_some_and(|ep| normalize(ep) == nwp || normalize(ep).ends_with(&nwp))
+                    || (!nwp.is_empty() && normalize(&e.text).contains(&nwp))
+            });
+            if proj_match {
+                via.push("project".to_string());
+            }
+            let proj_boost = if proj_match { 1.35 } else { 1.0 };
             hits.push(EpisodeHit {
                 id: e.id.clone(),
                 title: e.title.clone(),
@@ -247,8 +290,9 @@ impl Retriever {
                 time: e.time_label(),
                 time_start: e.time_start.clone(),
                 life_phase: e.life_phase.clone(),
+                project: e.project.clone(),
                 retell_count: e.retell_count,
-                score: *score * (1.0 + 0.05 * e.retell_count.min(10) as f32) * (0.75 + 0.5 * e.importance),
+                score: *score * (1.0 + 0.05 * e.retell_count.min(10) as f32) * (0.75 + 0.5 * e.importance) * proj_boost,
                 via,
             });
         }
@@ -358,7 +402,7 @@ impl Retriever {
             hits.clear();
         }
         let any = !hits.is_empty() || !fviews.is_empty() || !principles.is_empty() || !dispositions.is_empty();
-        let weak = best_sim < rc.min_similarity && flist.is_empty() && entities.iter().all(|e| e.is_self) && fviews.is_empty();
+        let weak = best_sim < rc.min_similarity && flist.is_empty() && plist.is_empty() && entities.iter().all(|e| e.is_self) && fviews.is_empty();
         let mut result = RecallResult { found: any && !weak, note: None, episodes: hits, facts: fviews, principles, dispositions, context: String::new() };
         if !result.found {
             result.episodes.clear();

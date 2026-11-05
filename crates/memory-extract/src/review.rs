@@ -7,6 +7,7 @@ use serde_json::json;
 
 use memory_core::ids::now_rfc3339;
 use memory_core::model::*;
+use memory_core::text::are_distinct_technical_names;
 
 use crate::{ExtractError, Pipeline, Result};
 
@@ -63,7 +64,7 @@ impl Pipeline {
                 self.merge_entities(&from, &into).await?;
             }
             (ReviewKind::EntityMerge, Decision::Reject) => {
-                // Dikonfirmasi sebagai orang berbeda.
+                // Dikonfirmasi sebagai entitas berbeda.
                 if let Some(id) = s("new") {
                     self.store.patch("entity", &id, json!({"status": "confirmed"})).await?;
                 }
@@ -125,5 +126,67 @@ impl Pipeline {
         self.store.put_entity(&a, None).await?;
         self.store.repoint_entity(from, into).await?;
         Ok(())
+    }
+
+    /// Perbaiki otomatis entitas teknis (`Project`/`Component`) yang sempat tersimpan
+    /// sebagai `Person` karena fallback lama, dan tolak otomatis item review `EntityMerge`
+    /// yang membandingkan dua identifier teknis/microservice/berkas berbeda.
+    pub async fn sanitize_technical_entities(&self, subject: &str) -> Result<(u32, u32)> {
+        let mut reclassified = 0u32;
+        let persons = self
+            .store
+            .list_entities(subject, Some(EntityKind::Person), 2000, 0)
+            .await?;
+        for e in persons {
+            if e.is_self {
+                continue;
+            }
+            if let Some(new_kind) = EntityKind::infer_from_name(&e.name)
+                && new_kind != EntityKind::Person
+            {
+                self.store
+                    .patch("entity", &e.id, json!({"kind": new_kind}))
+                    .await?;
+                reclassified += 1;
+            }
+        }
+
+        let mut dismissed = 0u32;
+        let open_merges = self
+            .store
+            .list_reviews(subject, ReviewStatus::Open, Some(ReviewKind::EntityMerge), 500)
+            .await?;
+        for r in open_merges {
+            let new_id = r.payload["new"]
+                .as_str()
+                .or_else(|| r.targets.first().map(String::as_str))
+                .unwrap_or("");
+            let existing_id = r.payload["existing"]
+                .as_str()
+                .or_else(|| r.targets.get(1).map(String::as_str))
+                .unwrap_or("");
+            if new_id.is_empty() || existing_id.is_empty() {
+                continue;
+            }
+            let a = self.store.get_entity(new_id).await?;
+            let b = self.store.get_entity(existing_id).await?;
+            let should_reject = match (a, b) {
+                (Some(ea), Some(eb)) => {
+                    ea.kind != eb.kind || are_distinct_technical_names(&ea.name, &eb.name)
+                }
+                _ => false,
+            };
+            if should_reject {
+                let _ = self
+                    .resolve_review(
+                        &r.id,
+                        Decision::Reject,
+                        Some("Ditolak otomatis: entitas teknis/proyek/berkas berbeda".into()),
+                    )
+                    .await?;
+                dismissed += 1;
+            }
+        }
+        Ok((reclassified, dismissed))
     }
 }

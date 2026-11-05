@@ -2,15 +2,15 @@
 //! dan disetel tanpa menyentuh logika pipeline.
 
 pub const SEGMENT_SYSTEM: &str = "\
-Kamu memecah transkrip/catatan kisah hidup menjadi segmen cerita yang utuh secara topik.
+Kamu memecah transkrip percakapan AI, catatan kerja/koding, atau kisah hidup menjadi segmen yang utuh secara topik.
 Input berupa unit bernomor [i]. Kelompokkan unit yang berurutan menjadi segmen.
 Untuk setiap segmen isi:
 - start, end: indeks unit pertama dan terakhir (inklusif), berurutan, tidak tumpang tindih, mencakup semua unit.
 - topic: topik singkat.
-- about_subject: true bila tentang hidup, keluarga, pengalaman, atau cara berpikir SUBJEK; false untuk iklan, berita yang dibacakan, obrolan orang lain yang tidak terkait, atau rekaman latar.
-- speaker: siapa yang bercerita bila jelas.
-- significance 0..1: 0 = basa-basi, salam, logistik, 'oke/sip'; 0.3 = rutinitas; 0.6 = pengalaman bermakna; 1 = peristiwa hidup besar, keputusan penting, nilai hidup.
-Pahami campuran bahasa Indonesia, Jawa, Sunda, dan kiasan. Keluarkan JSON saja.";
+- about_subject: true bila membahas proyek, kode, arsitektur, aturan bisnis, debugging/solusi bug, preferensi kerja/tool, pengetahuan teknis, maupun kehidupan, keluarga, pengalaman, atau cara berpikir SUBJEK; false HANYA untuk iklan, berita luar yang tidak terkait, atau rekaman latar acak.
+- speaker: siapa yang berbicara bila jelas.
+- significance 0..1: 0 = basa-basi, salam, logistik, 'oke/sip', log kompilasi mentah tanpa kesimpulan; 0.3 = rutinitas biasa; 0.6 = konteks proyek, perbaikan bug, atau pengalaman bermakna; 1 = keputusan arsitektur/teknis penting, aturan bisnis inti, konvensi kerja, peristiwa hidup besar, atau nilai/prinsip.
+Pahami istilah teknis pemrograman maupun campuran bahasa Indonesia, Inggris, Jawa, Sunda, dan kiasan. Keluarkan JSON saja.";
 
 pub fn segment_user(subject_name: &str, units: &[(usize, String)], examples: &str) -> String {
     let mut s = format!("SUBJEK: {subject_name}\n");
@@ -27,49 +27,64 @@ pub fn segment_user(subject_name: &str, units: &[(usize, String)], examples: &st
 }
 
 pub const EXTRACT_SYSTEM: &str = "\
-Kamu adalah pengekstrak memori biografis. Ubah satu segmen cerita menjadi memori terstruktur.
+Kamu adalah pengekstrak memori AI terpadu (mencakup pengetahuan engineering/pemrograman, pekerjaan profesional, dan biografi personal). Ubah satu segmen menjadi memori terstruktur.
 ATURAN WAJIB:
 1. Hanya ekstrak yang tertulis atau tersirat jelas di teks. Jangan mengarang.
-2. Setiap fakta, relasi kekerabatan, keputusan, dan sinyal sifat WAJIB punya `quote` yang disalin PERSIS dari teks (bahasa asli, tanpa diterjemahkan).
-3. 'saya/aku/abdi/kula/dalem/kami(=keluarga subjek)' merujuk SUBJEK: entitas dengan is_self=true dan name = nama subjek.
-4. Waktu (`time` episode dan `time` tiap fakta) pilih kind:
+2. Setiap fakta, relasi kekerabatan, keputusan, dan sinyal sifat/preferensi WAJIB punya `quote` yang disalin PERSIS dari teks (bahasa asli, tanpa diterjemahkan).
+3. 'saya/aku/abdi/kula/dalem/gue/user/pengguna' merujuk SUBJEK: entitas dengan is_self=true dan name = nama subjek.
+4. Entitas (`entities`): pilih `kind` dengan tepat:
+   - `project`: repositori, microservice, aplikasi, produk, atau workspace (mis. `BACKEND/api-master-sensor`, `LLM-MEMORY`).
+   - `component`: berkas kode, modul, crate/package, endpoint API, tabel DB, atau fungsi (mis. `total_value_formulation_test.go`, `resolve.rs`).
+   - `tool`: bahasa pemrograman, framework, library, database, CLI, atau AI tool (mis. `Rust`, `SurrealDB`, `Claude Code`, `Antigravity`).
+   - `person`: hanya manusia/orang nyata. JANGAN PERNAH memberi kind `person` untuk nama repo, service, atau berkas!
+   - `org`: perusahaan, tim, instansi, atau organisasi.
+   - `place`: kota, negara, lokasi fisik.
+   - `event` | `object` | `concept`: peristiwa, benda fisik, atau konsep/pola arsitektur.
+   PENTING: Jangan menggabungkan nama berkas dan nama repo menjadi satu nama entitas seperti 'file_x.go pada BACKEND/repo_y'. Pisahkan menjadi entitas `component` ('file_x.go') dan entitas `project` ('BACKEND/repo_y'), lalu hubungkan dengan fakta.
+5. Waktu (`time` episode dan `time` tiap fakta) pilih kind:
    exact (year+month+day) | approx ('sekitar 2015' -> year=2015) | range (year..year_end, ongoing bila masih) |
    age ('umur 20' -> age=20; 'umur 20-an' -> age=20, age_end=29) | relative ('setahun setelah nikah' -> anchor='nikah', offset_years=1) |
    life_phase ('waktu SD' -> phase='SD', 'masa merantau' -> phase='merantau') | current ('sekarang', 'saat ini') |
    past ('dulu', 'pernah', 'mbiyen', 'baheula' tanpa tahun) | unknown.
    Isi `text` dengan ungkapan waktu aslinya. JANGAN menebak tahun yang tidak disebut.
-5. Fakta: subject = nama entitas pelaku, predicate = kata kerja singkat (mendukung, tinggal di, bekerja di, lahir di, menikah dengan, mendirikan),
-   object = objek, object_is_entity = true bila objeknya orang/tempat/organisasi.
-   category snake_case stabil: afiliasi_politik, tempat_tinggal, pekerjaan, pendidikan, status_pernikahan, agama, usaha, kesehatan, hobi, kepemilikan, peristiwa.
-   kind = 'preference' untuk pilihan/afiliasi/pandangan (partai, tim, agama, selera), selain itu 'fact'.
-   exclusive = true bila hanya satu nilai bisa berlaku pada satu waktu (partai politik, tempat tinggal utama, pekerjaan utama, status pernikahan, agama).
+6. Fakta: subject = nama entitas pelaku (bisa subjek, proyek, atau komponen), predicate = kata kerja singkat (menggunakan, mengembangkan, memiliki komponen, memperbaiki bug, menetapkan aturan, mendukung, tinggal di, bekerja di),
+   object = objek, object_is_entity = true bila objeknya entitas (proyek/komponen/tool/orang/tempat/organisasi).
+   category snake_case stabil:
+   - Teknis & Kerja: arsitektur, tech_stack, konvensi_kode, aturan_bisnis, bug_fix, infrastruktur, workflow, preferensi_tool, proyek, komponen.
+   - Personal & Biografi: afiliasi_politik, tempat_tinggal, pekerjaan, pendidikan, status_pernikahan, agama, usaha, kesehatan, hobi, kepemilikan, peristiwa.
+   kind = 'preference' untuk pilihan/standar/konvensi/pandangan (pilihan tech stack, gaya koding, preferensi tool, afiliasi), selain itu 'fact'.
+   exclusive = true HANYA bila hanya satu nilai bisa berlaku pada satu waktu untuk entitas & kategori tersebut (mis. database utama, tempat tinggal utama, pekerjaan utama, status pernikahan). Untuk daftar fitur/komponen/proyek/hobi isi exclusive = false.
    confidence 0..1.
-6. Emosi sesaat (sedih, marah, bangga saat itu) -> emotions. Sifat atau nilai yang TERLIHAT dari tindakan berulang/tegas -> trait_signals
-   (kind 'trait' untuk sifat, 'value' untuk nilai hidup; polarity -1 bila cerita menunjukkan sifat itu sudah ditinggalkan). Emosi BUKAN sifat.
-7. Kekerabatan: person adalah `term` dari `of` (kosongkan `of` bila terhadap subjek). Tulis term apa adanya (pakde, bulik, mbah kakung, uwa, teteh, besan, ipar).
-8. decisions: situasi -> tindakan -> alasan, bila subjek mengambil keputusan.
-9. quotes: kalimat khas subjek (pepatah, nasihat, ungkapan) yang layak dikenang.
-10. title singkat; summary 1-3 kalimat bahasa Indonesia yang menerjemahkan kiasan/bahasa daerah.
+7. Emosi sesaat -> emotions. Sifat, standar kerja, atau nilai yang TERLIHAT dari tindakan/preferensi tegas -> trait_signals
+   (kind 'trait' untuk sifat/kebiasaan kerja, 'value' untuk nilai/prinsip engineering atau hidup; polarity -1 bila sudah ditinggalkan).
+8. Kekerabatan: person adalah `term` dari `of` (kosongkan `of` bila terhadap subjek). Tulis term apa adanya (pakde, bulik, mbah kakung, uwa, teteh, besan, ipar). Kosongkan bila teks membahas hal teknis.
+9. decisions: situasi/masalah -> tindakan/keputusan teknis atau personal -> alasan (mengapa memilih arsitektur/solusi/keputusan tersebut).
+10. quotes: kalimat khas, aturan tegas, atau prinsip penting yang dinyatakan subjek.
+11. title singkat; summary 1-3 kalimat bahasa Indonesia yang padat dan jelas.
 Keluarkan JSON saja.";
 
 pub fn extract_user(subject_name: &str, observed: &str, birth: Option<&str>, known_entities: &str, text: &str) -> String {
     format!(
-        "SUBJEK: {subject_name}\nTanggal cerita direkam: {observed}\nTanggal lahir subjek: {}\nEntitas yang sudah dikenal (pakai nama yang sama bila merujuk orang yang sama):\n{}\n\nTEKS:\n{text}",
+        "SUBJEK: {subject_name}\nTanggal direkam: {observed}\nTanggal lahir subjek: {}\nEntitas yang sudah dikenal (pakai nama yang sama HANYA bila benar-benar merujuk entitas yang sama):\n{}\n\nTEKS:\n{text}",
         birth.unwrap_or("tidak diketahui"),
         if known_entities.is_empty() { "-" } else { known_entities }
     )
 }
 
 pub const SAME_ENTITY_SYSTEM: &str = "\
-Tentukan apakah dua sebutan merujuk orang/tempat/organisasi yang SAMA dalam kisah hidup seorang subjek.
-Perhatikan panggilan kekerabatan (Mbah, Pakde, Bulik), nama kecil, gelar, dan nama Jawa/Sunda.
+Tentukan apakah dua sebutan merujuk entitas (orang/proyek/komponen/tool/organisasi/tempat) yang SAMA.
+ATURAN KETAT:
+1. Dua repositori, microservice, modul, endpoint, atau berkas kode dengan nama berbeda (meskipun memiliki prefix yang sama seperti 'BACKEND/api-master-sensor' dan 'BACKEND/api-master-product') adalah BERBEDA -> wajib jawab same=false, confidence=1.0.
+2. Sebuah berkas atau komponen di dalam suatu proyek (misal 'berkas autentikasi pada repo X' vs 'repo X') adalah bagian dari proyek tersebut, BUKAN entitas yang sama -> wajib jawab same=false, confidence=1.0.
+3. Proyek/komponen hanya dianggap sama bila satu sebutan adalah nama pendek/alias persis dari yang lain (mis. 'api-master-sensor' dan 'BACKEND/api-master-sensor').
+4. Untuk orang (Person), perhatikan panggilan kekerabatan (Mbah, Pakde, Bulik), nama kecil, gelar, dan nama Jawa/Sunda.
 Jika ragu, jawab same=false. Keluarkan JSON {same, confidence, reason}.";
 
 pub const PRINCIPLE_SYSTEM: &str = "\
-Kamu menyimpulkan PRINSIP atau POLA KEPUTUSAN seseorang dari beberapa keputusan nyata di hidupnya.
-Prinsip harus: (1) konsisten di SEMUA bukti yang kamu kutip, (2) berupa pola perilaku/keputusan, bukan fakta,
-(3) ditulis sebagai kalimat orang ketiga, mis. 'Saat usaha sedang krisis, ia mendahulukan gaji karyawan sebelum menghitung kerugiannya sendiri.'
-Isi origin bila bukti menyebut asal pengaruhnya (mis. 'didikan ibunya').
+Kamu menyimpulkan PRINSIP KERJA, STANDAR TEKNIS/ARSITEKTUR, atau POLA KEPUTUSAN seseorang dari beberapa keputusan nyata.
+Prinsip harus: (1) konsisten di SEMUA bukti yang kamu kutip, (2) berupa pola keputusan/standar engineering/cara kerja/prinsip hidup, bukan sekadar fakta tunggal,
+(3) ditulis sebagai kalimat orang ketiga yang jelas, mis. 'Dalam pengembangan backend, ia selalu memisahkan validasi aturan bisnis dari layer handler dan mengutamakan pengujian deterministik.' atau 'Saat usaha sedang krisis, ia mendahulukan gaji karyawan sebelum menghitung kerugiannya sendiri.'
+Isi domain (mis. 'engineering', 'arsitektur', 'workflow', 'bisnis', 'keluarga') dan isi origin bila bukti menyebut asal pengaruhnya.
 Bila bukti tidak menunjukkan pola yang konsisten, kosongkan statement.
 evidence_ids hanya berisi ID episode dari input. Keluarkan JSON saja.";
 

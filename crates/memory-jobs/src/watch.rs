@@ -913,6 +913,7 @@ async fn scan_one_locked(
             text: context_text.clone(),
             original_name: Some(folder.label.clone()),
             occurred_from: Some(now_iso),
+            project: Some(folder.label.clone()),
             meta: json!({
                 "via": "watched_folder",
                 "extractor": "agy_cli",

@@ -382,3 +382,84 @@ async fn compact_rolls_up_episodes_and_compacts_facts_non_destructively() {
     let rejected = p.store.get_fact("f_noise").await.unwrap().unwrap();
     assert_eq!(rejected.status, FactStatus::Rejected);
 }
+
+#[tokio::test]
+async fn technical_entities_never_become_person_merge_reviews_and_auto_sanitize() {
+    let (p, _d) = setup().await;
+    // Simulasikan entitas dan review salah klasifikasi dari versi lama ("Orang yang sama?").
+    let e1 = Entity {
+        id: "ent_sensor".into(),
+        subject: "budi".into(),
+        name: "BACKEND/api-master-sensor".into(),
+        aliases: vec![],
+        kind: EntityKind::Person, // salah diklasifikasikan sebagai Person di versi lama
+        gender: None,
+        is_self: false,
+        description: String::new(),
+        status: EntityStatus::Confirmed,
+        merged_into: None,
+        mention_count: 2,
+        episode_ids: vec![],
+        created_at: "2026-01-01T00:00:00Z".into(),
+    };
+    let e2 = Entity {
+        id: "ent_project".into(),
+        name: "BACKEND/api-trans-project".into(),
+        ..e1.clone()
+    };
+    let e3 = Entity {
+        id: "ent_file".into(),
+        name: "total_value_formulation_test.go pada BACKEND/api-data-warehouse".into(),
+        ..e1.clone()
+    };
+    let e4 = Entity {
+        id: "ent_dw".into(),
+        name: "BACKEND/api-data-warehouse".into(),
+        ..e1.clone()
+    };
+    for e in [&e1, &e2, &e3, &e4] {
+        p.store.put_entity(e, None).await.unwrap();
+    }
+    p.store
+        .put_review(&ReviewItem {
+            id: "rev_false_1".into(),
+            subject: "budi".into(),
+            kind: ReviewKind::EntityMerge,
+            status: ReviewStatus::Open,
+            summary: "Apakah \"BACKEND/api-master-sensor\" sama dengan \"BACKEND/api-trans-project\"? (kemiripan 0.82)".into(),
+            targets: vec!["ent_sensor".into(), "ent_project".into()],
+            payload: json!({"entity_a": "ent_sensor", "entity_b": "ent_project", "similarity": 0.82}),
+            note: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    p.store
+        .put_review(&ReviewItem {
+            id: "rev_false_2".into(),
+            subject: "budi".into(),
+            kind: ReviewKind::EntityMerge,
+            status: ReviewStatus::Open,
+            summary: "Apakah \"total_value_formulation_test.go pada BACKEND/api-data-warehouse\" sama dengan \"BACKEND/api-data-warehouse\"? (kemiripan 0.79)".into(),
+            targets: vec!["ent_file".into(), "ent_dw".into()],
+            payload: json!({"entity_a": "ent_file", "entity_b": "ent_dw", "similarity": 0.79}),
+            note: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+
+    let (reclassified, dismissed) = p.sanitize_technical_entities("budi").await.unwrap();
+    assert_eq!(reclassified, 4, "keempat entitas teknis dikoreksi dari Person ke Project/Component");
+    assert_eq!(dismissed, 2, "kedua review EntityMerge false-positive otomatis ditolak");
+
+    let sensor = p.store.get_entity("ent_sensor").await.unwrap().unwrap();
+    assert_eq!(sensor.kind, EntityKind::Project);
+    let file_ent = p.store.get_entity("ent_file").await.unwrap().unwrap();
+    assert_eq!(file_ent.kind, EntityKind::Component);
+
+    let open_revs = p.store.list_reviews("budi", ReviewStatus::Open, None, 50).await.unwrap();
+    assert!(open_revs.is_empty(), "tidak ada review EntityMerge palsu yang tersisa");
+}

@@ -62,7 +62,7 @@ const S = () => encodeURIComponent(state.subject);
 const ROUTES = [
   ["ringkasan", "home", "Ringkasan", viewHome],
   ["timeline", "clock", "Timeline", viewTimeline],
-  ["orang", "users", "Orang & Silsilah", viewPeople],
+  ["orang", "users", "Entitas & Relasi", viewPeople],
   ["berpikir", "compass", "Cara berpikir", viewThinking],
   ["cari", "search", "Cari & tanya", viewSearch],
   ["wawancara", "mic", "Wawancara", viewInterview],
@@ -233,7 +233,7 @@ async function viewHome(el) {
     ["episodes", "Cerita", st.episodes],
     ["retellings", "Diceritakan ulang", st.retellings],
     ["stream", "Working memory", st.stream_items],
-    ["entities", "Orang & tempat", st.entities],
+    ["entities", "Entitas & proyek", st.entities],
     ["facts", "Fakta", st.facts],
     ["kin", "Relasi keluarga", st.kin],
     ["principles", "Prinsip", st.principles],
@@ -301,8 +301,18 @@ async function viewHome(el) {
 
 async function showStatDetail(panel, key, label, onClose) {
   panel.innerHTML = `<div class="card" style="margin-top:12px"><div class="empty">Memuat ${esc(label.toLowerCase())}...</div></div>`;
-  const kinds = { person: "Orang", place: "Tempat", org: "Organisasi", event: "Peristiwa", object: "Benda", concept: "Konsep" };
-  const revKinds = { gray_zone: "Layak jadi cerita?", conflict: "Fakta bertentangan", entity_merge: "Orang yang sama?", quarantine: "Fakta meragukan", reflective: "Konfirmasi prinsip/sifat" };
+  const kinds = { person: "Orang", project: "Proyek & Layanan", component: "Komponen & Berkas", tool: "Tool & Teknologi", place: "Tempat", org: "Organisasi", event: "Peristiwa", object: "Benda", concept: "Konsep" };
+  const revKinds = { gray_zone: "Layak jadi cerita?", conflict: "Fakta bertentangan", entity_merge: "Entitas yang sama?", quarantine: "Fakta meragukan", reflective: "Konfirmasi prinsip/sifat" };
+  const revBadge = (r) => {
+    if (r.kind === "entity_merge") {
+      const ek = r.payload?.entity_kind;
+      if (ek === "project") return "Proyek yang sama?";
+      if (ek === "component") return "Komponen yang sama?";
+      if (ek === "tool") return "Tool yang sama?";
+      if (ek === "person") return "Orang yang sama?";
+    }
+    return revKinds[r.kind] || r.kind;
+  };
   let rows = [];
   let extraHead = "";
   let matchFn = () => true;
@@ -387,7 +397,7 @@ async function showStatDetail(panel, key, label, onClose) {
       extraHead = `<a class="btn small" href="#review">${icon("flag")} Buka halaman Review</a>`;
       matchFn = (r, q) => [r.summary, r.kind, r.payload?.text].some((x) => (x || "").toLowerCase().includes(q));
       renderFn = (list) => list.map((r) => `<div class="fact" data-rev="${esc(r.id)}">
-        <span class="badge">${esc(revKinds[r.kind] || r.kind)}</span> <span>${esc(r.summary)}</span>
+        <span class="badge">${esc(revBadge(r))}</span> <span>${esc(r.summary)}</span>
         ${r.payload?.text ? `<pre class="src small" style="margin:6px 0">${esc(r.payload.text)}</pre>` : ""}
         <div class="row" style="margin-top:6px"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button><button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button></div>
       </div>`).join("");
@@ -499,8 +509,8 @@ async function viewPeople(el) {
   }
   const order = Object.keys(rows).map(Number).sort((a, b) => b - a);
   const person = ({ n, e }) => `<div class="person ${e.inferred ? "inferred" : ""}" data-entity="${esc(n.id)}"><b>${esc(n.name)}</b><small>${esc(e.label)}</small></div>`;
-  const kinds = { person: "Orang", place: "Tempat", org: "Organisasi", event: "Peristiwa", object: "Benda", concept: "Konsep" };
-  el.innerHTML = `<h1>Orang & Silsilah</h1>
+  const kinds = { person: "Orang", project: "Proyek & Layanan", component: "Komponen & Berkas", tool: "Tool & Teknologi", place: "Tempat", org: "Organisasi", event: "Peristiwa", object: "Benda", concept: "Konsep" };
+  el.innerHTML = `<h1>Entitas & Relasi</h1>
     <div class="card">
       ${order.filter((l) => l > 0).map((l) => `<div class="tree-gen">${rows[l].map(person).join("")}</div>`).join("")}
       ${self ? `<div class="tree-gen"><div class="person self" data-entity="${esc(self.id)}"><b>${esc(self.name)}</b><small>subjek</small></div>${(rows[0] || []).map(person).join("")}</div>` : ""}
@@ -601,13 +611,23 @@ async function viewInterview(el) {
 
 async function viewReview(el) {
   const items = await api(`/api/subjects/${S()}/reviews`);
-  const kinds = { gray_zone: "Layak jadi cerita?", conflict: "Fakta bertentangan", entity_merge: "Orang yang sama?", quarantine: "Fakta meragukan", reflective: "Konfirmasi prinsip/sifat" };
+  const kinds = { gray_zone: "Layak jadi cerita?", conflict: "Fakta bertentangan", entity_merge: "Entitas yang sama?", quarantine: "Fakta meragukan", reflective: "Konfirmasi prinsip/sifat" };
+  const revBadge = (r) => {
+    if (r.kind === "entity_merge") {
+      const ek = r.payload?.entity_kind;
+      if (ek === "project") return "Proyek yang sama?";
+      if (ek === "component") return "Komponen yang sama?";
+      if (ek === "tool") return "Tool yang sama?";
+      if (ek === "person") return "Orang yang sama?";
+    }
+    return kinds[r.kind] || r.kind;
+  };
   const help = {
     gray_zone: "Setuju = angkat jadi cerita. Tolak = biarkan meluruh.", conflict: "Setuju = fakta baru menggantikan yang lama. Tolak = fakta baru dibuang.",
-    entity_merge: "Setuju = gabungkan. Tolak = orang berbeda.", quarantine: "Setuju = fakta dipakai. Tolak = dibuang.", reflective: "Setuju = aktif. Tolak = dibuang."
+    entity_merge: "Setuju = gabungkan jadi satu entitas. Tolak = entitas berbeda.", quarantine: "Setuju = fakta dipakai. Tolak = dibuang.", reflective: "Setuju = aktif. Tolak = dibuang."
   };
   el.innerHTML = `<h1>Review (${items.length})</h1><p class="muted">Keputusan Anda juga menjadi contoh bagi sistem untuk menilai data berikutnya.</p>
-    ${items.map((r) => `<div class="card" id="r-${esc(r.id)}"><span class="badge">${esc(kinds[r.kind] || r.kind)}</span><p>${esc(r.summary)}</p>
+    ${items.map((r) => `<div class="card" id="r-${esc(r.id)}"><span class="badge">${esc(revBadge(r))}</span><p>${esc(r.summary)}</p>
       ${r.payload?.text ? `<pre class="src">${esc(r.payload.text)}</pre>` : ""}<p class="small muted">${esc(help[r.kind] || "")}</p>
       <div class="row"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button><button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button></div></div>`).join("") || '<div class="empty">Tidak ada yang perlu ditinjau.</div>'}`;
   el.querySelectorAll("[data-d]").forEach((b) => {

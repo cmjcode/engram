@@ -149,5 +149,37 @@ fn citation_parser() {
     assert_eq!(crate::citations("a [ep:x1] b [ep:y2][ep:x1]"), vec!["x1", "y2"]);
 }
 
+#[tokio::test]
+async fn project_context_and_project_scoped_recall() {
+    let (r, p, _d) = setup().await;
+    let out = p
+        .ingest(IngestDoc {
+            subject: "budi".into(),
+            kind: SourceKind::AgentConversation,
+            title: "Diingat agent: antigravity:LLM-MEMORY".into(),
+            text: "Pada project LLM-MEMORY kita memutuskan memakai SurrealDB dan BAAI/bge-m3 untuk penyimpanan vektor.".into(),
+            meta: json!({"source": "antigravity:LLM-MEMORY"}),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(out.source.project.as_deref(), Some("LLM-MEMORY"));
+    p.process_source(&out.source.id, None).await.unwrap();
+
+    let pc = r.project_context("budi", "LLM-MEMORY", Some("penyimpanan vektor")).await.unwrap();
+    assert!(pc.found);
+    assert_eq!(pc.project, "LLM-MEMORY");
+    assert!(!pc.episodes.is_empty());
+    assert!(pc.context.contains("LLM-MEMORY"));
+
+    let q = RecallQuery {
+        project: Some("LLM-MEMORY".into()),
+        ..RecallQuery::new("budi", "penyimpanan vektor")
+    };
+    let res = r.recall(&q).await.unwrap();
+    assert!(res.found);
+    assert!(res.episodes.iter().any(|e| e.project.as_deref() == Some("LLM-MEMORY")));
+}
+
 #[allow(dead_code)]
 fn _unused(_: Value) {}

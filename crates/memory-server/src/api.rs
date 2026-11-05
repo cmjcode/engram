@@ -37,6 +37,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects/{s}/phases", get(phases))
         .route("/api/subjects/{s}/voice", get(voice))
         .route("/api/subjects/{s}/recall", post(recall))
+        .route("/api/subjects/{s}/project-context", get(project_context).post(project_context_post))
         .route("/api/subjects/{s}/ask", post(ask))
         .route("/api/subjects/{s}/reviews", get(reviews))
         .route("/api/reviews/{id}", post(resolve_review))
@@ -123,6 +124,7 @@ async fn upsert_subject(State(st): State<AppState>, Json(b): Json<SubjectIn>) ->
 
 async fn stats(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<Value> {
     check(&s)?;
+    let _ = st.rt.pipeline.sanitize_technical_entities(&s).await;
     let stats = st.rt.store.stats(&s).await?;
     let subject = st.rt.store.get_subject(&s).await?;
     let pending = st.rt.store.pending_job_count().await?;
@@ -201,6 +203,7 @@ struct Page {
 
 async fn entities(State(st): State<AppState>, Path(s): Path<String>, Query(p): Query<Page>) -> ApiResult<Vec<Entity>> {
     check(&s)?;
+    let _ = st.rt.pipeline.sanitize_technical_entities(&s).await;
     let kind = p.kind.as_deref().filter(|k| !k.is_empty()).map(EntityKind::parse);
     Ok(Json(st.rt.store.list_entities(&s, kind, p.limit.unwrap_or(200).min(1000), p.offset.unwrap_or(0)).await?))
 }
@@ -316,6 +319,29 @@ struct AskIn {
     as_of: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct ProjectContextQ {
+    project: String,
+    #[serde(default)]
+    task: Option<String>,
+}
+
+async fn project_context(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<ProjectContextQ>) -> ApiResult<memory_retrieve::ProjectContext> {
+    check(&s)?;
+    if q.project.trim().is_empty() {
+        return Err(ApiError::BadRequest("project kosong".into()));
+    }
+    Ok(Json(st.rt.retriever.project_context(&s, &q.project, q.task.as_deref()).await?))
+}
+
+async fn project_context_post(State(st): State<AppState>, Path(s): Path<String>, Json(q): Json<ProjectContextQ>) -> ApiResult<memory_retrieve::ProjectContext> {
+    check(&s)?;
+    if q.project.trim().is_empty() {
+        return Err(ApiError::BadRequest("project kosong".into()));
+    }
+    Ok(Json(st.rt.retriever.project_context(&s, &q.project, q.task.as_deref()).await?))
+}
+
 async fn ask(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<AskIn>) -> ApiResult<memory_retrieve::Answer> {
     check(&s)?;
     Ok(Json(st.rt.retriever.ask(&s, &b.question, b.persona, b.as_of.as_deref().filter(|d| !d.is_empty())).await?))
@@ -323,6 +349,7 @@ async fn ask(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<As
 
 async fn reviews(State(st): State<AppState>, Path(s): Path<String>, Query(p): Query<Page>) -> ApiResult<Vec<ReviewItem>> {
     check(&s)?;
+    let _ = st.rt.pipeline.sanitize_technical_entities(&s).await;
     let status = match p.status.as_deref() {
         Some("approved") => ReviewStatus::Approved,
         Some("rejected") => ReviewStatus::Rejected,
@@ -419,15 +446,28 @@ struct RememberIn {
     text: String,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 async fn remember(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<RememberIn>) -> ApiResult<Value> {
     check(&s)?;
-    let out = remember_text(&st, &s, &b.text, b.source.as_deref()).await?;
+    let out = remember_text_with_project(&st, &s, &b.text, b.source.as_deref(), b.project.as_deref()).await?;
     Ok(Json(out))
 }
 
+#[allow(dead_code)]
 pub(crate) async fn remember_text(st: &AppState, subject: &str, text: &str, source: Option<&str>) -> Result<Value, ApiError> {
+    remember_text_with_project(st, subject, text, source, None).await
+}
+
+pub(crate) async fn remember_text_with_project(
+    st: &AppState,
+    subject: &str,
+    text: &str,
+    source: Option<&str>,
+    project: Option<&str>,
+) -> Result<Value, ApiError> {
     if text.trim().is_empty() {
         return Err(ApiError::BadRequest("teks kosong".into()));
     }
@@ -439,8 +479,9 @@ pub(crate) async fn remember_text(st: &AppState, subject: &str, text: &str, sour
             kind: SourceKind::AgentConversation,
             title: format!("Diingat agent: {}", source.unwrap_or("percakapan")),
             text: text.to_string(),
+            project: project.map(str::to_string),
             occurred_from: Some(chrono::Utc::now().format("%Y-%m-%d").to_string()),
-            meta: json!({"via": "remember", "source": source}),
+            meta: json!({"via": "remember", "source": source, "project": project}),
             ..Default::default()
         })
         .await?;

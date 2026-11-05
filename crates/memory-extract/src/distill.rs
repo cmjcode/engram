@@ -61,8 +61,26 @@ pub fn greedy_clusters(vectors: &[Vec<f32>], threshold: f32) -> Vec<Vec<usize>> 
 
 fn spread_ok(eps: &[&Episode], min_evidence: usize, min_periods: usize) -> bool {
     let ids: HashSet<&str> = eps.iter().map(|e| e.id.as_str()).collect();
+    if ids.len() < min_evidence {
+        return false;
+    }
     let periods: HashSet<String> = eps.iter().filter_map(|e| period(e)).collect();
-    ids.len() >= min_evidence && periods.len() >= min_periods
+    if periods.len() >= min_periods {
+        return true;
+    }
+    let projects: HashSet<&str> = eps
+        .iter()
+        .filter_map(|e| e.project.as_deref().filter(|p| !p.trim().is_empty()))
+        .collect();
+    if projects.len() >= min_periods {
+        return true;
+    }
+    let sources: HashSet<&str> = eps
+        .iter()
+        .map(|e| e.source_id.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    sources.len() >= min_periods
 }
 
 fn unique<'a>(eps: &[&'a Episode]) -> Vec<&'a Episode> {
@@ -253,8 +271,8 @@ impl Pipeline {
             }
             let kind = sigs[0].1.kind;
             let statement = match kind {
-                DispositionKind::Trait => format!("Orang ini memiliki sifat: {label}"),
-                DispositionKind::Value => format!("Orang ini memegang nilai hidup: {label}"),
+                DispositionKind::Trait => format!("Subjek memiliki sifat atau kebiasaan kerja: {label}"),
+                DispositionKind::Value => format!("Subjek memegang nilai atau prinsip: {label}"),
             };
             let uniq = unique(&positive);
             let v = self.verify(&statement, &uniq).await?;

@@ -51,12 +51,29 @@ pub struct SourceCtx {
     pub id: String,
     pub kind: SourceKind,
     pub occurred_from: Option<String>,
+    pub project: Option<String>,
     pub created_at: String,
 }
 
 impl From<&Source> for SourceCtx {
     fn from(s: &Source) -> Self {
-        Self { id: s.id.clone(), kind: s.kind, occurred_from: s.occurred_from.clone(), created_at: s.created_at.clone() }
+        let project = s.project.clone().or_else(|| {
+            s.meta["source"]
+                .as_str()
+                .and_then(|raw| parse_source_tag(raw).1)
+                .or_else(|| {
+                    s.title
+                        .strip_prefix("Diingat agent: ")
+                        .and_then(|raw| parse_source_tag(raw).1)
+                })
+        });
+        Self {
+            id: s.id.clone(),
+            kind: s.kind,
+            occurred_from: s.occurred_from.clone(),
+            project,
+            created_at: s.created_at.clone(),
+        }
     }
 }
 
@@ -387,11 +404,12 @@ impl Pipeline {
             ext.entities
                 .iter()
                 .find(|e| normalize(&e.name) == normalize(name) || e.aliases.iter().any(|a| normalize(a) == normalize(name)))
-                .map(|e| EntityKind::parse(&e.kind))
+                .map(|e| EntityKind::parse_with_name(&e.kind, &e.name))
+                .or_else(|| EntityKind::infer_from_name(name))
                 .unwrap_or(EntityKind::Person)
         };
         for e in &ext.entities {
-            res.resolve(&e.name, EntityKind::parse(&e.kind), &e.aliases, &e.description, e.is_self, ep_id).await?;
+            res.resolve(&e.name, EntityKind::parse_with_name(&e.kind, &e.name), &e.aliases, &e.description, e.is_self, ep_id).await?;
         }
 
         // Kekerabatan.
@@ -569,6 +587,7 @@ impl Pipeline {
             emotions: ext.emotions.iter().map(|e| Emotion { label: e.label.clone(), intensity: e.intensity.clamp(0.0, 1.0) }).collect(),
             languages: memory_core::text::detect_languages(&seg.text),
             life_phase,
+            project: src.project.clone(),
             speaker: seg.speaker.clone(),
             status: if out.retelling { EpisodeStatus::Retelling } else { EpisodeStatus::Active },
             retelling_of: retelling_of.clone(),
@@ -628,7 +647,7 @@ impl Pipeline {
         let subject = self.ensure_subject(&item.subject, None).await?;
         let ctx = match &source {
             Some(s) => SourceCtx::from(s),
-            None => SourceCtx { id: item.source_id.clone(), kind: SourceKind::Lifelog, occurred_from: None, created_at: item.created_at.clone() },
+            None => SourceCtx { id: item.source_id.clone(), kind: SourceKind::Lifelog, occurred_from: None, project: None, created_at: item.created_at.clone() },
         };
         let seg = Segment { start: 0, end: 0, text: item.text.clone(), topic: String::new(), about_subject: true, speaker: item.speaker.clone(), significance: None, date: item.occurred_at.clone() };
         let observed = seg.date.clone().unwrap_or_else(|| item.created_at.chars().take(10).collect());

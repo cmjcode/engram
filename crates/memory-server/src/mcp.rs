@@ -31,9 +31,10 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "recall",
-            "description": "Cari memori subjek di engram (cerita, fakta, prinsip, sifat) dengan pencarian hybrid vektor+kata kunci+graph. Fakta diberi status 'berlaku sekarang' atau 'dulu' dengan rentang waktunya. Pakai from/to untuk periode tertentu, as_of untuk melihat memori sebagaimana pada tanggal itu.",
+            "description": "Cari memori subjek di engram (keputusan teknis, arsitektur proyek, cerita, fakta, prinsip kerja/hidup, sifat) dengan pencarian hybrid vektor+kata kunci+graph. Fakta diberi status 'berlaku sekarang' atau 'dulu' dengan rentang waktunya. Isi 'project' untuk memprioritaskan memori proyek/repositori tertentu, from/to untuk periode waktu, dan as_of untuk melihat memori sebagaimana pada tanggal itu.",
             "inputSchema": schema(json!({
-                "query": {"type": "string", "description": "Pertanyaan atau topik"},
+                "query": {"type": "string", "description": "Pertanyaan, topik, bug, atau nama fitur/proyek"},
+                "project": {"type": "string", "description": "Filter/prioritaskan nama proyek atau layanan (mis. 'LLM-MEMORY' atau 'BACKEND/api-master-sensor')"},
                 "subject": subject_prop(),
                 "from": date("Awal jendela waktu"),
                 "to": date("Akhir jendela waktu"),
@@ -43,24 +44,33 @@ pub fn tools() -> Value {
             }), &["query"])
         },
         {
+            "name": "project_context",
+            "description": "Ambil konteks lengkap sebuah proyek/repositori/layanan lintas AI tool: entitas proyek, fakta arsitektur & konfigurasi yang berlaku sekarang, keputusan teknis & bug fix, prinsip kerja subjek yang relevan, serta riwayat sesi terkait.",
+            "inputSchema": schema(json!({
+                "project": {"type": "string", "description": "Nama proyek, repositori, atau layanan (mis. 'LLM-MEMORY', 'BACKEND/api-data-warehouse')"},
+                "task": {"type": "string", "description": "Tugas atau topik spesifik yang sedang dikerjakan pada proyek tersebut (opsional)"},
+                "subject": subject_prop()
+            }), &["project"])
+        },
+        {
             "name": "who_is",
-            "description": "Identitas seseorang/tempat/organisasi dalam hidup subjek: alias, hubungan kekerabatan dengan subjek (pakde, bulik, sepupu, ...), fakta yang masih berlaku, riwayat, dan cerita yang menyebutnya.",
+            "description": "Detail entitas dalam memori subjek (orang, proyek/repositori, komponen/berkas, tool/teknologi, organisasi, tempat, konsep): alias, hubungan kekerabatan (bila orang), fakta yang masih berlaku, riwayat perubahan, dan episode yang menyebutnya.",
             "inputSchema": schema(json!({"name": {"type": "string"}, "subject": subject_prop()}), &["name"])
         },
         {
             "name": "timeline",
-            "description": "Urutan kronologis cerita dan perubahan fakta, bisa disaring per orang (entity), fase hidup (phase), atau periode.",
+            "description": "Urutan kronologis episode dan perubahan fakta, bisa disaring per entitas/proyek (entity), fase (phase), atau periode waktu.",
             "inputSchema": schema(json!({
                 "subject": subject_prop(),
-                "entity": {"type": "string", "description": "Nama orang/tempat"},
-                "phase": {"type": "string", "description": "Fase hidup, mis. 'masa kecil', 'dewasa muda'"},
+                "entity": {"type": "string", "description": "Nama orang/proyek/komponen/tempat"},
+                "phase": {"type": "string", "description": "Fase hidup atau fase proyek"},
                 "from": date("Awal"), "to": date("Akhir"),
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500}
             }), &[])
         },
         {
             "name": "principles",
-            "description": "Prinsip hidup / pola keputusan subjek yang didukung beberapa cerita nyata, diurutkan menurut relevansi dengan situasi yang diberikan.",
+            "description": "Prinsip kerja, standar engineering, preferensi, dan pola keputusan subjek yang didukung beberapa episode nyata lintas waktu/proyek, diurutkan menurut relevansi dengan situasi yang diberikan.",
             "inputSchema": schema(json!({"situation": {"type": "string"}, "subject": subject_prop()}), &[])
         },
         {
@@ -75,8 +85,13 @@ pub fn tools() -> Value {
         },
         {
             "name": "remember",
-            "description": "Simpan percakapan/cerita baru ke memori. Disaring pipeline: basa-basi tidak akan menjadi memori jangka panjang.",
-            "inputSchema": schema(json!({"text": {"type": "string"}, "source": {"type": "string", "description": "Asal teks, mis. 'antigravity:nama-project' atau nama aplikasi"}, "subject": subject_prop()}), &["text"])
+            "description": "Simpan keputusan teknis, arsitektur proyek, akar masalah bug, preferensi kerja, atau cerita/fakta pribadi baru ke memori lintas AI tool. Disaring pipeline agar basa-basi tidak menjadi memori jangka panjang.",
+            "inputSchema": schema(json!({
+                "text": {"type": "string"},
+                "source": {"type": "string", "description": "Asal teks dengan format '<client>:<nama-project>', mis. 'antigravity:LLM-MEMORY' atau 'claude-code:api-master-sensor'"},
+                "project": {"type": "string", "description": "Nama proyek/repositori terkait (opsional; otomatis diambil dari source bila berformat '<client>:<project>')"},
+                "subject": subject_prop()
+            }), &["text"])
         },
         {
             "name": "memory_gaps",
@@ -161,6 +176,7 @@ async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, Str
             let q = RecallQuery {
                 subject,
                 query: s("query").ok_or("query wajib diisi")?,
+                project: s("project"),
                 from: s("from"),
                 to: s("to"),
                 as_of: s("as_of"),
@@ -170,11 +186,16 @@ async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, Str
             let res = r.recall(&q).await.map_err(e)?;
             Ok(text_result(res.context.clone(), Some(json!(res))))
         }
+        "project_context" => {
+            let project = s("project").ok_or("project wajib diisi")?;
+            let pc = r.project_context(&subject, &project, s("task").as_deref()).await.map_err(e)?;
+            Ok(text_result(pc.context.clone(), Some(json!(pc))))
+        }
         "who_is" => {
             let name = s("name").ok_or("name wajib diisi")?;
             match r.who_is(&subject, &name).await.map_err(e)? {
                 Some(w) => {
-                    let mut t = format!("{} ({:?})", w.entity.name, w.entity.kind);
+                    let mut t = format!("{} ({})", w.entity.name, w.entity.kind.label_id());
                     if let Some(rel) = &w.relation_to_subject {
                         t.push_str(&format!(", {rel} dari subjek"));
                     }
@@ -234,7 +255,7 @@ async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, Str
             Ok(text_result(if t.is_empty() { "Belum ada data kekerabatan.".into() } else { t }, Some(json!(tree))))
         }
         "remember" => {
-            let v = crate::api::remember_text(st, &subject, &s("text").ok_or("text wajib diisi")?, s("source").as_deref()).await.map_err(|e| e.to_string())?;
+            let v = crate::api::remember_text_with_project(st, &subject, &s("text").ok_or("text wajib diisi")?, s("source").as_deref(), s("project").as_deref()).await.map_err(|e| e.to_string())?;
             Ok(text_result("Tersimpan; akan diproses pipeline memori.".into(), Some(v)))
         }
         "memory_gaps" => {
@@ -343,7 +364,7 @@ pub async fn handle(st: &AppState, msg: Value) -> Option<Value> {
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "engram", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Engram — memori seseorang. Panggil recall/who_is/timeline sebelum menjawab tentang hidupnya; selalu bedakan fakta yang masih berlaku dan riwayat; bila tool menjawab 'tidak ada catatan', jangan mengarang. Untuk berbicara sebagai orang itu, pakai persona_context."
+                "instructions": "Engram — memori AI lintas-tool milik subjek (proyek koding, keputusan arsitektur, pekerjaan, dan kehidupan pribadi). Panggil project_context/recall/who_is/timeline sebelum menjawab tentang proyek atau hidup subjek; selalu bedakan fakta yang masih berlaku dan riwayat; bila tool menjawab 'tidak ada catatan', jangan mengarang. Simpan keputusan teknis & konteks penting via remember dengan source='<client>:<project>'."
             })
         }
         "ping" => json!({}),

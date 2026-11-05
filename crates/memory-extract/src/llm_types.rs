@@ -69,7 +69,7 @@ pub struct EmotionOut {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EntityOut {
     pub name: String,
-    /// person | place | org | event | object | concept
+    /// person | place | org | project | component | tool | event | object | concept
     #[serde(default)]
     pub kind: String,
     #[serde(default)]

@@ -170,6 +170,7 @@ impl Importer {
                     occurred_to: d.occurred_to,
                     meta: d.meta,
                     batch_id: Some(batch_id.to_string()),
+                    ..Default::default()
                 })
                 .await?;
             if out.duplicate && out.job_id.is_none() {
