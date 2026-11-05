@@ -268,7 +268,8 @@ pub async fn run(config: &Path, client: &str, event: &str) -> anyhow::Result<()>
     let cwd = str_of(&payload, &["cwd", "workspaceRoot", "projectDir"]).or_else(|| payload["workspacePaths"].as_array().and_then(|a| a.first()).and_then(Value::as_str).map(str::to_string)).or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()));
     let (project, worktree) = project_fields(cwd.as_deref());
     let session_id = str_of(&payload, &["session_id", "sessionId", "conversationId", "conversation_id"]).unwrap_or_else(|| format!("{client}-{}", cwd.as_deref().map(|c| blake3::hash(c.as_bytes()).to_hex()[..12].to_string()).unwrap_or_else(|| "tanpa-cwd".into())));
-    let mut body = json!({"session_id": session_id, "project": project, "cwd": cwd, "worktree": worktree});
+    let spool_pending = std::fs::read_dir(spool_dir(&c)).map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "json")).count()).unwrap_or(0);
+    let mut body = json!({"session_id": session_id, "project": project, "cwd": cwd, "worktree": worktree, "spool_pending": spool_pending});
 
     let (server_event, timeout) = match event.as_str() {
         "context" | "session-start" => {

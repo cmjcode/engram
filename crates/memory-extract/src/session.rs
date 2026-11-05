@@ -449,6 +449,43 @@ impl Pipeline {
         Ok(out)
     }
 
+    /// Semua giliran sesi (spool aktif maupun yang sudah dirangkum) untuk tampilan detail
+    /// sesi: prompt, pemanggilan tool (input diringkas, respons dipangkas), jawaban asisten.
+    pub fn session_turns(&self, session_id: &str) -> Vec<Value> {
+        let sid = clean_session_id(session_id);
+        let dir = self.session_dir(&sid);
+        let Ok(rd) = std::fs::read_dir(&dir) else { return vec![] };
+        let mut files: Vec<(u32, bool, PathBuf)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let name = p.file_name()?.to_string_lossy().to_string();
+                let num: u32 = name.strip_prefix('p')?.split('.').next()?.parse().ok()?;
+                Some((num, name.ends_with(".done.jsonl"), p))
+            })
+            .collect();
+        files.sort();
+        files
+            .into_iter()
+            .map(|(n, done, p)| {
+                let lines: Vec<SpoolLine> = std::fs::read_to_string(&p).map(|s| s.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()).unwrap_or_default();
+                let items: Vec<Value> = lines
+                    .iter()
+                    .map(|l| match l {
+                        SpoolLine::Prompt { text, at } => json!({"kind": "prompt", "text": text, "at": at}),
+                        SpoolLine::Assistant { text, at } => json!({"kind": "assistant", "text": text, "at": at}),
+                        SpoolLine::Tool { id, name, input, response, failed, at, files_read, files_modified } => json!({
+                            "kind": "tool", "id": id, "name": name, "summary": describe_input(name, input),
+                            "response": truncate_chars(response, 600), "failed": failed, "at": at,
+                            "files_read": files_read, "files_modified": files_modified,
+                        }),
+                    })
+                    .collect();
+                json!({"prompt_number": n, "summarized": done, "items": items})
+            })
+            .collect()
+    }
+
     /// Hitung episode per sesi (dipanggil setelah sumber sesi diproses).
     pub async fn bump_session_episodes(&self, session_id: &str, n: u32) -> Result<()> {
         if let Some(mut s) = self.store.get_session(session_id).await? {

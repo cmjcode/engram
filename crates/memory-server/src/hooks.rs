@@ -26,7 +26,40 @@ use memory_retrieve::InjectOpts;
 use crate::{ApiError, ApiResult, AppState};
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/hooks/{client}/{event}", post(hook_event))
+    Router::new().route("/api/hooks/status", axum::routing::get(hook_status)).route("/api/hooks/{client}/{event}", post(hook_event))
+}
+
+/// Kesehatan integrasi: event hook terakhir per client, hook yang terpasang di berkas
+/// konfigurasi client, antrean spool offline yang dilaporkan hook, dan status server LLM/embedding.
+async fn hook_status(State(st): State<AppState>) -> ApiResult<Value> {
+    let clients: Value = { let m = st.hook_stats.lock().map_err(|e| ApiError::Internal(e.to_string()))?; json!(m.clone()) };
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    let installed = |path: std::path::PathBuf, needle: &str| -> Value {
+        match std::fs::read_to_string(&path) {
+            Ok(s) => json!({"file": path.display().to_string(), "installed": s.contains(needle), "legacy": s.contains("engram-auto-remember") || s.contains("engram-session-context")}),
+            Err(_) => json!({"file": path.display().to_string(), "installed": false, "legacy": false}),
+        }
+    };
+    let hooks_installed = json!({
+        "claude-code": installed(home.join(".claude/settings.json"), " hook claude-code "),
+        "gemini-cli": installed(home.join(".gemini/settings.json"), " hook gemini-cli "),
+        "antigravity": installed(home.join(".gemini/config/hooks.json"), " hook antigravity "),
+    });
+    let backends = match tokio::time::timeout(std::time::Duration::from_secs(4), st.rt.check_backends()).await {
+        Ok(Ok(())) => json!({"ok": true}),
+        Ok(Err(e)) => json!({"ok": false, "error": e}),
+        Err(_) => json!({"ok": false, "error": "server LLM/embedding tidak menjawab dalam 4 detik"}),
+    };
+    let sessions_active = st.rt.store.list_sessions(&st.resolve_subject(None).await, &[], 50).await?.into_iter().filter(|s| s.status == "active").count();
+    Ok(Json(json!({
+        "clients": clients,
+        "hooks_installed": hooks_installed,
+        "backends": backends,
+        "inject_enabled": st.rt.cfg.inject.enabled,
+        "redact_enabled": st.rt.cfg.privacy.redact,
+        "sessions_active": sessions_active,
+        "pending_jobs": st.rt.store.pending_job_count().await.unwrap_or(0),
+    })))
 }
 
 #[derive(Deserialize, Default)]
@@ -63,6 +96,9 @@ pub struct HookIn {
     pub file_path: Option<String>,
     #[serde(default)]
     pub max_chars: Option<usize>,
+    /// Jumlah event yang masih tertahan di spool offline hook (dilaporkan hook).
+    #[serde(default)]
+    pub spool_pending: Option<u64>,
 }
 
 fn clean_client(c: &str) -> String {
@@ -77,6 +113,17 @@ async fn hook_event(State(st): State<AppState>, Path((client, event)): Path<(Str
     }
     let client = clean_client(&client);
     let project = b.project.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
+    if let Ok(mut m) = st.hook_stats.lock() {
+        let entry = m.entry(client.clone()).or_insert_with(|| json!({"events": 0}));
+        let n = entry["events"].as_u64().unwrap_or(0) + 1;
+        entry["events"] = json!(n);
+        entry["last_event"] = json!(event);
+        entry["last_at"] = json!(memory_core::ids::now_rfc3339());
+        entry["last_project"] = json!(project);
+        if let Some(sp) = b.spool_pending {
+            entry["spool_pending"] = json!(sp);
+        }
+    }
     let sid = || b.session_id.clone().filter(|s| !s.trim().is_empty()).ok_or_else(|| ApiError::BadRequest("session_id wajib diisi".into()));
     let p = &st.rt.pipeline;
     let out = match event.as_str() {

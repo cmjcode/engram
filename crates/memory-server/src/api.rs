@@ -30,6 +30,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects/{s}/lessons", get(lessons))
         .route("/api/subjects/{s}/context/inject", get(context_inject))
         .route("/api/subjects/{s}/sessions", get(sessions))
+        .route("/api/subjects/{s}/projects", get(projects_overview))
+        .route("/api/subjects/{s}/projects/files", get(project_files))
+        .route("/api/sessions/{id}", get(session_detail))
         .route("/api/subjects/{s}/stream", get(stream_items))
         .route("/api/subjects/{s}/entities", get(entities))
         .route("/api/subjects/{s}/entities/{id}", get(entity))
@@ -209,6 +212,10 @@ async fn episodes(
         Some("all") => None,
         _ => Some(EpisodeStatus::Active),
     };
+    let projects = match p.project.as_deref().filter(|x| !x.trim().is_empty()) {
+        Some(pr) => st.rt.store.project_names(&s, pr).await?,
+        None => vec![],
+    };
     Ok(Json(
         st.rt
             .store
@@ -216,6 +223,10 @@ async fn episodes(
                 &s,
                 &EpisodeFilter {
                     status,
+                    projects,
+                    obs_type: p.obs_type.clone().filter(|x| !x.is_empty()),
+                    session_id: p.session_id.clone().filter(|x| !x.is_empty()),
+                    newest_first: p.newest_first.unwrap_or(false),
                     limit: p.limit.unwrap_or(500).min(2000),
                     offset: p.offset.unwrap_or(0),
                     ..Default::default()
@@ -279,6 +290,14 @@ struct Page {
     status: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    obs_type: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    newest_first: Option<bool>,
 }
 
 async fn entities(
@@ -786,6 +805,111 @@ async fn sessions(State(st): State<AppState>, Path(s): Path<String>, Query(q): Q
         None => vec![],
     };
     Ok(Json(st.rt.store.list_sessions(&s, &names, q.limit.unwrap_or(100).min(500)).await?))
+}
+
+/// Ringkasan per proyek untuk beranda: aktivitas terakhir, observasi 7 hari, sesi terakhir,
+/// langkah berikut dari ringkasan sesi terakhir, jumlah pelajaran.
+async fn projects_overview(State(st): State<AppState>, Path(s): Path<String>) -> ApiResult<Value> {
+    check(&s)?;
+    let eps = st
+        .rt
+        .store
+        .list_episodes(&s, &EpisodeFilter { status: Some(EpisodeStatus::Active), newest_first: true, limit: 3000, ..Default::default() })
+        .await?;
+    let sessions = st.rt.store.list_sessions(&s, &[], 500).await?;
+    let lessons = st.rt.store.list_lessons(&s, &[], Some("active"), 5000).await?;
+    let week_ago = (chrono::Utc::now() - chrono::Duration::days(7)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let key = |p: &str| memory_core::project::project_key(p);
+    let mut map: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for e in &eps {
+        let Some(pr) = e.project.as_deref().filter(|p| !p.trim().is_empty()) else { continue };
+        let k = key(pr);
+        names.entry(k.clone()).or_insert_with(|| pr.to_string());
+        let v = map.entry(k).or_insert_with(|| json!({"episodes": 0, "last_week": 0, "by_type": {}, "last_activity": "", "sessions": 0, "lessons": 0}));
+        v["episodes"] = json!(v["episodes"].as_u64().unwrap_or(0) + 1);
+        if e.created_at >= week_ago {
+            v["last_week"] = json!(v["last_week"].as_u64().unwrap_or(0) + 1);
+        }
+        if v["last_activity"].as_str().unwrap_or("") < e.created_at.as_str() {
+            v["last_activity"] = json!(e.created_at);
+        }
+        let t = e.obs_type.clone().unwrap_or_else(|| "cerita".into());
+        let n = v["by_type"][&t].as_u64().unwrap_or(0) + 1;
+        v["by_type"][&t] = json!(n);
+        if e.obs_type.as_deref() == Some("session_summary") && v.get("last_summary").is_none() {
+            let next = e.text.lines().find_map(|l| l.strip_prefix("Langkah berikut:")).map(str::trim).unwrap_or("").to_string();
+            v["last_summary"] = json!({"id": e.id, "title": e.title, "at": e.created_at, "next_steps": next, "summary": e.summary});
+        }
+        if v.get("latest").is_none() {
+            v["latest"] = json!({"id": e.id, "title": e.title, "obs_type": e.obs_type, "at": e.created_at});
+        }
+    }
+    for se in &sessions {
+        let Some(pr) = se.project.as_deref() else { continue };
+        let k = key(pr);
+        names.entry(k.clone()).or_insert_with(|| pr.to_string());
+        let v = map.entry(k).or_insert_with(|| json!({"episodes": 0, "last_week": 0, "by_type": {}, "last_activity": "", "sessions": 0, "lessons": 0}));
+        v["sessions"] = json!(v["sessions"].as_u64().unwrap_or(0) + 1);
+        if v.get("last_session").is_none() {
+            v["last_session"] = json!({"id": se.id, "client": se.client, "at": se.last_activity_at, "status": se.status, "first_prompt": se.first_prompt, "tool_uses": se.tool_uses});
+        }
+        if v["last_activity"].as_str().unwrap_or("") < se.last_activity_at.as_str() {
+            v["last_activity"] = json!(se.last_activity_at);
+        }
+    }
+    for l in &lessons {
+        let Some(pr) = l.project.as_deref() else { continue };
+        let k = key(pr);
+        names.entry(k.clone()).or_insert_with(|| pr.to_string());
+        let v = map.entry(k).or_insert_with(|| json!({"episodes": 0, "last_week": 0, "by_type": {}, "last_activity": "", "sessions": 0, "lessons": 0}));
+        v["lessons"] = json!(v["lessons"].as_u64().unwrap_or(0) + 1);
+    }
+    let mut out: Vec<Value> = map.into_iter().map(|(k, mut v)| { v["project"] = json!(names.get(&k).cloned().unwrap_or(k)); v }).collect();
+    out.sort_by(|a, b| b["last_activity"].as_str().unwrap_or("").cmp(a["last_activity"].as_str().unwrap_or("")));
+    let no_project = eps.iter().filter(|e| e.project.is_none()).count();
+    Ok(Json(json!({"projects": out, "episodes_without_project": no_project})))
+}
+
+/// Peta berkas -> observasi yang menyentuhnya, untuk tab Berkas halaman proyek.
+async fn project_files(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<ProjectQ>) -> ApiResult<Value> {
+    check(&s)?;
+    let names = match q.project.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(p) => st.rt.store.project_names(&s, p).await?,
+        None => return Err(ApiError::BadRequest("project wajib diisi".into())),
+    };
+    let eps = st
+        .rt
+        .store
+        .list_episodes(&s, &EpisodeFilter { status: Some(EpisodeStatus::Active), projects: names, newest_first: true, limit: 3000, ..Default::default() })
+        .await?;
+    let mut files: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    for e in &eps {
+        for (f, modified) in e.files_modified.iter().map(|f| (f, true)).chain(e.files_read.iter().map(|f| (f, false))) {
+            let v = files.entry(f.clone()).or_insert_with(|| json!({"path": f, "modified": 0, "read": 0, "episodes": []}));
+            let k = if modified { "modified" } else { "read" };
+            v[k] = json!(v[k].as_u64().unwrap_or(0) + 1);
+            if v["episodes"].as_array().is_some_and(|a| a.len() < 8 && !a.iter().any(|x| x["id"] == e.id)) {
+                v["episodes"].as_array_mut().unwrap().push(json!({"id": e.id, "title": e.title, "obs_type": e.obs_type, "at": e.created_at.chars().take(10).collect::<String>(), "modified": modified}));
+            }
+        }
+    }
+    let mut out: Vec<Value> = files.into_values().collect();
+    out.sort_by(|a, b| (b["modified"].as_u64().unwrap_or(0) * 3 + b["read"].as_u64().unwrap_or(0)).cmp(&(a["modified"].as_u64().unwrap_or(0) * 3 + a["read"].as_u64().unwrap_or(0))));
+    Ok(Json(json!({"files": out})))
+}
+
+/// Detail sesi: record sesi, episode yang lahir darinya, dan giliran mentah dari spool.
+async fn session_detail(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let sid = memory_extract::session::clean_session_id(&id);
+    let session = st.rt.store.get_session(&sid).await?.ok_or_else(|| ApiError::NotFound("sesi tidak ada".into()))?;
+    let episodes = st
+        .rt
+        .store
+        .list_episodes(&session.subject, &EpisodeFilter { status: None, session_id: Some(sid.clone()), newest_first: false, limit: 500, ..Default::default() })
+        .await?;
+    let turns = st.rt.pipeline.session_turns(&sid);
+    Ok(Json(json!({"session": session, "episodes": episodes, "turns": turns})))
 }
 
 #[derive(Deserialize)]

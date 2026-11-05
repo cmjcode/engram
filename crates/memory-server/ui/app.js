@@ -31,7 +31,27 @@ const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICO
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const $ = (sel, el = document) => el.querySelector(sel);
 
-const state = { subject: localStorage.getItem("subject") || "", subjects: [] };
+const state = { subject: localStorage.getItem("subject") || "", subjects: [], mode: localStorage.getItem("mode") || "kerja", project: localStorage.getItem("project") || "", projects: [] };
+const P = () => state.project;
+const pq = (prefix = "?") => (state.project ? `${prefix}project=${encodeURIComponent(state.project)}` : "");
+const OBS = { decision: "keputusan", bugfix: "bugfix", discovery: "temuan", feature: "fitur", refactor: "refactor", change: "perubahan", session_summary: "sesi", lesson: "pelajaran" };
+const typeBadge = (t) => (t ? `<span class="badge t-${esc(t)}">${esc(OBS[t] || t)}</span>` : `<span class="badge t-story">cerita</span>`);
+const when = (s) => (s || "").slice(0, 16).replace("T", " ");
+const ago = (iso) => {
+  if (!iso) return "";
+  const d = (Date.now() - new Date(iso).getTime()) / 60000;
+  if (d < 1) return "baru saja";
+  if (d < 60) return `${Math.floor(d)} mnt lalu`;
+  if (d < 1440) return `${Math.floor(d / 60)} jam lalu`;
+  return `${Math.floor(d / 1440)} hari lalu`;
+};
+async function copyText(text, msg = "Disalin") {
+  try { await navigator.clipboard.writeText(text); toast(msg); return; } catch (e) { /* WebView tanpa izin clipboard */ }
+  const ta = document.createElement("textarea");
+  ta.value = text; document.body.appendChild(ta); ta.select();
+  try { document.execCommand("copy"); toast(msg); } catch (e) { toast("Tidak bisa menyalin; pilih teks secara manual"); }
+  ta.remove();
+}
 let routeSeq = 0;
 
 function toast(msg) {
@@ -61,22 +81,70 @@ async function api(path, opts = {}) {
 }
 const S = () => encodeURIComponent(state.subject);
 
+// Mode "kerja" menonjolkan proyek, sesi, dan review; mode "personal" menambah
+// wawancara, silsilah, dan statistik biografi. Tampilan tetap bisa dibuka lewat URL.
 const ROUTES = [
-  ["ringkasan", "home", "Ringkasan", viewHome],
-  ["timeline", "clock", "Timeline", viewTimeline],
-  ["orang", "users", "Entitas & Relasi", viewPeople],
-  ["berpikir", "compass", "Cara berpikir", viewThinking],
-  ["cari", "search", "Cari & tanya", viewSearch],
-  ["wawancara", "mic", "Wawancara", viewInterview],
-  ["sesi", "code", "Sesi & pelajaran", viewSessions],
-  ["review", "flag", "Review", viewReview],
-  ["sumber", "inbox", "Sumber & import", viewSources],
+  ["proyek", "home", "Proyek", viewProjects, "kerja"],
+  ["sesi", "code", "Sesi & pelajaran", viewSessions, "kerja"],
+  ["cari", "search", "Cari & tanya", viewSearch, "semua"],
+  ["review", "flag", "Review", viewReview, "semua"],
+  ["orang", "users", "Orang & organisasi", viewPeople, "semua"],
+  ["timeline", "clock", "Timeline", viewTimeline, "semua"],
+  ["berpikir", "compass", "Cara berpikir", viewThinking, "semua"],
+  ["wawancara", "mic", "Wawancara", viewInterview, "personal"],
+  ["sumber", "inbox", "Sumber & import", viewSources, "semua"],
+  ["ringkasan", "book", "Statistik & perawatan", viewHome, "personal"],
 ];
+const DEFAULT_ROUTE = () => (state.mode === "personal" ? "ringkasan" : "proyek");
 
 function renderNav() {
-  const cur = (location.hash.slice(1).split("/")[0]) || "ringkasan";
-  $("#nav").innerHTML = ROUTES.map(([k, ic, label]) => `<a href="#${k}" class="${k === cur ? "active" : ""}">${icon(ic)}<span>${label}</span></a>`).join("");
+  const cur = (location.hash.slice(1).split("/")[0]) || DEFAULT_ROUTE();
+  const show = ROUTES.filter(([, , , , tag]) => tag === "semua" || tag === state.mode || (state.mode === "personal" && tag === "kerja"));
+  $("#nav").innerHTML = show.map(([k, ic, label]) => `<a href="#${k}" class="${k === cur ? "active" : ""}">${icon(ic)}<span>${label}</span></a>`).join("")
+    + `<span class="mode" role="group" aria-label="Mode"><button class="${state.mode === "kerja" ? "active" : ""}" data-mode="kerja">Kerja</button><button class="${state.mode === "personal" ? "active" : ""}" data-mode="personal">Personal</button></span>`;
+  $("#nav").querySelectorAll("[data-mode]").forEach((b) => { b.onclick = () => { state.mode = b.dataset.mode; localStorage.setItem("mode", state.mode); if (!location.hash || location.hash === "#proyek" || location.hash === "#ringkasan") location.hash = "#" + DEFAULT_ROUTE(); route(); }; });
 }
+
+async function loadProjects() {
+  try {
+    const r = await api(`/api/subjects/${S()}/projects`);
+    state.projects = r.projects || [];
+  } catch (e) { state.projects = []; }
+  const sel = $("#project-select");
+  if (!sel) return;
+  const names = state.projects.map((p) => p.project);
+  if (state.project && !names.includes(state.project)) names.unshift(state.project);
+  sel.hidden = names.length === 0;
+  sel.innerHTML = `<option value="">Semua proyek</option>` + names.map((n) => `<option value="${esc(n)}" ${n === state.project ? "selected" : ""}>${esc(n)}</option>`).join("");
+}
+
+// Palet cepat (Cmd/Ctrl+K): cari memori atau lompat ke tampilan.
+function openPalette() {
+  if ($("#palette")) { $("#palette").remove(); return; }
+  const box = document.createElement("div");
+  box.id = "palette";
+  box.innerHTML = `<div class="pal-card"><input type="search" id="pal-q" placeholder="Cari memori, atau ketik nama tampilan..." autocomplete="off"><div id="pal-list"></div><div class="small muted">Enter = cari &nbsp;·&nbsp; Esc = tutup</div></div>`;
+  document.body.appendChild(box);
+  const q = $("#pal-q"), list = $("#pal-list");
+  const draw = () => {
+    const v = q.value.trim().toLowerCase();
+    const routes = ROUTES.filter(([k, , label]) => !v || label.toLowerCase().includes(v) || k.includes(v)).slice(0, 5);
+    const projs = state.projects.filter((p) => v && p.project.toLowerCase().includes(v)).slice(0, 5);
+    list.innerHTML = projs.map((p) => `<a href="#proyek/${encodeURIComponent(p.project)}" class="pal-item">${icon("home")} Proyek ${esc(p.project)}</a>`).join("")
+      + routes.map(([k, ic, label]) => `<a href="#${k}" class="pal-item">${icon(ic)} ${esc(label)}</a>`).join("")
+      + (v ? `<a href="#cari/${encodeURIComponent(q.value.trim())}" class="pal-item">${icon("search")} Cari "${esc(q.value.trim())}"</a>` : "");
+    list.querySelectorAll("a").forEach((a) => { a.onclick = () => box.remove(); });
+  };
+  q.oninput = draw;
+  q.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); const first = list.querySelector("a"); if (q.value.trim()) location.hash = `#cari/${encodeURIComponent(q.value.trim())}`; else if (first) first.click(); box.remove(); }
+    if (e.key === "Escape") box.remove();
+  };
+  box.onclick = (e) => { if (e.target === box) box.remove(); };
+  draw();
+  q.focus();
+}
+document.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); } });
 
 function hydrateIcons(root = document) {
   root.querySelectorAll("[data-icon]").forEach((el) => { el.innerHTML = icon(el.dataset.icon); });
@@ -86,7 +154,7 @@ async function route() {
   const seq = ++routeSeq;
   renderNav();
   const [name, arg] = location.hash.slice(1).split("/");
-  const r = ROUTES.find((x) => x[0] === (name || "ringkasan")) || ROUTES[0];
+  const r = ROUTES.find((x) => x[0] === (name || DEFAULT_ROUTE())) || ROUTES[0];
   const view = $("#view");
   if (!state.subject) {
     view.innerHTML = `<div class="empty"><h1>Selamat datang</h1><p>Mulai dengan menambahkan orang yang memorinya ingin disimpan.</p>
@@ -97,7 +165,8 @@ async function route() {
   const stage = document.createElement("div");
   view.innerHTML = `<div class="empty">Memuat...</div>`;
   try {
-    await r[3](stage, arg && decodeURIComponent(arg));
+    if (name === "proyek" && arg) await viewProject(stage, decodeURIComponent(arg));
+    else await r[3](stage, arg && decodeURIComponent(arg));
     if (seq !== routeSeq) return;
     view.replaceChildren(...stage.childNodes);
   } catch (e) {
@@ -208,8 +277,165 @@ async function showEntity(id) {
     ${w.current_facts.length ? `<h3>Berlaku sekarang</h3>${w.current_facts.map(factLine).join("")}` : ""}
     ${w.history.length ? `<h3>Riwayat</h3>${w.history.map(factLine).join("")}` : ""}
     ${kin ? `<h3>Kekerabatan</h3><ul>${kin}</ul>` : ""}
+    ${["person", "org", "project"].includes(e.kind) ? `<div class="row"><button id="briefing-btn">${icon("book")} Briefing sebelum bertemu/bekerja</button></div><pre class="src" id="briefing" hidden></pre>` : ""}
     <h3>Cerita (${w.episodes.length})</h3>
     ${w.episodes.map((ep) => `<div class="tl-item" data-ep="${esc(ep.id)}"><span class="tl-time">${esc(ep.time)}</span><span>${esc(ep.title || ep.excerpt)}</span></div>`).join("") || '<p class="muted">Belum ada.</p>'}`);
+  const bb = $("#briefing-btn");
+  if (bb) bb.onclick = () => {
+    // Ringkasan siap pakai: siapa/apa, hubungan, yang berlaku sekarang, riwayat, 8 interaksi terakhir.
+    const lines = [`Briefing: ${e.name}${w.relation_to_subject ? ` (${w.relation_to_subject})` : ""} - ${new Date().toLocaleDateString("id-ID")}`];
+    if (e.description) lines.push(e.description);
+    if (w.current_facts.length) { lines.push("", "Berlaku sekarang:"); w.current_facts.slice(0, 12).forEach((f) => lines.push(`- ${f.statement}`)); }
+    if (w.history.length) { lines.push("", "Riwayat:"); w.history.slice(0, 6).forEach((f) => lines.push(`- ${f.statement} (${f.valid_from || "?"} - ${f.valid_to || "?"})`)); }
+    if (w.episodes.length) { lines.push("", "Interaksi/catatan terakhir:"); w.episodes.slice(-8).reverse().forEach((ep) => lines.push(`- ${ep.time}: ${ep.title || ep.excerpt}`)); }
+    const text = lines.join("\n");
+    const pre = $("#briefing"); pre.textContent = text; pre.hidden = false;
+    copyText(text, "Briefing disalin");
+  };
+}
+
+// Detail sesi: alur giliran (prompt -> tool -> observasi -> jawaban) + handoff.
+async function showSession(id) {
+  const r = await api(`/api/sessions/${encodeURIComponent(id)}`);
+  const s = r.session;
+  const byPrompt = {};
+  for (const e of r.episodes) (byPrompt[e.prompt_number || 0] ||= []).push(e);
+  const summary = [...r.episodes].reverse().find((e) => e.obs_type === "session_summary");
+  const turns = r.turns.map((t) => `<div class="turn"><div class="turn-head">Prompt ${t.prompt_number}${t.summarized ? "" : ' <span class="badge warn">belum dirangkum</span>'}</div>
+    ${t.items.map((it) => it.kind === "prompt" ? `<div class="turn-item prompt"><b>Pengguna</b><div>${esc(it.text)}</div></div>`
+      : it.kind === "assistant" ? `<div class="turn-item assistant"><b>Agent</b><div>${esc(it.text.slice(0, 1500))}${it.text.length > 1500 ? "…" : ""}</div></div>`
+      : `<div class="turn-item tool ${it.failed ? "failed" : ""}"><b>${esc(it.name.split("__").pop())}</b> <span class="small muted">${esc(it.summary)}</span>${it.response ? `<pre class="src small">${esc(it.response.slice(0, 400))}</pre>` : ""}</div>`).join("")}
+    ${(byPrompt[t.prompt_number] || []).map((e) => `<div class="turn-item born" data-ep="${esc(e.id)}">${typeBadge(e.obs_type)} <b>${esc(e.title)}</b><div class="small muted">${esc(e.summary)}</div></div>`).join("")}
+  </div>`).join("");
+  const handoff = () => {
+    const lines = [`Handoff sesi ${s.client} - proyek ${s.project || "-"} (${when(s.last_activity_at)})`, `Tujuan: ${s.first_prompt || "-"}`];
+    if (summary) {
+      lines.push("", summary.text.trim());
+      lines.push("", `Rujukan: ep:${summary.id}`);
+    }
+    const obs = r.episodes.filter((e) => e.obs_type && e.obs_type !== "session_summary");
+    if (obs.length) { lines.push("", "Observasi:"); obs.forEach((e) => lines.push(`- [${OBS[e.obs_type] || e.obs_type}] ${e.title} (ep:${e.id})`)); }
+    return lines.join("\n");
+  };
+  openDrawer(`Sesi ${s.client}: ${s.project || "tanpa proyek"}`, `
+    <p class="small muted">${esc(when(s.started_at))} – ${esc(when(s.last_activity_at))} · ${s.prompt_counter} prompt · ${s.tool_uses} tool · ${s.episodes} episode · <span class="badge ${s.status === "active" ? "now" : "past"}">${esc(s.status)}</span></p>
+    ${s.cwd ? `<p class="small muted">${esc(s.cwd)}${s.worktree ? " · worktree " + esc(s.worktree) : ""}</p>` : ""}
+    <div class="row"><button class="primary" id="handoff-btn">${icon("download")} Salin handoff</button>${summary ? `<button data-ep="${esc(summary.id)}">${icon("book")} Ringkasan sesi</button>` : ""}</div>
+    ${summary ? `<div class="card"><pre class="src">${esc(summary.text)}</pre></div>` : ""}
+    <h3>Alur giliran</h3>${turns || '<p class="muted">Spool giliran tidak ditemukan (sesi lama atau vault dipindah).</p>'}`);
+  $("#handoff-btn").onclick = () => copyText(handoff(), "Handoff disalin");
+}
+
+// Panel kesehatan integrasi: apakah sesi benar-benar terekam.
+async function healthPanel() {
+  let h;
+  try { h = await api("/api/hooks/status"); } catch (e) { return `<div class="card"><span class="badge conflict">status integrasi tidak tersedia</span> ${esc(e.message)}</div>`; }
+  const inst = h.hooks_installed || {};
+  const cl = h.clients || {};
+  const names = { "claude-code": "Claude Code", "gemini-cli": "Gemini CLI", antigravity: "Antigravity" };
+  const row = (k) => {
+    const i = inst[k] || {}, c = cl[k];
+    const st = c ? `<span class="badge now">event terakhir ${esc(ago(c.last_at))}</span> <span class="small muted">${esc(c.last_event)}${c.last_project ? " · " + esc(c.last_project) : ""}${c.spool_pending ? ` · <span class="badge warn">${c.spool_pending} tertahan di spool</span>` : ""}</span>`
+      : i.installed ? '<span class="badge past">belum ada event sejak server hidup</span>' : i.legacy ? '<span class="badge warn">hook lama (Python); jalankan ulang install-mcp.sh</span>' : '<span class="badge conflict">hook tidak terpasang</span>';
+    return `<div class="health-row"><b>${names[k]}</b>${st}</div>`;
+  };
+  const be = h.backends?.ok ? '<span class="badge now">LLM & embedding hidup</span>' : `<span class="badge conflict">LLM/embedding mati</span> <span class="small muted">${esc(h.backends?.error || "")}</span>`;
+  return `<div class="card health"><div class="health-grid">${["claude-code", "gemini-cli", "antigravity"].map(row).join("")}
+    <div class="health-row"><b>Server</b>${be}</div>
+    <div class="health-row"><b>Antrean</b><span class="small">${h.pending_jobs} job menunggu · ${h.sessions_active} sesi aktif · injeksi konteks ${h.inject_enabled ? "aktif" : "mati"} · redaksi ${h.redact_enabled ? "aktif" : "mati"}</span></div></div>
+    ${Object.values(inst).some((i) => i.installed) ? "" : `<p class="small" style="margin:8px 0 0">Pasang hook: <code>scripts/install-mcp.sh --client claude</code> (perlu binary <code>engram</code> di PATH), lalu buka sesi Claude Code baru.</p>`}</div>`;
+}
+
+// Beranda mode kerja: proyek aktif, bukan statistik biografi.
+async function viewProjects(el) {
+  const [r, health] = await Promise.all([api(`/api/subjects/${S()}/projects`), healthPanel()]);
+  state.projects = r.projects;
+  const cards = r.projects.map((p) => {
+    const types = Object.entries(p.by_type || {}).filter(([k]) => k !== "cerita").sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${typeBadge(k)}<span class="small">${n}</span>`).join(" ");
+    const ls = p.last_session, sm = p.last_summary;
+    return `<div class="card proj" data-proj="${esc(p.project)}" role="button" tabindex="0">
+      <div class="proj-head"><h3>${esc(p.project)}</h3><span class="small muted">${esc(ago(p.last_activity))}</span></div>
+      <div class="small">${p.last_week} observasi 7 hari · ${p.episodes} total · ${p.lessons} pelajaran · ${p.sessions} sesi</div>
+      <div class="proj-types">${types}</div>
+      ${sm?.next_steps ? `<div class="next"><b>Langkah berikut:</b> ${esc(sm.next_steps)}</div>` : sm ? `<div class="next muted small">${esc(sm.title)}</div>` : ""}
+      ${ls ? `<div class="small muted">Sesi terakhir: ${esc(ls.client)} · ${esc(ago(ls.at))} · ${esc(ls.status)}${ls.first_prompt ? " · " + esc(ls.first_prompt.slice(0, 80)) : ""}</div>` : ""}
+    </div>`;
+  }).join("");
+  el.innerHTML = `<h1>Proyek</h1>
+    <h2>Integrasi</h2>${health}
+    <h2>Proyek aktif</h2>
+    ${cards ? `<div class="grid proj-grid">${cards}</div>` : `<div class="card empty-state"><p><b>Belum ada memori proyek.</b></p><ol class="small">
+      <li>Pasang hook: <code>scripts/install-mcp.sh --client claude</code> (atau gemini/antigravity).</li>
+      <li>Buka sesi baru di agent dan kerjakan sesuatu; tiap giliran direkam otomatis.</li>
+      <li>Atau impor memori yang sudah ada: <code>engram import-claude-memory --all --apply</code>, <code>engram repo import &lt;repo&gt;</code>.</li></ol></div>`}
+    ${r.episodes_without_project ? `<p class="small muted">${r.episodes_without_project} memori tanpa proyek (cerita personal atau sumber lama) ada di <a href="#timeline">Timeline</a>.</p>` : ""}`;
+  el.querySelectorAll("[data-proj]").forEach((c) => {
+    const go = () => { location.hash = `#proyek/${encodeURIComponent(c.dataset.proj)}`; };
+    c.onclick = go;
+    c.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
+  });
+}
+
+// Halaman satu proyek: Konteks, Keputusan, Konvensi, Berkas, Sesi, Fakta.
+async function viewProject(el, name) {
+  const q = `?project=${encodeURIComponent(name)}`;
+  const tabs = [["konteks", "Konteks untuk agent"], ["keputusan", "Keputusan"], ["konvensi", "Konvensi & jebakan"], ["berkas", "Berkas"], ["sesi", "Sesi & observasi"], ["fakta", "Fakta"]];
+  const cur = sessionStorage.getItem("proj-tab") || "konteks";
+  el.innerHTML = `<p class="small"><a href="#proyek">Proyek</a> / <b>${esc(name)}</b></p><h1>${esc(name)}</h1>
+    <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === cur ? "active" : ""}">${esc(l)}</button>`).join("")}</div><div id="tab-body"><div class="empty">Memuat...</div></div>`;
+  const body = $("#tab-body", el);
+  const render = async (tab) => {
+    sessionStorage.setItem("proj-tab", tab);
+    el.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    body.innerHTML = '<div class="empty">Memuat...</div>';
+    try {
+      if (tab === "konteks") {
+        const c = await api(`/api/subjects/${S()}/context/inject${q}`);
+        body.innerHTML = `<div class="card"><div class="row"><button class="primary" id="copy-ctx">${icon("download")} Salin konteks</button><span class="small muted">${c.found ? `${c.chars} karakter · ${c.observations} observasi · ${c.sessions} sesi · ${c.reductions} pengurangan agar muat` : "Belum ada memori untuk proyek ini."}</span></div>
+          <p class="small muted">Blok ini persis yang disuntik ke agent saat sesi dimulai (hook SessionStart). Agent lalu mengambil detail per ID dengan get_episodes.</p>
+          <pre class="src" id="ctx-pre">${citeLinks(c.text || "")}</pre></div>`;
+        $("#copy-ctx", body).onclick = () => copyText(c.text || "");
+      } else if (tab === "keputusan" || tab === "fakta") {
+        const pc = await api(`/api/subjects/${S()}/project-context${q}`);
+        if (tab === "keputusan") {
+          body.innerHTML = `${pc.decisions.length ? `<div class="card">${pc.decisions.map((d) => `<div class="fact"><b>${esc(d.situation)}</b> &rarr; ${esc(d.action)}${d.reason ? `<div class="small muted">Alasan: ${esc(d.reason)}</div>` : ""}</div>`).join("")}</div>` : '<p class="muted">Belum ada keputusan tercatat. Keputusan lahir dari sesi kerja (observasi bertipe keputusan) atau tool remember.</p>'}
+            ${pc.principles.length ? `<h2>Prinsip kerja yang relevan</h2><div class="card">${pc.principles.map((p) => `<div class="fact">${esc(p.principle.statement)} <span class="small muted">(${(p.principle.confidence * 100).toFixed(0)}%)</span></div>`).join("")}</div>` : ""}`;
+        } else {
+          body.innerHTML = `<h2>Berlaku sekarang (${pc.current_facts.length})</h2><div class="card">${pc.current_facts.map(factLine).join("") || '<p class="muted">Belum ada.</p>'}</div>
+            <h2>Riwayat (${pc.history_facts.length})</h2><div class="card">${pc.history_facts.map(factLine).join("") || '<p class="muted">Belum ada.</p>'}</div>`;
+        }
+      } else if (tab === "konvensi") {
+        const ls = await api(`/api/subjects/${S()}/lessons${q}`);
+        body.innerHTML = ls.length ? `<div class="card">${ls.map(lessonRow).join("")}</div>` : '<p class="muted">Belum ada pelajaran. Pelajaran lahir dari koreksi Anda dan konvensi yang disebut selama sesi kerja.</p>';
+      } else if (tab === "berkas") {
+        const f = await api(`/api/subjects/${S()}/projects/files${q}`);
+        body.innerHTML = f.files.length ? `<table class="tbl"><thead><tr><th>Berkas</th><th>Diubah</th><th>Dibaca</th><th>Observasi</th></tr></thead><tbody>${f.files.slice(0, 300).map((x) => `<tr><td><code>${esc(x.path)}</code></td><td>${x.modified}</td><td>${x.read}</td><td>${x.episodes.map((e) => `<a class="cite" data-ep="${esc(e.id)}" title="${esc(e.title)}">${esc(e.at)}${e.modified ? "*" : ""}</a>`).join(" ")}</td></tr>`).join("")}</tbody></table><p class="small muted">* = berkas diubah pada observasi itu. Riwayat ini juga disisipkan ke agent sebelum ia membaca berkas (hook PreToolUse).</p>` : '<p class="muted">Belum ada berkas tercatat; muncul setelah sesi kerja dengan hook PostToolUse.</p>';
+      } else if (tab === "sesi") {
+        const [sessions, obs] = await Promise.all([api(`/api/subjects/${S()}/sessions${q}`), api(`/api/subjects/${S()}/episodes${q}&newest_first=true&limit=200`)]);
+        body.innerHTML = `${sessionTable(sessions)}<h2>Observasi</h2>${obsList(obs.filter((e) => e.obs_type))}`;
+      }
+    } catch (e) { body.innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`; }
+    bindCites(body);
+    body.querySelectorAll("[data-session]").forEach((tr) => { tr.onclick = () => showSession(tr.dataset.session); });
+  };
+  el.querySelectorAll("[data-tab]").forEach((b) => { b.onclick = () => render(b.dataset.tab); });
+  render(cur);
+}
+
+function lessonRow(l) {
+  const kindLabel = { correction: "koreksi", convention: "konvensi", pitfall: "jebakan", discovery: "temuan" };
+  return `<div class="fact"><span class="badge l-${esc(l.kind)}">${esc(kindLabel[l.kind] || l.kind)}</span> <b>${esc(l.title)}</b> <span class="small muted">x${l.occurrences}${l.project ? " · " + esc(l.project) : ""}${l.promoted_to ? " · diangkat jadi prinsip" : ""}</span>
+    ${l.detail ? `<div class="small">${esc(l.detail)}</div>` : ""}
+    <div class="small">${(l.evidence || []).slice(0, 4).map((ev) => `<a class="cite" data-ep="${esc(ev.episode_id)}">[ep:${esc(ev.episode_id.slice(0, 6))}]</a>`).join(" ")}</div></div>`;
+}
+function sessionTable(sessions) {
+  return sessions.length ? `<table class="tbl"><thead><tr><th>Mulai</th><th>Client</th><th>Proyek</th><th>Prompt pertama</th><th>Prompt</th><th>Tool</th><th>Episode</th><th>Status</th></tr></thead><tbody>
+    ${sessions.map((s) => `<tr data-session="${esc(s.id)}" style="cursor:pointer"><td>${esc(when(s.started_at))}</td><td>${esc(s.client)}</td><td>${esc(s.project || "-")}</td><td>${esc(s.first_prompt || "")}</td><td>${s.prompt_counter}</td><td>${s.tool_uses}</td><td>${s.episodes}</td><td><span class="badge ${s.status === "active" ? "now" : "past"}">${esc(s.status)}</span></td></tr>`).join("")}</tbody></table>` : '<p class="muted">Belum ada sesi tercatat.</p>';
+}
+function obsList(obs) {
+  return obs.length ? obs.slice(0, 200).map((e) => `<div class="tl-item" data-ep="${esc(e.id)}"><span class="tl-time">${esc(when(e.created_at))}<br><span class="small">${esc(e.project || "")}</span></span>
+    <span>${typeBadge(e.obs_type)} <b>${esc(e.title || "Tanpa judul")}</b><br><span class="small muted">${esc(e.summary || e.text.slice(0, 200))}</span>
+    ${(e.files_modified || []).length ? `<br><span class="small">diubah: ${e.files_modified.slice(0, 5).map(esc).join(", ")}</span>` : ""}</span></div>`).join("") : '<p class="muted">Belum ada observasi.</p>';
 }
 
 async function showSource(id) {
@@ -570,26 +796,35 @@ async function viewHome(el) {
       bindCites(el);
     }
 
-    async function viewSearch(el) {
+    async function viewSearch(el, prefill) {
+      const projOpts = state.projects.map((p) => p.project);
       el.innerHTML = `<h1>Cari & tanya</h1>
     <div class="card">
-      <div class="row"><input type="search" id="q" placeholder="mis. Partai apa yang didukung? Siapa Pakde Karno?"><button class="primary" id="go-recall">${icon("search")} Cari</button><button id="go-ask">Tanya</button></div>
+      <div class="row"><input type="search" id="q" placeholder="mis. kenapa migrasi gagal? keputusan soal caching? siapa Pakde Karno?" value="${esc(prefill || "")}"><button class="primary" id="go-recall">${icon("search")} Cari</button><button id="go-ask">Tanya</button></div>
       <div class="row small" style="margin-top:8px">
-        <label><input type="checkbox" id="persona"> Jawab sebagai subjek</label>
-        <label>Per tanggal <input type="date" id="asof"></label>
+        <label>Proyek <select id="sproj"><option value="">semua</option>${projOpts.map((n) => `<option value="${esc(n)}" ${n === P() ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>
+        <label>Jenis <select id="stype"><option value="">semua</option>${Object.entries(OBS).filter(([k]) => k !== "lesson").map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}<option value="story">cerita</option></select></label>
         <label>Dari <input type="date" id="from"></label><label>Sampai <input type="date" id="to"></label>
+        <label>Per tanggal <input type="date" id="asof"></label>
+        <label><input type="checkbox" id="persona"> Jawab sebagai subjek</label>
       </div>
     </div><div id="out"></div>`;
         const out = $("#out", el), qEl = $("#q", el);
-        const body = () => ({ query: qEl.value, as_of: $("#asof", el).value || null, from: $("#from", el).value || null, to: $("#to", el).value || null });
+        const body = () => ({ query: qEl.value, project: $("#sproj", el).value || null, as_of: $("#asof", el).value || null, from: $("#from", el).value || null, to: $("#to", el).value || null, detail: "full", limit: 30 });
+        const tokens = (e) => Math.max(20, Math.round(Math.max((e.excerpt || "").length, (e.summary || "").length) / 4));
         $("#go-recall", el).onclick = async () => {
           if (!qEl.value.trim()) return;
           out.innerHTML = '<div class="empty">Mencari...</div>';
           const r = await api(`/api/subjects/${S()}/recall`, { method: "POST", json: body() });
           if (!r.found) { out.innerHTML = `<div class="card">${esc(r.note)}</div>`; return; }
-          out.innerHTML = `${r.facts.length ? `<h2>Fakta</h2><div class="card">${r.facts.map(factLine).join("")}</div>` : ""}
+          const t = $("#stype", el).value;
+          const eps = r.episodes.filter((e) => !t || (t === "story" ? !e.obs_type : e.obs_type === t));
+          const facts = r.facts.filter((f) => f.status === "conflict" || (f.current && !["peristiwa", "event"].includes(f.category)));
+          out.innerHTML = `${facts.length ? `<h2>Fakta</h2><div class="card">${facts.map(factLine).join("")}</div>` : ""}
       ${r.principles.length ? `<h2>Prinsip terkait</h2>${r.principles.map((p) => `<div class="card">${esc(p.statement)}</div>`).join("")}` : ""}
-      <h2>Cerita</h2>${r.episodes.map((e) => `<div class="card tl-item" data-ep="${esc(e.id)}"><span class="tl-time">${esc(e.time)}${e.retell_count ? `<br><span class="small">diceritakan ${e.retell_count + 1}x</span>` : ""}</span><span><b>${esc(e.title)}</b><br>${esc(e.summary || e.excerpt)}<br><span class="small muted">via ${esc(e.via.join(", "))}</span></span></div>`).join("")}`;
+      <h2>Indeks memori (${eps.length}) <span class="small muted">klik baris untuk detail; inilah yang dilihat agent lewat recall</span></h2>
+      <table class="tbl idx"><thead><tr><th>ID</th><th>Tanggal</th><th>Jenis</th><th>Judul</th><th>Proyek</th><th>Biaya</th><th>Via</th></tr></thead><tbody>
+      ${eps.map((e) => `<tr data-ep="${esc(e.id)}" style="cursor:pointer"><td><code>ep:${esc(e.id.slice(0, 8))}</code></td><td>${esc(e.time_start || e.time)}</td><td>${typeBadge(e.obs_type)}</td><td><b>${esc(e.title)}</b><div class="small muted">${esc((e.summary || e.excerpt || "").slice(0, 140))}</div></td><td class="small">${esc(e.project || "")}</td><td class="small">~${tokens(e)} tok</td><td class="small muted">${esc(e.via.join(", "))}</td></tr>`).join("")}</tbody></table>`;
           bindCites(out);
         };
           $("#go-ask", el).onclick = async () => {
@@ -601,6 +836,7 @@ async function viewHome(el) {
             bindCites(out);
           };
           qEl.onkeydown = (e) => { if (e.key === "Enter") $("#go-recall", el).click(); };
+          if (prefill) $("#go-recall", el).click();
         }
 
         async function viewInterview(el) {
@@ -615,7 +851,7 @@ async function viewHome(el) {
     $("#send", iv).onclick = async () => {
       const ans = $("#ans", iv);
       if (!ans || !ans.value.trim()) return;
-      await api(`/ api / subjects / ${ S() } /interview/answer`, { method: "POST", json: { question: q.question, answer: ans.value } });
+      await api(`/api/subjects/${S()}/interview/answer`, { method: "POST", json: { question: q.question, answer: ans.value } });
       toast("Jawaban disimpan dan sedang diproses");
       next();
     };
@@ -626,7 +862,7 @@ async function viewHome(el) {
 
 // Sesi kerja agent (hook engram) dan pelajaran proyek (konvensi/koreksi/jebakan).
 async function viewSessions(el, projectArg) {
-  const project = projectArg || "";
+  const project = projectArg || P() || "";
   const q = project ? `?project=${encodeURIComponent(project)}` : "";
   const [sessions, lessons, eps] = await Promise.all([
     api(`/api/subjects/${S()}/sessions${q}`),
@@ -635,60 +871,78 @@ async function viewSessions(el, projectArg) {
   ]);
   const obs = eps.filter((e) => e.obs_type && (!project || (e.project || "") === project)).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
   const projects = [...new Set([...sessions.map((s) => s.project), ...obs.map((e) => e.project)].filter(Boolean))].sort();
-  const label = (t) => ({ decision: "keputusan", bugfix: "bugfix", discovery: "temuan", feature: "fitur", refactor: "refactor", change: "perubahan", session_summary: "sesi" }[t] || t);
-  const kindLabel = (k) => ({ correction: "koreksi", convention: "konvensi", pitfall: "jebakan", discovery: "temuan" }[k] || k);
-  const when = (s) => (s || "").slice(0, 16).replace("T", " ");
   el.innerHTML = `<h1>Sesi & pelajaran</h1>
     <div class="card row small"><label>Proyek <select id="proj"><option value="">semua</option>${projects.map((p) => `<option value="${esc(p)}" ${p === project ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label>
       <span class="muted">Direkam otomatis oleh hook <code>engram hook</code> (Claude Code, Gemini CLI, Antigravity). Konteks awal sesi dapat dilihat di <a href="/api/subjects/${S()}/context/inject${q}" target="_blank">endpoint inject</a>.</span></div>
     <h2>Konvensi, koreksi & jebakan proyek</h2>
-    ${lessons.length ? `<div class="card">${lessons.map((l) => `<div class="fact"><span class="badge">${esc(kindLabel(l.kind))}</span> <b>${esc(l.title)}</b> <span class="small muted">x${l.occurrences}${l.project ? " · " + esc(l.project) : ""}${l.promoted_to ? " · diangkat jadi prinsip" : ""}</span>
-      ${l.detail ? `<div class="small">${esc(l.detail)}</div>` : ""}
-      <div class="small">${(l.evidence || []).slice(0, 4).map((ev) => `<a class="cite" data-ep="${esc(ev.episode_id)}">[ep:${esc(ev.episode_id.slice(0, 6))}]</a>`).join(" ")}</div></div>`).join("")}</div>` : '<p class="muted">Belum ada pelajaran. Pelajaran lahir dari koreksi pengguna dan konvensi yang disebut selama sesi kerja.</p>'}
+    ${lessons.length ? `<div class="card">${lessons.map(lessonRow).join("")}</div>` : '<p class="muted">Belum ada pelajaran. Pelajaran lahir dari koreksi pengguna dan konvensi yang disebut selama sesi kerja.</p>'}
     <h2>Observasi terbaru</h2>
-    ${obs.length ? obs.slice(0, 200).map((e) => `<div class="tl-item" data-ep="${esc(e.id)}"><span class="tl-time">${esc(when(e.created_at))}<br><span class="small">${esc(e.project || "")}</span></span>
-      <span><span class="badge">${esc(label(e.obs_type))}</span> <b>${esc(e.title || "Tanpa judul")}</b><br><span class="small muted">${esc(e.summary || e.text.slice(0, 200))}</span>
-      ${(e.files_modified || []).length ? `<br><span class="small">diubah: ${e.files_modified.slice(0, 5).map(esc).join(", ")}</span>` : ""}</span></div>`).join("") : '<p class="muted">Belum ada observasi. Pasang hook dengan <code>scripts/install-mcp.sh --client claude</code>.</p>'}
+    ${obs.length ? obsList(obs) : `<div class="card empty-state"><b>Belum ada observasi.</b><p class="small">Pasang hook dengan <code>scripts/install-mcp.sh --client claude</code>, lalu buka sesi Claude Code baru. Status pemasangan ada di tab Proyek.</p></div>`}
     <h2>Sesi</h2>
-    ${sessions.length ? `<table class="tbl"><thead><tr><th>Mulai</th><th>Client</th><th>Proyek</th><th>Prompt pertama</th><th>Prompt</th><th>Tool</th><th>Episode</th><th>Status</th></tr></thead><tbody>
-      ${sessions.map((s) => `<tr><td>${esc(when(s.started_at))}</td><td>${esc(s.client)}</td><td>${esc(s.project || "-")}</td><td>${esc(s.first_prompt || "")}</td><td>${s.prompt_counter}</td><td>${s.tool_uses}</td><td>${s.episodes}</td><td>${esc(s.status)}</td></tr>`).join("")}</tbody></table>` : '<p class="muted">Belum ada sesi tercatat.</p>'}`;
+    ${sessionTable(sessions)}`;
   $("#proj", el).onchange = (ev) => { location.hash = ev.target.value ? `#sesi/${encodeURIComponent(ev.target.value)}` : "#sesi"; };
   bindCites(el);
+  el.querySelectorAll("[data-session]").forEach((tr) => { tr.onclick = () => showSession(tr.dataset.session); });
 }
 
 async function viewReview(el) {
-  const items = await api(`/ api / subjects / ${ S() }/reviews`);
-            const kinds = { gray_zone: "Layak jadi cerita?", conflict: "Fakta bertentangan", entity_merge: "Entitas yang sama?", quarantine: "Fakta meragukan", reflective: "Konfirmasi prinsip/sifat" };
-            const revBadge = (r) => {
-              if (r.kind === "entity_merge") {
-                const ek = r.payload?.entity_kind;
-                if (ek === "project") return "Proyek yang sama?";
-                if (ek === "component") return "Komponen yang sama?";
-                if (ek === "tool") return "Tool yang sama?";
-                if (ek === "person") return "Orang yang sama?";
-              }
-              return kinds[r.kind] || r.kind;
-            };
-            const help = {
-              gray_zone: "Setuju = angkat jadi cerita. Tolak = biarkan meluruh.", conflict: "Setuju = fakta baru menggantikan yang lama. Tolak = fakta baru dibuang.",
-              entity_merge: "Setuju = gabungkan jadi satu entitas. Tolak = entitas berbeda.", quarantine: "Setuju = fakta dipakai. Tolak = dibuang.", reflective: "Setuju = aktif. Tolak = dibuang."
-            };
-            el.innerHTML = `<h1>Review (${items.length})</h1><p class="muted">Keputusan Anda juga menjadi contoh bagi sistem untuk menilai data berikutnya.</p>
-    ${items.map((r) => `<div class="card" id="r-${esc(r.id)}"><span class="badge">${esc(revBadge(r))}</span><p>${esc(r.summary)}</p>
-      ${r.payload?.text ? `<pre class="src">${esc(r.payload.text)}</pre>` : ""}<p class="small muted">${esc(help[r.kind] || "")}</p>
-      <div class="row"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button><button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button></div></div>`).join("") || '<div class="empty">Tidak ada yang perlu ditinjau.</div>'}`;
-            el.querySelectorAll("[data-d]").forEach((b) => {
-              b.onclick = async () => {
-                const card = b.closest(".card");
-                b.disabled = true;
-                try {
-                  await api(`/api/reviews/${encodeURIComponent(b.dataset.id)}`, { method: "POST", json: { decision: b.dataset.d, note: card.querySelector("[data-note]").value || null } });
-                  card.remove();
-                  toast("Tersimpan");
-                } catch (e) { toast(e.message); b.disabled = false; }
-              };
-            });
-          }
+  const items = await api(`/api/subjects/${S()}/reviews`);
+  const kinds = { conflict: "Fakta bertentangan", reflective: "Konfirmasi prinsip/sifat", entity_merge: "Entitas yang sama?", quarantine: "Fakta meragukan", gray_zone: "Layak jadi cerita?" };
+  const help = {
+    gray_zone: "Setuju = angkat jadi cerita. Tolak = biarkan meluruh.", conflict: "Setuju = fakta baru menggantikan yang lama. Tolak = fakta baru dibuang.",
+    entity_merge: "Setuju = gabungkan jadi satu entitas. Tolak = entitas berbeda.", quarantine: "Setuju = fakta dipakai. Tolak = dibuang.", reflective: "Setuju = aktif. Tolak = dibuang."
+  };
+  const sub = (r) => {
+    if (r.kind !== "entity_merge") return "";
+    const ek = r.payload?.entity_kind;
+    return ek === "project" ? "proyek" : ek === "component" ? "komponen" : ek === "tool" ? "tool" : ek === "person" ? "orang" : "";
+  };
+  // Dua fakta yang bertentangan ditampilkan berdampingan bila payload membawa keduanya.
+  const sideBySide = (r) => {
+    const a = r.payload?.new || r.payload?.incoming || r.payload?.fact_new, b = r.payload?.old || r.payload?.existing || r.payload?.fact_old;
+    const txt = (x) => (typeof x === "string" ? x : x ? (x.statement || [x.predicate, x.object_text].filter(Boolean).join(" ") || JSON.stringify(x)) : "");
+    if (!a && !b) return r.payload?.text ? `<pre class="src">${esc(r.payload.text)}</pre>` : (r.payload?.quote ? `<div class="quote">${esc(r.payload.quote)}</div>` : "");
+    return `<div class="versus"><div><div class="small muted">Baru</div>${esc(txt(a))}</div><div><div class="small muted">Lama</div>${esc(txt(b))}</div></div>`;
+  };
+  const groups = {};
+  for (const r of items) (groups[r.kind] ||= []).push(r);
+  const order = ["conflict", "reflective", "entity_merge", "quarantine", "gray_zone"].filter((k) => groups[k]);
+  el.innerHTML = `<h1>Review (${items.length})</h1><p class="muted">Keputusan Anda juga menjadi contoh bagi sistem untuk menilai data berikutnya. Pilih beberapa lalu setujui/tolak sekaligus.</p>
+    ${order.map((k) => `<section class="rev-group" data-kind="${k}"><h2>${esc(kinds[k] || k)} <span class="small muted">(${groups[k].length})</span></h2>
+      <div class="row small"><label><input type="checkbox" data-all> pilih semua</label><button data-bulk="approve">${icon("check")} Setujui terpilih</button><button data-bulk="reject">${icon("x")} Tolak terpilih</button><span class="muted">${esc(help[k] || "")}</span></div>
+      ${groups[k].map((r) => `<div class="card rev" id="r-${esc(r.id)}"><label class="rev-pick"><input type="checkbox" data-pick="${esc(r.id)}"></label><div class="rev-body">
+        ${sub(r) ? `<span class="badge">${esc(sub(r))}</span>` : ""}<p>${esc(r.summary)}</p>${sideBySide(r)}
+        <div class="row"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button><button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button>${(r.targets || []).slice(0, 2).map((t) => `<a class="cite" data-ep="${esc(t)}">bukti</a>`).join(" ")}</div></div></div>`).join("")}
+    </section>`).join("") || '<div class="empty">Tidak ada yang perlu ditinjau.</div>'}`;
+  const decide = async (id, d, note) => {
+    await api(`/api/reviews/${encodeURIComponent(id)}`, { method: "POST", json: { decision: d, note: note || null } });
+    $(`#r-${CSS.escape(id)}`, el)?.remove();
+  };
+  el.querySelectorAll("[data-d]").forEach((b) => {
+    b.onclick = async () => {
+      const card = b.closest(".card");
+      b.disabled = true;
+      try { await decide(b.dataset.id, b.dataset.d, card.querySelector("[data-note]").value); toast("Tersimpan"); }
+      catch (e) { toast(e.message); b.disabled = false; }
+    };
+  });
+  el.querySelectorAll(".rev-group").forEach((g) => {
+    g.querySelector("[data-all]").onchange = (ev) => g.querySelectorAll("[data-pick]").forEach((c) => { c.checked = ev.target.checked; });
+    g.querySelectorAll("[data-bulk]").forEach((b) => {
+      b.onclick = async () => {
+        const ids = [...g.querySelectorAll("[data-pick]:checked")].map((c) => c.dataset.pick);
+        if (!ids.length) { toast("Belum ada yang dipilih"); return; }
+        b.disabled = true;
+        let ok = 0;
+        for (const id of ids) { try { await decide(id, b.dataset.bulk); ok++; } catch (e) { toast(e.message); } }
+        toast(`${ok} keputusan tersimpan`);
+        b.disabled = false;
+        if (!g.querySelector(".rev")) g.remove();
+      };
+    });
+  });
+  bindCites(el);
+}
 
           async function viewSources(el) {
             const [sources, batches, watched, storage] = await Promise.all([
@@ -844,7 +1098,7 @@ async function viewReview(el) {
           }
 
           // ---------------------------------------------------------------- boot
-          $("#subject-select").onchange = (e) => { state.subject = e.target.value; localStorage.setItem("subject", state.subject); route(); };
+          $("#subject-select").onchange = async (e) => { state.subject = e.target.value; localStorage.setItem("subject", state.subject); state.project = ""; localStorage.removeItem("project"); await loadProjects(); route(); };
           $("#new-subject").onclick = () => newSubjectForm();
           $("#settings-btn").onclick = () => showSettings();
 
@@ -1572,6 +1826,8 @@ async function viewReview(el) {
 
           window.addEventListener("hashchange", route);
           hydrateIcons();
+          $("#project-select").onchange = (ev) => { state.project = ev.target.value; localStorage.setItem("project", state.project); route(); };
+          $("#palette-btn").onclick = openPalette;
           pollServices();
           setInterval(pollServices, 5000);
           setTimeout(async () => {
@@ -1582,4 +1838,4 @@ async function viewReview(el) {
               updateGearDot();
             } catch (e) { /* offline: abaikan, bisa dicek manual di Pengaturan */ }
           }, 5000);
-          loadSubjects().then(route).catch((e) => { $("#view").innerHTML = `<div class="card">Tidak bisa menghubungi server: ${esc(e.message)}</div>`; });
+          loadSubjects().then(async () => { await loadProjects(); route(); }).catch((e) => { $("#view").innerHTML = `<div class="card">Tidak bisa menghubungi server: ${esc(e.message)}</div>`; });

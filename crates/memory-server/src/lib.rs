@@ -36,6 +36,8 @@ pub struct AppState {
     /// Berkas `memory.toml` yang dipakai. Bila diisi, UI bisa mengubah pengaturan
     /// (berlaku setelah dijalankan ulang). Kosong = pengaturan hanya bisa dilihat.
     pub config_path: Option<std::path::PathBuf>,
+    /// Event hook terakhir per client (untuk panel kesehatan integrasi), hanya di memori.
+    pub hook_stats: Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
 }
 
 /// Status satu layanan latar untuk ditampilkan di UI.
@@ -100,7 +102,7 @@ pub trait ServiceControl: Send + Sync {
 impl AppState {
     pub fn new(rt: Runtime, importer: Importer) -> Self {
         let token = rt.cfg.server.token_env.as_deref().and_then(|k| std::env::var(k).ok()).filter(|t| !t.is_empty()).map(Arc::new);
-        Self { rt, importer, token, mcp_url: None, services: None, config_path: None }
+        Self { rt, importer, token, mcp_url: None, services: None, config_path: None, hook_stats: Arc::default() }
     }
 
     pub fn default_subject(&self) -> String {
