@@ -8,20 +8,27 @@
 <script>try { var t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}</script>
 </head>
 <body>
-<header class="top">
-  <nav id="nav"></nav>
-  <div class="subject">
-    <button id="palette-btn" class="ghost" title="Cari cepat (Cmd/Ctrl+K)" aria-label="Cari cepat"><span data-icon="search"></span></button>
-    <label for="project-select" class="sr">Proyek</label>
-    <select id="project-select" hidden></select>
-    <label for="subject-select" class="sr">Subjek</label>
-    <select id="subject-select"></select>
-    <button id="new-subject" class="ghost" title="Subjek baru"><span data-icon="plus"></span></button>
-    <button id="settings-btn" class="ghost" title="Pengaturan, tentang & update" aria-label="Pengaturan"><span data-icon="settings"></span><span id="settings-dot" class="dot" hidden></span></button>
-  </div>
-</header>
-<div id="update-banner" class="update-banner" hidden role="status" aria-live="polite"></div>
-<main id="view" tabindex="-1"></main>
+<aside id="sidebar" class="sidebar">
+  <a class="brand" href="#"><span class="brand-mark" aria-hidden="true"></span><span><b>engram</b><small>memori kerja &amp; hidup</small></span></a>
+  <nav id="nav" aria-label="Navigasi utama"></nav>
+  <div class="side-foot small muted" id="side-foot">Cmd/Ctrl+K untuk cari cepat</div>
+</aside>
+<div class="content">
+  <header class="top">
+    <div class="top-left"><button id="sidebar-toggle" class="ghost" title="Menu" aria-label="Menu"><span data-icon="menu"></span></button><span id="mode-slot"></span></div>
+    <div class="subject">
+      <button id="palette-btn" class="ghost" title="Cari cepat (Cmd/Ctrl+K)" aria-label="Cari cepat"><span data-icon="search"></span></button>
+      <label for="project-select" class="sr">Proyek</label>
+      <select id="project-select" hidden></select>
+      <label for="subject-select" class="sr">Subjek</label>
+      <select id="subject-select"></select>
+      <button id="new-subject" class="ghost" title="Subjek baru"><span data-icon="plus"></span></button>
+      <button id="settings-btn" class="ghost" title="Pengaturan, tentang & update" aria-label="Pengaturan"><span data-icon="settings"></span><span id="settings-dot" class="dot" hidden></span></button>
+    </div>
+  </header>
+  <div id="update-banner" class="update-banner" hidden role="status" aria-live="polite"></div>
+  <main id="view" tabindex="-1"></main>
+</div>
 <aside id="drawer" class="drawer" hidden>
   <div class="drawer-head"><strong id="drawer-title"></strong><button id="drawer-close" class="ghost" title="Tutup"><span data-icon="x"></span></button></div>
   <div id="drawer-body"></div>

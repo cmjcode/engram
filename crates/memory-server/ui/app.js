@@ -26,6 +26,7 @@ const ICONS = {
   download: '<path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/>',
   external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v6H4V6h6"/>',
   code: '<path d="m8 8-4 4 4 4M16 8l4 4-4 4M14 5l-4 14"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
 };
 const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -100,9 +101,10 @@ const DEFAULT_ROUTE = () => (state.mode === "personal" ? "ringkasan" : "proyek")
 function renderNav() {
   const cur = (location.hash.slice(1).split("/")[0]) || DEFAULT_ROUTE();
   const show = ROUTES.filter(([, , , , tag]) => tag === "semua" || tag === state.mode || (state.mode === "personal" && tag === "kerja"));
-  $("#nav").innerHTML = show.map(([k, ic, label]) => `<a href="#${k}" class="${k === cur ? "active" : ""}">${icon(ic)}<span>${label}</span></a>`).join("")
-    + `<span class="mode" role="group" aria-label="Mode"><button class="${state.mode === "kerja" ? "active" : ""}" data-mode="kerja">Kerja</button><button class="${state.mode === "personal" ? "active" : ""}" data-mode="personal">Personal</button></span>`;
-  $("#nav").querySelectorAll("[data-mode]").forEach((b) => { b.onclick = () => { state.mode = b.dataset.mode; localStorage.setItem("mode", state.mode); if (!location.hash || location.hash === "#proyek" || location.hash === "#ringkasan") location.hash = "#" + DEFAULT_ROUTE(); route(); }; });
+  $("#nav").innerHTML = show.map(([k, ic, label]) => `<a href="#${k}" class="${k === cur ? "active" : ""}" ${k === cur ? 'aria-current="page"' : ""}>${icon(ic)}<span>${label}</span></a>`).join("");
+  $("#mode-slot").innerHTML = `<span class="mode" role="group" aria-label="Mode"><button class="${state.mode === "kerja" ? "active" : ""}" data-mode="kerja">Kerja</button><button class="${state.mode === "personal" ? "active" : ""}" data-mode="personal">Personal</button></span>`;
+  $("#mode-slot").querySelectorAll("[data-mode]").forEach((b) => { b.onclick = () => { state.mode = b.dataset.mode; localStorage.setItem("mode", state.mode); if (!location.hash || location.hash === "#proyek" || location.hash === "#ringkasan") location.hash = "#" + DEFAULT_ROUTE(); route(); }; });
+  $("#nav").querySelectorAll("a").forEach((a) => { a.addEventListener("click", () => document.body.classList.remove("nav-open")); });
 }
 
 async function loadProjects() {
@@ -162,13 +164,16 @@ async function route() {
     $("#first-subject").onclick = newSubjectForm;
     return;
   }
+  // `stage` dipasang utuh ke <main> (bukan anak-anaknya saja) agar handler yang menyimpan
+  // rujukan `el` tetap menemukan elemennya setelah render, mis. indikator tab aktif.
   const stage = document.createElement("div");
+  stage.className = "page";
   view.innerHTML = `<div class="empty">Memuat...</div>`;
   try {
     if (name === "proyek" && arg) await viewProject(stage, decodeURIComponent(arg));
     else await r[3](stage, arg && decodeURIComponent(arg));
     if (seq !== routeSeq) return;
-    view.replaceChildren(...stage.childNodes);
+    view.replaceChildren(stage);
   } catch (e) {
     if (seq !== routeSeq) return;
     view.innerHTML = `<div class="card">Gagal memuat: ${esc(e.message)}</div>`;
@@ -1828,6 +1833,7 @@ async function viewReview(el) {
           hydrateIcons();
           $("#project-select").onchange = (ev) => { state.project = ev.target.value; localStorage.setItem("project", state.project); route(); };
           $("#palette-btn").onclick = openPalette;
+          $("#sidebar-toggle").onclick = () => document.body.classList.toggle("nav-open");
           pollServices();
           setInterval(pollServices, 5000);
           setTimeout(async () => {
