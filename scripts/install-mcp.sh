@@ -274,10 +274,34 @@ CTX_BIN="$HOME/.local/bin/engram-session-context"
 # tiap pemanggilan tool + ringkasan sesi, menyuntik indeks konteks saat sesi mulai, dan
 # menyimpan event ke spool bila server mati). Skrip Python di atas hanya cadangan bila
 # binary belum terpasang. Timpa dengan env ENGRAM_BIN.
+LOCAL_ENGRAM_BIN="$HOME/.local/bin/engram"
+supports_hook() {
+  [[ -n "${1:-}" && -x "$1" ]] && "$1" hook --help >/dev/null 2>&1
+}
+
+# Bila binary hasil build lokal ($BIN) mendukung `hook` dan lebih baru (atau binary di
+# ~/.local/bin belum mendukung `hook`), perbarui ~/.local/bin/engram secara atomik.
+if [[ $DRY_RUN -eq 0 && $UNINSTALL -eq 0 ]] && supports_hook "$BIN"; then
+  if ! supports_hook "$LOCAL_ENGRAM_BIN" || [[ "$BIN" -nt "$LOCAL_ENGRAM_BIN" ]]; then
+    mkdir -p "$(dirname "$LOCAL_ENGRAM_BIN")"
+    rm -f "$LOCAL_ENGRAM_BIN.tmp"
+    cp "$BIN" "$LOCAL_ENGRAM_BIN.tmp"
+    chmod 755 "$LOCAL_ENGRAM_BIN.tmp"
+    mv -f "$LOCAL_ENGRAM_BIN.tmp" "$LOCAL_ENGRAM_BIN"
+    info "Binary CLI diperbarui: $LOCAL_ENGRAM_BIN ($("$LOCAL_ENGRAM_BIN" --version 2>/dev/null || true))"
+  fi
+fi
+
 if [[ -z "${ENGRAM_BIN:-}" ]]; then
-  ENGRAM_BIN="$(command -v engram 2>/dev/null || true)"
-  [[ -z "$ENGRAM_BIN" && -x "$HOME/.local/bin/engram" ]] && ENGRAM_BIN="$HOME/.local/bin/engram"
-  [[ -z "$ENGRAM_BIN" && -x "$BIN" ]] && ENGRAM_BIN="$BIN"
+  for cand in "$LOCAL_ENGRAM_BIN" "$(command -v engram 2>/dev/null || true)" "$BIN"; do
+    if supports_hook "$cand"; then
+      ENGRAM_BIN="$cand"
+      break
+    fi
+  done
+elif ! supports_hook "$ENGRAM_BIN"; then
+  info "Peringatan: $ENGRAM_BIN belum mendukung subcommand 'hook'; memakai fallback Python."
+  ENGRAM_BIN=""
 fi
 
 ensure_hook_bin() {

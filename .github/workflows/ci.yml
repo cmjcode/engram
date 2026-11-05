@@ -1,0 +1,60 @@
+# Uji setiap push/PR: fmt, clippy, test (semua crate kecuali aplikasi desktop Tauri).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pasang dependensi sistem (RocksDB)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # Codebase belum pernah di-rustfmt (≈500 hunk dengan rustfmt.toml). Jalankan
+      # `cargo fmt --all` dalam satu commit tersendiri, lalu hapus continue-on-error ini.
+      - name: rustfmt (advisory)
+        continue-on-error: true
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --exclude memory-desktop --all-targets --locked
+      - name: test
+        run: cargo test --workspace --exclude memory-desktop --locked
+      - name: Validasi server.json (MCP Registry)
+        run: |
+          python3 -c 'import json; json.load(open("server.json"))'
+          ver=$(awk -F'"' '/^\[/{s=($0=="[workspace.package]")} s && /^version *=/{print $2; exit}' Cargo.toml)
+          grep -q "\"version\": \"$ver\"" server.json || { echo "::error::server.json version != Cargo.toml ($ver)"; exit 1; }
+      - name: shellcheck
+        run: |
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck -S warning install.sh scripts/install-mcp.sh scripts/updater-manifest.sh docker/entrypoint.sh
+
+  docker:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (tanpa push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.cmjcode/engram",
+  "title": "engram",
+  "description": "Bitemporal, evidence-backed, local-first long-term memory for coding agents: project context, recall, remember.",
+  "version": "0.1.2",
+  "websiteUrl": "https://github.com/cmjcode/engram",
+  "repository": {
+    "url": "https://github.com/cmjcode/engram",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "oci",
+      "registryBaseUrl": "https://ghcr.io",
+      "identifier": "ghcr.io/cmjcode/engram:0.1.2",
+      "transport": { "type": "stdio" },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{data_dir}:/data",
+          "description": "Host folder that holds memory.toml and the vault",
+          "isRequired": true,
+          "variables": { "data_dir": { "description": "Absolute path on the host", "isRequired": true } }
+        }
+      ],
+      "packageArguments": [
+        { "type": "positional", "value": "mcp", "valueHint": "mcp" },
+        { "type": "named", "name": "--profile", "value": "coding", "description": "Tool subset: full (12 tools) or coding (7 tools for coding sessions)", "isRequired": false }
+      ],
+      "environmentVariables": [
+        { "name": "MEMORY_CONFIG", "description": "Path to memory.toml inside the container", "default": "/data/memory.toml" }
+      ]
+    }
+  ]
+}

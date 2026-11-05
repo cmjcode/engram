@@ -1,0 +1,10 @@
+target
+.git
+.github
+.claude
+apps/memory-desktop/gen
+docs
+*.md
+!memory.toml.example
+build.sh
+eval

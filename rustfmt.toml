@@ -1,0 +1,4 @@
+# Gaya ringkas yang dipakai codebase: baris lebar, struct literal satu baris bila muat.
+max_width = 140
+use_small_heuristics = "Max"
+edition = "2024"

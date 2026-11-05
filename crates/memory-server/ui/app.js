@@ -88,25 +88,35 @@ async function api(path, opts = {}) {
 const S = () => encodeURIComponent(state.subject);
 
 // Mode "kerja" menonjolkan proyek, sesi, dan review; mode "personal" menambah
-// wawancara, silsilah, dan statistik biografi. Tampilan tetap bisa dibuka lewat URL.
+// wawancara dan silsilah. Statistik & perawatan (konsolidasi, padatkan, distilasi,
+// proses ulang) berlaku untuk kedua mode karena memori proyek pun perlu dirawat.
 const ROUTES = [
-  ["proyek", "home", "Proyek", viewProjects, "kerja"],
-  ["sesi", "code", "Sesi & pelajaran", viewSessions, "kerja"],
+  // Global: berlaku untuk memori kerja maupun hidup.
   ["cari", "search", "Cari & tanya", viewSearch, "semua"],
   ["review", "flag", "Review", viewReview, "semua"],
   ["orang", "users", "Orang & organisasi", viewPeople, "semua"],
   ["timeline", "clock", "Timeline", viewTimeline, "semua"],
   ["berpikir", "compass", "Cara berpikir", viewThinking, "semua"],
-  ["wawancara", "mic", "Wawancara", viewInterview, "personal"],
   ["sumber", "inbox", "Sumber & import", viewSources, "semua"],
-  ["ringkasan", "book", "Statistik & perawatan", viewHome, "personal"],
+  ["ringkasan", "book", "Statistik & perawatan", viewHome, "semua"],
+  // Kerja: proyek koding dan sesi agent.
+  ["proyek", "home", "Proyek", viewProjects, "kerja"],
+  ["sesi", "code", "Sesi & pelajaran", viewSessions, "kerja"],
+  // Personal: biografi dan keluarga.
+  ["wawancara", "mic", "Wawancara", viewInterview, "personal"],
 ];
+// Urutan dan judul kelompok di sidebar. Mode personal juga menampilkan kelompok kerja.
+const NAV_GROUPS = [["semua", "Global"], ["kerja", "Kerja"], ["personal", "Personal"]];
 const DEFAULT_ROUTE = () => (state.mode === "personal" ? "ringkasan" : "proyek");
 
 function renderNav() {
   const cur = (location.hash.slice(1).split("/")[0]) || DEFAULT_ROUTE();
-  const show = ROUTES.filter(([, , , , tag]) => tag === "semua" || tag === state.mode || (state.mode === "personal" && tag === "kerja"));
-  $("#nav").innerHTML = show.map(([k, ic, label]) => `<a href="#${k}" class="${k === cur ? "active" : ""}" ${k === cur ? 'aria-current="page"' : ""}>${icon(ic)}<span>${label}</span></a>`).join("");
+  const visible = (tag) => tag === "semua" || tag === state.mode || (state.mode === "personal" && tag === "kerja");
+  const link = ([k, ic, label]) => `<a href="#${k}" class="${k === cur ? "active" : ""}" ${k === cur ? 'aria-current="page"' : ""}>${icon(ic)}<span>${label}</span></a>`;
+  $("#nav").innerHTML = NAV_GROUPS.filter(([tag]) => visible(tag)).map(([tag, title]) => {
+    const items = ROUTES.filter(([, , , , t]) => t === tag);
+    return items.length ? `<div class="nav-group" role="group" aria-label="${title}"><div class="nav-title">${title}</div>${items.map(link).join("")}</div>` : "";
+  }).join("");
   $("#mode-slot").innerHTML = `<span class="mode" role="group" aria-label="Mode"><button class="${state.mode === "kerja" ? "active" : ""}" data-mode="kerja">Kerja</button><button class="${state.mode === "personal" ? "active" : ""}" data-mode="personal">Personal</button></span>`;
   $("#mode-slot").querySelectorAll("[data-mode]").forEach((b) => { b.onclick = () => { state.mode = b.dataset.mode; localStorage.setItem("mode", state.mode); if (!location.hash || location.hash === "#proyek" || location.hash === "#ringkasan") location.hash = "#" + DEFAULT_ROUTE(); route(); }; });
   $("#nav").querySelectorAll("a").forEach((a) => { a.addEventListener("click", () => document.body.classList.remove("nav-open")); });

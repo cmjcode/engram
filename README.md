@@ -1,5 +1,12 @@
 # engram
 
+[![CI](https://github.com/cmjcode/engram/actions/workflows/ci.yml/badge.svg)](https://github.com/cmjcode/engram/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/cmjcode/engram)](https://github.com/cmjcode/engram/releases)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.cmjcode%2Fengram-6f42c1)](https://registry.modelcontextprotocol.io/?q=io.github.cmjcode/engram)
+
+🇮🇩 Bahasa Indonesia · [🇬🇧 English](README.en.md)
+
 **Engram** adalah memori jangka panjang lintas-tool untuk agent AI dan untuk manusia di belakangnya:
 keputusan arsitektur, akar masalah bug, konvensi kerja, sampai kisah hidup dan silsilah keluarga,
 tersimpan lokal (SurrealDB embedded, satu binary Rust) dan diakses lewat MCP dari Claude Code,
@@ -38,6 +45,20 @@ Opsi: `--cli-only`, `--desktop-only`, `--version 0.0.2`, `--bin-dir ~/bin`, `--a
 Linux lewat `.deb`/`.rpm` (atau AppImage bila tanpa sudo). Windows: unduh `.exe`/`.msi` dari
 [Releases](https://github.com/cmjcode/engram/releases).
 
+**Docker / MCP Registry.** Binary yang sama diterbitkan sebagai image `ghcr.io/cmjcode/engram` dan terdaftar di
+MCP Registry resmi sebagai `io.github.cmjcode/engram` (`server.json`), sehingga client yang membaca registry bisa
+memasangnya langsung.
+
+```sh
+# server: UI, REST API, dan MCP Streamable HTTP di :7878
+docker run -d --name engram -p 127.0.0.1:7878:7878 -v engram-data:/data -e MEMORY_TOKEN="$(openssl rand -hex 24)" ghcr.io/cmjcode/engram
+# server MCP stdio untuk client yang menjalankan prosesnya sendiri
+docker run -i --rm -v engram-data:/data ghcr.io/cmjcode/engram mcp --profile coding
+```
+
+Saat pertama jalan, container menyalin `memory.toml.example` ke `/data/memory.toml`; arahkan `[llm]` dan `[embedding]`
+ke server OpenAI-compatible Anda (vLLM, TEI, Ollama, …) atau set `provider = "hash"` untuk uji coba offline.
+
 **Update otomatis.** Aplikasi desktop memeriksa rilis baru tak lama setelah dibuka dan setiap 6 jam, atau
 lewat menu tray **Periksa update**. Update dipasang setelah disetujui, lalu aplikasi dibuka ulang. Paket update
 ditandatangani; kunci privatnya `~/.tauri/engram.key` (dipakai `build.sh`, dan harus disimpan juga
@@ -63,9 +84,13 @@ sebagai secret GitHub `TAURI_SIGNING_PRIVATE_KEY`). Manifest `latest.json` disus
 ./scripts/install-mcp.sh --uninstall --client all
 ```
 
+Skrip berjalan di macOS dan Linux. Di Windows pakai panel **Integrasi** di aplikasi desktop, yang melakukan hal yang
+sama lewat installer bawaan `engram` (`crates/memory-server/src/install.rs`, juga tersedia sebagai
+`POST /api/mcp/clients/{id}/install`).
+
 Apa saja yang dipasang oleh `scripts/install-mcp.sh`:
 
-1. **Server MCP (`engram`)**: Menyediakan tool `project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles`, `persona_context`, `family_tree`, `memory_gaps`, `list_subjects`, dan `compact` lewat Streamable HTTP (`http://127.0.0.1:7878/mcp`) dengan token tetap `MEMORY_TOKEN` (`LaunchAgent` `id.engram.ai.token`). Tambahkan `?profile=coding` (atau `engram mcp --profile coding` untuk stdio) agar hanya enam tool sesi koding yang dimuat: `project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles`. Codex memakai `~/.codex/config.toml` (`[mcp_servers.engram]`), Windsurf `~/.codeium/windsurf/mcp_config.json`.
+1. **Server MCP (`engram`)**: Menyediakan tool `project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles`, `persona_context`, `family_tree`, `memory_gaps`, `list_subjects`, dan `compact` lewat Streamable HTTP (`http://127.0.0.1:7878/mcp`) dengan token tetap `MEMORY_TOKEN` (`LaunchAgent` `id.engram.ai.token`). Tambahkan `?profile=coding` (atau `engram mcp --profile coding` untuk stdio) agar hanya tujuh tool sesi koding yang dimuat: `project_context`, `recall`, `get_episodes`, `remember`, `who_is`, `timeline`, `principles`. Codex memakai `~/.codex/config.toml` (`[mcp_servers.engram]`), Windsurf `~/.codeium/windsurf/mcp_config.json`.
 2. **Global Rule (`GEMINI.md`, `CLAUDE.md`, `AGENTS.md`, `global_rules.md`)**: Menginstruksikan agent di `~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, `~/.claude/CLAUDE.md` (rule penuh), serta `~/.codex/AGENTS.md` dan `~/.codeium/windsurf/memories/global_rules.md` (rule ringkas profil coding) agar proaktif memanggil `project_context`/`recall` di awal tugas dan `remember` setelah keputusan penting.
 3. **Hook Otomatis (`~/.local/bin/engram-auto-remember`)**:
    * Dipasang pada event `Stop` di Antigravity (`~/.gemini/config/hooks.json`) dan Claude Code (`~/.claude/settings.json`), serta `AfterAgent` di Gemini CLI (`~/.gemini/settings.json`).
@@ -162,3 +187,17 @@ engram repo import <repo>                   # gabungkan bundel rekan tim ke vaul
 
 Tampilan **Sesi & pelajaran** di UI memperlihatkan sesi, observasi, dan konvensi/koreksi/jebakan per proyek.
 Pelajaran yang berulang di ≥ 2 proyek diangkat `engram distill` menjadi kandidat prinsip kerja (menunggu konfirmasi di Review).
+
+## Pengembangan
+
+```sh
+cargo build --release -p memory-cli
+cargo test --workspace --exclude memory-desktop
+```
+
+Lihat [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), dan [CHANGELOG.md](CHANGELOG.md).
+Panduan konfigurasi (`memory.toml`), aplikasi desktop, dan CLI ada di [docs/PANDUAN.md](docs/PANDUAN.md).
+
+## Lisensi
+
+[GNU Affero General Public License v3.0 atau lebih baru](LICENSE). Lisensi komersial tersedia atas permintaan.
