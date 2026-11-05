@@ -31,6 +31,42 @@ pub struct UpdateInfo {
     pub url: String,
 }
 
+/// Kemajuan pengunduhan & pemasangan update aplikasi desktop.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct UpdateProgress {
+    /// Pembaruan sedang berjalan (`true` saat menyiapkan, mengunduh, atau memasang).
+    pub running: bool,
+    /// Tahap: `"idle"`, `"checking"`, `"downloading"`, `"installing"`, `"restarting"`, `"error"`.
+    pub stage: String,
+    /// Versi yang sedang diunduh/dipasang.
+    pub version: Option<String>,
+    /// Jumlah byte yang sudah diunduh.
+    pub downloaded_bytes: u64,
+    /// Total ukuran paket dalam byte (bila tersedia dari server).
+    pub total_bytes: Option<u64>,
+    /// Persentase kemajuan (0..=100), bila diketahui.
+    pub percent: Option<u8>,
+    /// Pesan status untuk ditampilkan di UI.
+    pub message: Option<String>,
+    /// Pesan galat terakhir bila gagal.
+    pub error: Option<String>,
+}
+
+impl Default for UpdateProgress {
+    fn default() -> Self {
+        Self {
+            running: false,
+            stage: "idle".into(),
+            version: None,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            percent: None,
+            message: None,
+            error: None,
+        }
+    }
+}
+
 /// Bandingkan versi "x.y.z" (awalan `v` & akhiran `-pre` diabaikan).
 pub fn newer(latest: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {

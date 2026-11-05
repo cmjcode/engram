@@ -75,6 +75,10 @@ pub trait ServiceControl: Send + Sync {
     fn install_update(&self) -> Result<String, String> {
         Err("pasang update hanya tersedia di aplikasi desktop; unduh rilis baru dari GitHub".into())
     }
+    /// Kemajuan pengunduhan & pemasangan update saat ini.
+    fn update_progress(&self) -> Option<settings::UpdateProgress> {
+        None
+    }
     /// Cek update otomatis aktif? `None` = tidak ada pengaturan ini.
     fn auto_update(&self) -> Option<bool> {
         None

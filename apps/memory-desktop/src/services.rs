@@ -210,6 +210,10 @@ impl ServiceControl for Services {
         Ok("Mengunduh update. Aplikasi dibuka ulang setelah terpasang.".into())
     }
 
+    fn update_progress(&self) -> Option<memory_server::settings::UpdateProgress> {
+        Some(crate::update::progress())
+    }
+
     fn auto_update(&self) -> Option<bool> {
         Some(crate::update::auto_enabled(&self.data_dir))
     }

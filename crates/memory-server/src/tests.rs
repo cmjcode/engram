@@ -197,6 +197,19 @@ impl ServiceControl for FakeServices {
             _ => Err(format!("layanan tidak dikenal: {id}")),
         }
     }
+
+    fn update_progress(&self) -> Option<crate::settings::UpdateProgress> {
+        Some(crate::settings::UpdateProgress {
+            running: true,
+            stage: "downloading".into(),
+            version: Some("0.0.17".into()),
+            downloaded_bytes: 5_242_880,
+            total_bytes: Some(10_485_760),
+            percent: Some(50),
+            message: Some("Mengunduh update v0.0.17 — 5.0 / 10.0 MB (50%)".into()),
+            error: None,
+        })
+    }
 }
 
 #[tokio::test]
@@ -206,6 +219,14 @@ async fn services_status_and_start() {
     let r: Value = c.get(format!("{base}/api/services")).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["enabled"], true);
     assert_eq!(r["services"][1]["running"], false);
+    assert_eq!(r["update_progress"]["running"], true);
+    assert_eq!(r["update_progress"]["percent"], 50);
+
+    let prog: Value = c.get(format!("{base}/api/update/progress")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(prog["running"], true);
+    assert_eq!(prog["stage"], "downloading");
+    assert_eq!(prog["version"], "0.0.17");
+    assert_eq!(prog["percent"], 50);
     // Server embedding (di luar engram) ikut dilaporkan; embedder uji selalu hidup.
     let emb = &r["services"][2];
     assert_eq!((emb["id"].as_str(), emb["external"].as_bool(), emb["running"].as_bool()), (Some("embedding"), Some(true), Some(true)));

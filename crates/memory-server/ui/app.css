@@ -607,6 +607,7 @@ mark {
 }
 
 .progress {
+  position: relative;
   height: 8px;
   background: var(--line-subtle);
   border-radius: 999px;
@@ -618,8 +619,37 @@ mark {
 .progress>span {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, var(--ok), #34d399);
+  background: linear-gradient(90deg, var(--accent), var(--ok));
   border-radius: 999px;
+  transition: width 0.22s ease;
+}
+
+.progress.indeterminate>span {
+  position: absolute;
+  width: 38% !important;
+  animation: progress-slide 1.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes progress-slide {
+  0% {
+    left: -38%;
+  }
+
+  100% {
+    left: 100%;
+  }
+}
+
+.update-banner {
+  max-width: 1120px;
+  margin: 10px auto 0;
+  padding: 12px 18px;
+  background: var(--panel-strong);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--accent);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
 }
 
 table {
