@@ -392,6 +392,16 @@ async fn services_status_and_start() {
     let llm = &r["services"][3];
     assert_eq!((llm["id"].as_str(), llm["external"].as_bool(), llm["running"].as_bool()), (Some("llm"), Some(true), Some(true)));
 
+    let r = post(&c, format!("{base}/api/services/start-all"), json!({})).await;
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["started"], json!(["workers"]));
+    assert_eq!(r["services"][1]["running"], true);
+    assert_eq!(r["services"][2]["id"], "embedding");
+
+    // Panggilan kedua ketika semua sudah jalan: started kosong.
+    let r2 = post(&c, format!("{base}/api/services/start-all"), json!({})).await;
+    assert_eq!(r2["started"], json!([]));
+
     let r = post(&c, format!("{base}/api/services/workers/start"), json!({})).await;
     assert_eq!(r["services"][1]["running"], true);
     assert_eq!(r["services"][2]["id"], "embedding");
@@ -407,6 +417,11 @@ async fn services_disabled_without_controller() {
     assert_eq!(r["enabled"], false);
     let bad = reqwest::Client::new().post(format!("{base}/api/services/workers/start")).send().await.unwrap();
     assert_eq!(bad.status(), 400);
+    // start-all tetap berjalan untuk memproses ulang job gagal & cek server eksternal.
+    let c = reqwest::Client::new();
+    let ok = post(&c, format!("{base}/api/services/start-all"), json!({})).await;
+    assert_eq!(ok["ok"], true);
+    assert_eq!(ok["enabled"], false);
 }
 
 #[tokio::test]

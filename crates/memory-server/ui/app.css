@@ -1104,3 +1104,125 @@ code {
   main { padding: 16px 16px 40px; }
   .top { padding: 8px 12px; }
 }
+
+/* Pengaturan: navigasi samping, bukan tab yang terlipat dua baris */
+.drawer.drawer--wide {
+  width: min(880px, calc(100% - 24px));
+}
+
+.st-layout {
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+}
+
+.st-nav {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--well);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.st-nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  color: var(--muted);
+  padding: 8px 10px;
+  font-size: 13.5px;
+}
+
+.st-nav button > span:first-of-type {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.st-nav button .i {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  opacity: 0.85;
+}
+
+.st-nav button:hover:not(:disabled) {
+  transform: none;
+  color: var(--ink);
+  background: rgba(127, 127, 127, 0.12);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.st-nav button.active {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-soft);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.st-nav button.active .i {
+  opacity: 1;
+}
+
+.st-nav .dot {
+  width: 7px;
+  height: 7px;
+}
+
+.st-main {
+  min-width: 0;
+}
+
+.st-title {
+  margin: 2px 0 14px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Layar sempit: navigasi jadi satu baris yang bisa digeser, tidak terlipat */
+@media (max-width: 760px) {
+  .st-layout {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .st-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 88%, transparent);
+    mask-image: linear-gradient(90deg, #000 88%, transparent);
+  }
+
+  .st-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .st-nav button {
+    width: auto;
+    flex: none;
+  }
+
+  .st-title {
+    display: none;
+  }
+}

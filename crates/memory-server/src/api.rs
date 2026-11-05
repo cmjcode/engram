@@ -85,6 +85,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/mcp/clients/{id}/install", post(mcp_install))
         .route("/api/mcp/clients/{id}/uninstall", post(mcp_uninstall))
         .route("/api/services", get(services))
+        .route("/api/services/start-all", post(services_start_all))
         .route("/api/services/{id}/start", post(service_start))
         .route("/api/storage", get(storage))
         .route("/api/storage/move", post(storage_move))
@@ -1240,6 +1241,33 @@ async fn service_start(State(st): State<AppState>, Path(id): Path<String>) -> Ap
     Ok(Json(
         json!({"ok": true, "services": service_list(&st, c.as_ref()).await}),
     ))
+}
+
+async fn services_start_all(State(st): State<AppState>) -> ApiResult<Value> {
+    let started = match &st.services {
+        Some(c) => c.start_all().map_err(ApiError::BadRequest)?,
+        None => Vec::new(),
+    };
+    let requeued_stale = st.rt.store.requeue_stale_jobs().await.unwrap_or(0);
+    let retry = st.rt.retry_failed(false).await.unwrap_or_default();
+    let list = match &st.services {
+        Some(c) => service_list(&st, c.as_ref()).await,
+        None => {
+            let (emb, llm) = tokio::join!(embedding_status(&st), llm_status(&st));
+            let mut arr = vec![emb];
+            arr.extend(llm);
+            json!(arr)
+        }
+    };
+    Ok(Json(json!({
+        "ok": true,
+        "enabled": st.services.is_some(),
+        "started": started,
+        "requeued_stale": requeued_stale,
+        "retried_sources": retry.requeued,
+        "backend_error": retry.backend_error,
+        "services": list,
+    })))
 }
 
 // ---------------------------------------------------------------- lokasi data & sinkronisasi

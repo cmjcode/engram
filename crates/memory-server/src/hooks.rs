@@ -26,7 +26,53 @@ use memory_retrieve::InjectOpts;
 use crate::{ApiError, ApiResult, AppState};
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/hooks/status", axum::routing::get(hook_status)).route("/api/hooks/{client}/{event}", post(hook_event))
+    Router::new()
+        .route("/api/hooks/status", axum::routing::get(hook_status))
+        .route("/api/hooks/install", post(install_hooks))
+        .route("/api/hooks/{client}/{event}", post(hook_event))
+}
+
+/// Lokasi `scripts/install-mcp.sh`: env `ENGRAM_INSTALL_SCRIPT`, selain itu skrip di repo
+/// tempat binary ini dibangun.
+fn install_script() -> std::path::PathBuf {
+    std::env::var_os("ENGRAM_INSTALL_SCRIPT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install-mcp.sh"))
+}
+
+/// Jalankan `install-mcp.sh --client all` (argumen tetap, tanpa input dari request) dan
+/// kembalikan keluarannya. Dipakai tombol "Pasang ulang integrasi" di UI.
+async fn install_hooks() -> ApiResult<Value> {
+    let script = install_script();
+    if !script.is_file() {
+        return Err(ApiError::NotFound(format!(
+            "skrip installer tidak ditemukan: {} (atur env ENGRAM_INSTALL_SCRIPT)",
+            script.display()
+        )));
+    }
+    // Aplikasi GUI mewarisi PATH minimal dari launchd; tambahkan lokasi umum `claude`,
+    // `gemini`, `engram`, dan python3 supaya installer menemukan CLI yang sama seperti di terminal.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = format!(
+        "{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{}",
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
+    );
+    let mut cmd = tokio::process::Command::new("/bin/bash");
+    cmd.arg(&script).args(["--client", "all"]).env("PATH", path).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    if let Some(dir) = script.parent() {
+        cmd.current_dir(dir);
+    }
+    let out = tokio::time::timeout(std::time::Duration::from_secs(180), cmd.output())
+        .await
+        .map_err(|_| ApiError::Internal("installer melebihi batas waktu 180 detik".into()))?
+        .map_err(|e| ApiError::Internal(format!("gagal menjalankan installer: {e}")))?;
+    let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        output.push_str("\n--- stderr ---\n");
+        output.push_str(&err);
+    }
+    Ok(Json(json!({"ok": out.status.success(), "code": out.status.code(), "script": script.display().to_string(), "output": output})))
 }
 
 /// Kesehatan integrasi: event hook terakhir per client, hook yang terpasang di berkas

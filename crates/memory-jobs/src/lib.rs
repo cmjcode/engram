@@ -19,7 +19,7 @@ use memory_core::{MemoryConfig, ids::now_rfc3339};
 use memory_extract::ingest::PROCESS_SOURCE;
 use memory_extract::review::Decision;
 use memory_extract::{Pipeline, Vault};
-use memory_llm::{ChatRequest, Embedder, LlmProvider, Message, ModelRole};
+use memory_llm::{Embedder, LlmProvider, ModelRole};
 use memory_retrieve::Retriever;
 use memory_store::Store;
 
@@ -85,7 +85,11 @@ impl Runtime {
         Self::open_with(cfg, llm, embedder).await
     }
 
-    pub async fn open_with(cfg: MemoryConfig, llm: Arc<dyn LlmProvider>, embedder: Arc<dyn Embedder>) -> Result<Self> {
+    pub async fn open_with(
+        cfg: MemoryConfig,
+        llm: Arc<dyn LlmProvider>,
+        embedder: Arc<dyn Embedder>,
+    ) -> Result<Self> {
         let vault = Vault::new(&cfg.vault.path);
         vault.init()?;
         let store = match cfg.vault.engine.as_str() {
@@ -95,9 +99,21 @@ impl Runtime {
         Ok(Self::from_parts(cfg, store, llm, embedder, vault))
     }
 
-    pub fn from_parts(cfg: MemoryConfig, store: Store, llm: Arc<dyn LlmProvider>, embedder: Arc<dyn Embedder>, vault: Vault) -> Self {
+    pub fn from_parts(
+        cfg: MemoryConfig,
+        store: Store,
+        llm: Arc<dyn LlmProvider>,
+        embedder: Arc<dyn Embedder>,
+        vault: Vault,
+    ) -> Self {
         let cfg = Arc::new(cfg);
-        let pipeline = Pipeline::new(store.clone(), llm.clone(), embedder.clone(), cfg.clone(), vault.clone());
+        let pipeline = Pipeline::new(
+            store.clone(),
+            llm.clone(),
+            embedder.clone(),
+            cfg.clone(),
+            vault.clone(),
+        );
         let retriever = Retriever::new(store.clone(), embedder, llm, cfg.clone());
         Self {
             cfg,
@@ -111,15 +127,27 @@ impl Runtime {
     }
 
     pub async fn enqueue(&self, kind: &str, payload: Value, key: String) -> Result<Job> {
-        let (job, _) = self.store.enqueue(&Job::new(kind, payload, key, None)).await?;
+        let (job, _) = self
+            .store
+            .enqueue(&Job::new(kind, payload, key, None))
+            .await?;
         Ok(job)
     }
 
     /// Jalankan satu job sesuai jenisnya.
     pub async fn run_job(&self, job: &Job) -> Result<Value> {
-        let s = |k: &str| job.payload[k].as_str().map(str::to_string).ok_or_else(|| JobError::Invalid(format!("payload job {} tanpa '{k}'", job.kind)));
+        let s = |k: &str| {
+            job.payload[k]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| JobError::Invalid(format!("payload job {} tanpa '{k}'", job.kind)))
+        };
         Ok(match job.kind.as_str() {
-            PROCESS_SOURCE => json!(self.pipeline.process_source(&s("source_id")?, Some(&job.id)).await?),
+            PROCESS_SOURCE => json!(
+                self.pipeline
+                    .process_source(&s("source_id")?, Some(&job.id))
+                    .await?
+            ),
             PROMOTE_STREAM => json!(self.pipeline.promote_stream_item(&s("item_id")?).await?),
             CONSOLIDATE => json!(self.pipeline.consolidate(&s("subject")?).await?),
             DISTILL => json!(self.pipeline.distill(&s("subject")?).await?),
@@ -127,10 +155,26 @@ impl Runtime {
             COMPACT => json!(self.pipeline.compact(&s("subject")?).await?),
             EXPORT => json!(archive::export(self, None).await?.display().to_string()),
             REVIEW => {
-                let d = if job.payload["decision"].as_str() == Some("approve") { Decision::Approve } else { Decision::Reject };
-                json!(self.pipeline.resolve_review(&s("review_id")?, d, job.payload["note"].as_str().map(str::to_string)).await?)
+                let d = if job.payload["decision"].as_str() == Some("approve") {
+                    Decision::Approve
+                } else {
+                    Decision::Reject
+                };
+                json!(
+                    self.pipeline
+                        .resolve_review(
+                            &s("review_id")?,
+                            d,
+                            job.payload["note"].as_str().map(str::to_string)
+                        )
+                        .await?
+                )
             }
-            other => return Err(JobError::Invalid(format!("jenis job tidak dikenal: {other}"))),
+            other => {
+                return Err(JobError::Invalid(format!(
+                    "jenis job tidak dikenal: {other}"
+                )));
+            }
         })
     }
 
@@ -158,7 +202,18 @@ impl Runtime {
         if let Some(b) = &job.batch_id {
             match &outcome {
                 Ok(()) => self.store.batch_incr(b, "done", None).await?,
-                Err(e) if job.attempts >= job.max_attempts => self.store.batch_incr(b, "failed", Some(format!("{}: {e}", job.payload["source_id"].as_str().unwrap_or("?")))).await?,
+                Err(e) if job.attempts >= job.max_attempts => {
+                    self.store
+                        .batch_incr(
+                            b,
+                            "failed",
+                            Some(format!(
+                                "{}: {e}",
+                                job.payload["source_id"].as_str().unwrap_or("?")
+                            )),
+                        )
+                        .await?
+                }
                 Err(_) => {}
             }
         }
@@ -210,18 +265,33 @@ impl Runtime {
     /// Cek singkat bahwa server embedding dan LLM (kedua peran) bisa dihubungi.
     pub async fn check_backends(&self) -> std::result::Result<(), String> {
         let p = &self.pipeline;
-        p.embedder.embed_one("ping").await.map_err(|e| format!("embedding: {e}"))?;
-        for role in [ModelRole::Light, ModelRole::Extract] {
-            let req = ChatRequest {
-                role,
-                messages: vec![Message::user("ping")],
-                json_schema: None,
-                temperature: Some(0.0),
-                max_tokens: Some(4),
-                task: "ping".into(),
-            };
-            p.llm.chat(req).await.map_err(|e| format!("llm ({role:?}): {e}"))?;
-        }
+        let light_separate = self.cfg.llm.light_base_url.as_deref().is_some_and(|u| {
+            u.trim_end_matches('/') != self.cfg.llm.base_url.trim_end_matches('/')
+        });
+        let emb_fut = async {
+            p.embedder
+                .embed_one("ping")
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("embedding: {e}"))
+        };
+        let llm_main_fut = async {
+            p.llm
+                .health(ModelRole::Extract)
+                .await
+                .map_err(|e| format!("llm (Extract): {e}"))
+        };
+        let llm_light_fut = async {
+            if light_separate {
+                p.llm
+                    .health(ModelRole::Light)
+                    .await
+                    .map_err(|e| format!("llm (Light): {e}"))
+            } else {
+                Ok(())
+            }
+        };
+        tokio::try_join!(emb_fut, llm_main_fut, llm_light_fut)?;
         Ok(())
     }
 
@@ -230,17 +300,29 @@ impl Runtime {
         if source.status != SourceStatus::Failed {
             return Ok(None);
         }
-        self.store.patch("source", &source.id, json!({"status": "pending", "error": null, "meta": {AUTO_RETRIES: auto_retries}})).await?;
+        self.store
+            .patch(
+                "source",
+                &source.id,
+                json!({"status": "pending", "error": null, "meta": {AUTO_RETRIES: auto_retries}}),
+            )
+            .await?;
         Ok(Some(self.pipeline.enqueue_process(source).await?))
     }
 
     /// Proses ulang satu sumber gagal (manual; menyetel ulang hitungan otomatis).
     pub async fn retry_source(&self, source_id: &str) -> Result<Option<String>> {
-        let source = self.store.get_source(source_id).await?.ok_or_else(|| JobError::Invalid(format!("sumber {source_id} tidak ada")))?;
+        let source = self
+            .store
+            .get_source(source_id)
+            .await?
+            .ok_or_else(|| JobError::Invalid(format!("sumber {source_id} tidak ada")))?;
         if source.status != SourceStatus::Failed {
             return Ok(None);
         }
-        self.check_backends().await.map_err(|e| JobError::Invalid(format!("server belum bisa dihubungi, coba lagi nanti: {e}")))?;
+        self.check_backends().await.map_err(|e| {
+            JobError::Invalid(format!("server belum bisa dihubungi, coba lagi nanti: {e}"))
+        })?;
         self.requeue_source(&source, 0).await
     }
 
@@ -248,7 +330,10 @@ impl Runtime {
     /// `auto`: dipanggil penjadwal — menghormati `retry_failed_max` per sumber.
     pub async fn retry_failed(&self, auto: bool) -> Result<RetryReport> {
         let sources = self.store.failed_sources(500).await?;
-        let mut rep = RetryReport { failed: sources.len() as u32, ..Default::default() };
+        let mut rep = RetryReport {
+            failed: sources.len() as u32,
+            ..Default::default()
+        };
         if sources.is_empty() {
             return Ok(rep);
         }
@@ -258,7 +343,11 @@ impl Runtime {
         }
         let max = u64::from(self.cfg.schedule.retry_failed_max);
         for s in &sources {
-            let done = s.meta.get(AUTO_RETRIES).and_then(Value::as_u64).unwrap_or(0);
+            let done = s
+                .meta
+                .get(AUTO_RETRIES)
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             if auto && done >= max {
                 rep.exhausted += 1;
                 continue;
@@ -288,11 +377,22 @@ impl Runtime {
                     continue;
                 }
                 let key = format!("{kind}:{}:{}", subject.id, bucket(hours));
-                let (_, created) = self.store.enqueue(&Job::new(kind, json!({"subject": subject.id}), key, None)).await?;
+                let (_, created) = self
+                    .store
+                    .enqueue(&Job::new(kind, json!({"subject": subject.id}), key, None))
+                    .await?;
                 n += u32::from(created);
             }
         }
-        let (_, created) = self.store.enqueue(&Job::new(EXPORT, json!({}), format!("export:{}", bucket(sc.export_hours)), None)).await?;
+        let (_, created) = self
+            .store
+            .enqueue(&Job::new(
+                EXPORT,
+                json!({}),
+                format!("export:{}", bucket(sc.export_hours)),
+                None,
+            ))
+            .await?;
         n += u32::from(created);
         Ok(n)
     }
@@ -309,16 +409,28 @@ impl Runtime {
                 last_retry = Some(std::time::Instant::now());
                 match self.retry_failed(true).await {
                     Ok(r) if r.backend_error.is_some() => {
-                        tracing::info!(failed = r.failed, error = r.backend_error.as_deref().unwrap_or(""), "sumber gagal menunggu server LLM/embedding")
+                        tracing::info!(
+                            failed = r.failed,
+                            error = r.backend_error.as_deref().unwrap_or(""),
+                            "sumber gagal menunggu server LLM/embedding"
+                        )
                     }
-                    Ok(r) if r.requeued + r.exhausted > 0 => tracing::info!(requeued = r.requeued, exhausted = r.exhausted, "sumber gagal diproses ulang"),
+                    Ok(r) if r.requeued + r.exhausted > 0 => tracing::info!(
+                        requeued = r.requeued,
+                        exhausted = r.exhausted,
+                        "sumber gagal diproses ulang"
+                    ),
                     Ok(_) => {}
                     Err(e) => tracing::error!(error = %e, "proses ulang otomatis gagal"),
                 }
             }
             self.sync_if_due(&mut last_sync).await;
             // Tiap menit: pengaturan sync bisa diubah dari UI kapan saja.
-            let tick = if retry_every.is_zero() { Duration::from_secs(60) } else { retry_every.min(Duration::from_secs(60)) };
+            let tick = if retry_every.is_zero() {
+                Duration::from_secs(60)
+            } else {
+                retry_every.min(Duration::from_secs(60))
+            };
             tokio::select! {
                 _ = tokio::time::sleep(tick) => {}
                 _ = shutdown.changed() => break,
@@ -329,7 +441,10 @@ impl Runtime {
     /// Sinkronisasi otomatis bila folder sync diatur dan intervalnya sudah lewat.
     async fn sync_if_due(&self, last: &mut Option<std::time::Instant>) {
         let s = sync::load_settings(&self.vault);
-        if s.dir.is_none() || s.interval_minutes == 0 || last.is_some_and(|t| t.elapsed() < Duration::from_secs(s.interval_minutes * 60)) {
+        if s.dir.is_none()
+            || s.interval_minutes == 0
+            || last.is_some_and(|t| t.elapsed() < Duration::from_secs(s.interval_minutes * 60))
+        {
             return;
         }
         *last = Some(std::time::Instant::now());

@@ -55,6 +55,17 @@ pub trait ServiceControl: Send + Sync {
     fn list(&self) -> Vec<ServiceInfo>;
     /// Jalankan layanan `id` bila sedang berhenti. Tidak berbuat apa-apa bila sudah jalan.
     fn start(&self, id: &str) -> Result<(), String>;
+    /// Jalankan semua layanan latar yang sedang berhenti; kembalikan daftar ID layanan yang baru dijalankan.
+    fn start_all(&self) -> Result<Vec<String>, String> {
+        let mut started = Vec::new();
+        for s in self.list() {
+            if !s.running {
+                self.start(&s.id)?;
+                started.push(s.id);
+            }
+        }
+        Ok(started)
+    }
     /// Bisa membuka dialog pilih folder & memindah vault (aplikasi desktop).
     fn can_manage_storage(&self) -> bool {
         false
