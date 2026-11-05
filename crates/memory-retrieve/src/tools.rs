@@ -21,6 +21,13 @@ pub struct EpisodeRef {
     pub time: String,
     pub time_start: Option<String>,
     pub excerpt: String,
+    #[serde(default)]
+    pub obs_type: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Perkiraan token bila teks penuh diambil.
+    #[serde(default)]
+    pub approx_tokens: usize,
 }
 
 impl From<&Episode> for EpisodeRef {
@@ -31,6 +38,9 @@ impl From<&Episode> for EpisodeRef {
             time: e.time_label(),
             time_start: e.time_start.clone(),
             excerpt: if e.summary.is_empty() { e.text.chars().take(300).collect() } else { e.summary.clone() },
+            obs_type: e.obs_type.clone(),
+            project: e.project.clone(),
+            approx_tokens: e.approx_tokens(),
         }
     }
 }
@@ -88,6 +98,15 @@ pub struct TimelineItem {
     pub id: String,
     pub life_phase: Option<String>,
     pub time: String,
+    #[serde(default)]
+    pub obs_type: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub approx_tokens: usize,
+    /// Episode jangkar (mode `timeline(anchor)`).
+    #[serde(default)]
+    pub anchor: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -123,8 +142,18 @@ pub struct ProjectContext {
     pub decisions: Vec<Decision>,
     pub principles: Vec<PrincipleView>,
     pub episodes: Vec<EpisodeRef>,
+    /// Konvensi, koreksi, dan jebakan proyek yang berulang.
+    #[serde(default)]
+    pub lessons: Vec<Lesson>,
     /// Ringkasan konteks siap pakai untuk AI coding agent.
     pub context: String,
+}
+
+/// Opsi tool baca (anggaran & cakupan).
+#[derive(Debug, Clone, Default)]
+pub struct ToolOpts {
+    /// Perkiraan token untuk teks konteks; `None` = `retrieval.tool_budget_tokens`.
+    pub budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -310,6 +339,10 @@ impl Retriever {
                 id: e.id.clone(),
                 life_phase: e.life_phase.clone(),
                 time: e.time_label(),
+                obs_type: e.obs_type.clone(),
+                project: e.project.clone(),
+                approx_tokens: e.approx_tokens(),
+                anchor: false,
             });
         }
         if let Some(name) = entity
@@ -320,15 +353,46 @@ impl Retriever {
                     }
                     let st = f.statement(&ent.name);
                     if let Some(d) = &f.valid_from {
-                        items.push(TimelineItem { kind: "fact_start".into(), date: Some(d.clone()), label: format!("mulai: {st}"), id: f.id.clone(), life_phase: None, time: f.time.label() });
+                        items.push(TimelineItem { kind: "fact_start".into(), date: Some(d.clone()), label: format!("mulai: {st}"), id: f.id.clone(), life_phase: None, time: f.time.label(), obs_type: None, project: None, approx_tokens: 0, anchor: false });
                     }
                     if let Some(d) = &f.valid_to {
-                        items.push(TimelineItem { kind: "fact_end".into(), date: Some(d.clone()), label: format!("berakhir: {st}"), id: f.id.clone(), life_phase: None, time: f.time.label() });
+                        items.push(TimelineItem { kind: "fact_end".into(), date: Some(d.clone()), label: format!("berakhir: {st}"), id: f.id.clone(), life_phase: None, time: f.time.label(), obs_type: None, project: None, approx_tokens: 0, anchor: false });
                     }
                 }
             }
         items.sort_by(|a, b| a.date.cmp(&b.date));
         Ok(Timeline { items, phases: self.store.list_life_phases(subject).await?, undated })
+    }
+
+    /// Kronologi di sekitar satu episode jangkar (urutan dibuat), dalam proyek yang sama
+    /// bila jangkar punya proyek. `anchor` boleh `ep:<id>`.
+    pub async fn timeline_around(&self, subject: &str, anchor: &str, before: usize, after: usize, project: Option<&str>) -> Result<Timeline> {
+        let id = anchor.trim().trim_start_matches("ep:");
+        let Some(a) = self.store.get_episode(id).await?.filter(|e| e.subject == subject) else {
+            return Err(crate::RetrieveError::NotFound(format!("episode jangkar '{anchor}' tidak ada")));
+        };
+        let proj = project.map(str::to_string).or_else(|| a.project.clone());
+        let names = match &proj {
+            Some(p) => self.store.project_names(subject, p).await?,
+            None => vec![],
+        };
+        let eps = self.store.episodes_around(subject, &a, &names, before.min(50), after.min(50)).await?;
+        let items = eps
+            .iter()
+            .map(|e| TimelineItem {
+                kind: "episode".into(),
+                date: Some(e.created_at.chars().take(10).collect()),
+                label: if e.title.is_empty() { e.text.chars().take(80).collect() } else { e.title.clone() },
+                id: e.id.clone(),
+                life_phase: e.life_phase.clone(),
+                time: e.time_label(),
+                obs_type: e.obs_type.clone(),
+                project: e.project.clone(),
+                approx_tokens: e.approx_tokens(),
+                anchor: e.id == a.id,
+            })
+            .collect();
+        Ok(Timeline { items, phases: vec![], undated: vec![] })
     }
 
     pub async fn principles(&self, subject: &str, situation: Option<&str>) -> Result<Vec<PrincipleView>> {
@@ -398,7 +462,13 @@ impl Retriever {
     /// Konteks terpadu untuk satu proyek/workspace ditambah standar kerja & prinsip subjek
     /// lintas AI tool (Claude Code, Antigravity, Cursor, Gemini CLI).
     pub async fn project_context(&self, subject: &str, project: &str, task: Option<&str>) -> Result<ProjectContext> {
+        self.project_context_with(subject, project, task, &ToolOpts::default()).await
+    }
+
+    pub async fn project_context_with(&self, subject: &str, project: &str, task: Option<&str>, opts: &ToolOpts) -> Result<ProjectContext> {
         let proj = project.trim();
+        let budget_tokens = opts.budget_tokens.unwrap_or(self.cfg.retrieval.tool_budget_tokens).clamp(200, 50_000);
+        let project_names = self.store.project_names(subject, proj).await?;
         let query_str = match task.map(str::trim).filter(|t| !t.is_empty()) {
             Some(t) => format!("{proj} {t}"),
             None => format!("{proj} arsitektur tech stack konvensi keputusan aturan bug"),
@@ -416,11 +486,11 @@ impl Retriever {
         let entity = self.find_entity(subject, proj).await?;
         let mut current_facts: Vec<FactView> = Vec::new();
         let mut history_facts: Vec<FactView> = Vec::new();
-        if let Some(ent) = &entity {
-            if let Ok(Some(w)) = self.who_is_id(subject, &ent.id).await {
-                current_facts = w.current_facts;
-                history_facts = w.history;
-            }
+        if let Some(ent) = &entity
+            && let Ok(Some(w)) = self.who_is_id(subject, &ent.id).await
+        {
+            current_facts = w.current_facts;
+            history_facts = w.history;
         }
         for fv in &recall.facts {
             if fv.current {
@@ -439,7 +509,9 @@ impl Retriever {
                 &EpisodeFilter {
                     status: Some(EpisodeStatus::Active),
                     project: Some(proj.to_string()),
+                    projects: project_names.clone(),
                     limit: 20,
+                    newest_first: true,
                     ..Default::default()
                 },
             )
@@ -475,60 +547,96 @@ impl Retriever {
             }
         }
 
+        // Keputusan & fakta: utamakan yang bukan "peristiwa" sekali-pakai, lalu batasi jumlah.
+        current_facts.sort_by_key(|f| crate::is_event_fact(&f.category));
+        current_facts.truncate(40);
+        history_facts.truncate(20);
+        decisions.truncate(15);
         let episodes: Vec<EpisodeRef> = ep_list.iter().take(15).map(EpisodeRef::from).collect();
         let principles = self.principles(subject, task.or(Some(proj))).await?;
+        let principles: Vec<PrincipleView> = principles.into_iter().take(8).collect();
+        let lessons = self.store.list_lessons(subject, &project_names, Some("active"), 12).await?;
         let found = entity.is_some()
             || !current_facts.is_empty()
             || !decisions.is_empty()
             || !episodes.is_empty()
-            || !principles.is_empty();
+            || !principles.is_empty()
+            || !lessons.is_empty();
 
-        let mut ctx = format!("# Konteks Proyek & Memori Kerja: {proj}\n");
+        let mut ctx = String::new();
+        let push = |line: &str, out: &mut String| -> bool {
+            if crate::approx_tokens(out) + crate::approx_tokens(line) > budget_tokens {
+                return false;
+            }
+            out.push_str(line);
+            out.push('\n');
+            true
+        };
+        push(&format!("# Konteks Proyek & Memori Kerja: {proj}"), &mut ctx);
         if let Some(ent) = &entity {
-            ctx.push_str(&format!("\nEntitas Utama: **{}** ({})", ent.name, ent.kind.label_id()));
+            let mut l = format!("Entitas: {} ({})", ent.name, ent.kind.label_id());
             if !ent.aliases.is_empty() {
-                ctx.push_str(&format!(" | Alias: {}", ent.aliases.join(", ")));
+                l.push_str(&format!(" | alias: {}", ent.aliases.join(", ")));
             }
             if !ent.description.is_empty() {
-                ctx.push_str(&format!("\nDeskripsi: {}", ent.description));
+                l.push_str(&format!("\n{}", truncate_chars(&ent.description, 300)));
             }
-            ctx.push('\n');
+            push(&l, &mut ctx);
+        }
+        if !lessons.is_empty() {
+            push("\n## Konvensi & jebakan proyek (berulang)", &mut ctx);
+            for l in &lessons {
+                let n = if l.occurrences > 1 { format!(" (x{})", l.occurrences) } else { String::new() };
+                if !push(&format!("- [{}] {}{n}", l.kind.label_id(), l.title), &mut ctx) {
+                    break;
+                }
+            }
         }
         if !current_facts.is_empty() {
-            ctx.push_str("\n## Fakta & Arsitektur Aktif (Berlaku Sekarang)\n");
-            for f in current_facts.iter().take(25) {
-                let cite = f.evidence.iter().take(2).map(|e| format!("[ep:{e}]")).collect::<Vec<_>>().join("");
-                ctx.push_str(&format!("- [{}] {} {} {cite}\n", if f.category.is_empty() { "umum" } else { &f.category }, f.statement, if let Some(vf) = &f.valid_from { format!("(sejak {vf})") } else { String::new() }));
+            push("\n## Fakta & arsitektur aktif (berlaku sekarang)", &mut ctx);
+            for f in current_facts.iter().filter(|f| !crate::is_event_fact(&f.category)).take(25) {
+                let cite = f.evidence.first().map(|e| format!(" [ep:{e}]")).unwrap_or_default();
+                if !push(&format!("- [{}] {}{cite}", if f.category.is_empty() { "umum" } else { &f.category }, f.statement), &mut ctx) {
+                    break;
+                }
             }
         }
         if !decisions.is_empty() {
-            ctx.push_str("\n## Keputusan Teknis & Penyelesaian Masalah\n");
-            for d in decisions.iter().take(15) {
-                let reason = d.reason.as_deref().filter(|r| !r.is_empty()).map(|r| format!(" (Alasan: {r})")).unwrap_or_default();
-                ctx.push_str(&format!("- **Situasi**: {} -> **Keputusan**: {}{}\n", d.situation, d.action, reason));
+            push("\n## Keputusan teknis & penyelesaian masalah", &mut ctx);
+            for d in decisions.iter() {
+                let reason = d.reason.as_deref().filter(|r| !r.is_empty()).map(|r| format!(" (alasan: {r})")).unwrap_or_default();
+                if !push(&format!("- {} -> {}{}", d.situation, d.action, reason), &mut ctx) {
+                    break;
+                }
             }
         }
         if !principles.is_empty() {
-            ctx.push_str("\n## Prinsip Kerja & Preferensi Subjek (Lintas Proyek/Tool)\n");
-            for p in principles.iter().take(8) {
-                let cite = p.evidence.iter().take(2).map(|e| format!("[ep:{}]", e.id)).collect::<Vec<_>>().join("");
-                ctx.push_str(&format!("- {} (domain: {}, keyakinan {:.0}%) {cite}\n", p.principle.statement, if p.principle.domain.is_empty() { "umum" } else { &p.principle.domain }, p.principle.confidence * 100.0));
+            push("\n## Prinsip kerja subjek (lintas proyek)", &mut ctx);
+            for p in principles.iter().take(5) {
+                if !push(&format!("- {}", p.principle.statement), &mut ctx) {
+                    break;
+                }
             }
         }
         if !episodes.is_empty() {
-            ctx.push_str("\n## Catatan Sesi & Riwayat Terkait\n");
+            push("\n## Indeks sesi & riwayat (ambil detail: get_episodes(ids=[...]))", &mut ctx);
             for ep in &episodes {
-                ctx.push_str(&format!("- [ep:{}] ({}) **{}**: {}\n", ep.id, ep.time, ep.title, ep.excerpt));
+                let date = ep.time_start.as_deref().unwrap_or(&ep.time);
+                if !push(&crate::index_line(&ep.id, date, ep.obs_type.as_deref(), None, &ep.title, ep.approx_tokens), &mut ctx) {
+                    break;
+                }
             }
         }
         if !history_facts.is_empty() {
-            ctx.push_str("\n## Riwayat Fakta Lama (Sudah Digantikan/Ditutup)\n");
-            for f in history_facts.iter().take(10) {
-                ctx.push_str(&format!("- {} (dulu: {}–{})\n", f.statement, f.valid_from.as_deref().unwrap_or("?"), f.valid_to.as_deref().unwrap_or("?")));
+            push("\n## Riwayat fakta lama (sudah digantikan)", &mut ctx);
+            for f in history_facts.iter().take(8) {
+                if !push(&format!("- {} ({}–{})", f.statement, f.valid_from.as_deref().unwrap_or("?"), f.valid_to.as_deref().unwrap_or("?")), &mut ctx) {
+                    break;
+                }
             }
         }
         if !found {
-            ctx.push_str("\n(Belum ada catatan memori untuk proyek ini.)\n");
+            push("\n(Belum ada catatan memori untuk proyek ini.)", &mut ctx);
         }
 
         Ok(ProjectContext {
@@ -540,6 +648,7 @@ impl Retriever {
             decisions,
             principles,
             episodes,
+            lessons,
             context: ctx,
         })
     }

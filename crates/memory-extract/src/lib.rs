@@ -17,6 +17,7 @@ pub mod reconcile;
 pub mod resolve;
 pub mod review;
 pub mod segment;
+pub mod session;
 pub mod vault;
 pub mod voice;
 

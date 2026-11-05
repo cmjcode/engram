@@ -61,6 +61,7 @@ ATURAN WAJIB:
 9. decisions: situasi/masalah -> tindakan/keputusan teknis atau personal -> alasan (mengapa memilih arsitektur/solusi/keputusan tersebut).
 10. quotes: kalimat khas, aturan tegas, atau prinsip penting yang dinyatakan subjek.
 11. title singkat; summary 1-3 kalimat bahasa Indonesia yang padat dan jelas.
+12. Penanda `<redacted type='…'/>` adalah rahasia yang sudah dihapus sebelum kamu membacanya: perlakukan sebagai placeholder, jangan menebak nilainya, dan jangan menyalinnya ke fakta.
 Keluarkan JSON saja.";
 
 pub fn extract_user(subject_name: &str, observed: &str, birth: Option<&str>, known_entities: &str, text: &str) -> String {
@@ -131,3 +132,26 @@ ATURAN WAJIB:
 3. `rejections`: daftar `fact_id` yang hanya berupa aktivitas/proses teknis sesaat (misal 'sedang menjalankan kompilasi', 'meminta perbaikan bug hari ini') dan BUKAN fakta biografis/arsitektur jangka panjang.
 4. Jangan memasukkan ID yang sama ke lebih dari satu aksi. Fakta yang sudah bersih dan masih berlaku biarkan saja (tidak perlu disebut).
 Keluarkan JSON {merges, closures, rejections}.";
+
+pub const SESSION_SYSTEM: &str = "\
+Kamu adalah pengamat sesi kerja seorang programmer bersama agent AI (Claude Code, Antigravity, Cursor, Gemini CLI). Masukanmu adalah SATU giliran: prompt pengguna, daftar pemanggilan tool (berkas dibaca/diubah, perintah, hasil ringkas), dan jawaban akhir agent.
+Tugasmu: mencatat HANYA hal yang mahal ditemukan ulang di sesi berikutnya, lalu membuat ringkasan giliran.
+ATURAN:
+1. `observations`: 0-6 observasi. Jenis (`obs_type`): decision (pilihan arsitektur/teknis beserta alasannya), bugfix (akar masalah + perbaikan), discovery (cara kerja sistem yang baru dipahami, jebakan), feature (fitur selesai), refactor, change (perubahan lain yang penting). Lewati pekerjaan rutin: membaca berkas tanpa temuan, perintah git biasa, format kode, percobaan yang dibatalkan.
+2. `narrative` harus berdiri sendiri: sebut nama berkas/fungsi/komponen, sebab, dan hasil. Bahasa Indonesia, padat.
+3. `files_read` / `files_modified`: path seperti di tool (relatif akar proyek bila ada). `concepts`: 1-4 tag singkat (mis. 'migrasi skema', 'rate limit', 'trade-off caching').
+4. `entities`: proyek, komponen (berkas/modul/endpoint/tabel), tool/teknologi, orang; `kind` tepat (JANGAN beri kind person untuk nama berkas/repo). Subjek = pengguna; sebut dengan is_self=true hanya bila relevan.
+5. `facts`: fakta tahan lama tentang proyek (tech_stack, arsitektur, konvensi_kode, aturan_bisnis, bug_fix, infrastruktur, workflow, preferensi_tool). `quote` WAJIB disalin persis dari teks masukan. Jangan membuat fakta dari dugaan.
+6. `decisions`: situasi -> tindakan -> alasan. `lessons`: koreksi pengguna terhadap agent (kind correction), konvensi proyek (convention), jebakan (pitfall), temuan (discovery); `title` kalimat imperatif pendek & stabil (mis. 'Jangan commit tanpa diminta', 'Pakai cargo test -p untuk satu crate'), `quote` disalin persis bila ada.
+7. `summary` WAJIB diisi bila ada pekerjaan nyata: request (permintaan pengguna 1 kalimat), investigated (apa yang diperiksa), learned (temuan), completed (yang selesai), next_steps (yang belum/berikutnya). Kosongkan field yang tidak ada.
+8. Bila giliran ini hanya basa-basi, pertanyaan singkat tanpa tindakan, atau navigasi tanpa temuan: `skip=true` dengan `skip_reason`, observations kosong, summary null.
+9. Penanda `<redacted type='…'/>` adalah rahasia yang sudah dihapus: perlakukan sebagai placeholder, jangan menebak nilainya.
+Keluarkan JSON saja.";
+
+pub fn session_user(subject_name: &str, project: Option<&str>, client: &str, observed: &str, known_entities: &str, text: &str) -> String {
+    format!(
+        "SUBJEK (pengguna): {subject_name}\nProyek: {}\nClient: {client}\nTanggal: {observed}\nEntitas yang sudah dikenal (pakai nama yang sama HANYA bila benar-benar merujuk entitas yang sama):\n{}\n\nTEKS GILIRAN:\n{text}",
+        project.unwrap_or("tidak diketahui"),
+        if known_entities.is_empty() { "-" } else { known_entities }
+    )
+}

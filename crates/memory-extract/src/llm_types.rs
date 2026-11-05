@@ -57,6 +57,35 @@ pub struct ExtractionOut {
     pub quotes: Vec<String>,
     #[serde(default)]
     pub trait_signals: Vec<TraitSignal>,
+    /// Hanya untuk observasi sesi agent: jenis observasi
+    /// (decision | bugfix | discovery | feature | refactor | change | session_summary).
+    #[serde(default)]
+    pub obs_type: Option<String>,
+    /// Tag konsep singkat (pola, trade-off, nama fitur/modul).
+    #[serde(default)]
+    pub concepts: Vec<String>,
+    /// Berkas yang dibaca / diubah (path relatif akar proyek).
+    #[serde(default)]
+    pub files_read: Vec<String>,
+    #[serde(default)]
+    pub files_modified: Vec<String>,
+    /// Pelajaran proyek (konvensi, koreksi pengguna, jebakan) yang layak diingat.
+    #[serde(default)]
+    pub lessons: Vec<LessonOut>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LessonOut {
+    /// correction | convention | pitfall | discovery
+    #[serde(default)]
+    pub kind: String,
+    /// Satu kalimat imperatif singkat, stabil (dipakai sebagai kunci dedup).
+    pub title: String,
+    #[serde(default)]
+    pub detail: String,
+    /// Disalin persis dari teks.
+    #[serde(default)]
+    pub quote: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -198,4 +227,65 @@ pub struct FactClosureOut {
     pub valid_to: Option<String>,
     #[serde(default)]
     pub superseded_by: Option<String>,
+}
+
+/// Keluaran ekstraksi satu giliran sesi agent: ringkasan sesi + observasi bertipe.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SessionExtraction {
+    /// Tidak ada yang layak diingat (basa-basi, navigasi, pembacaan tanpa hasil).
+    #[serde(default)]
+    pub skip: bool,
+    #[serde(default)]
+    pub skip_reason: Option<String>,
+    #[serde(default)]
+    pub summary: Option<SummaryOut>,
+    #[serde(default)]
+    pub observations: Vec<ObservationOut>,
+}
+
+/// Ringkasan giliran: apa yang diminta, diselidiki, dipelajari, selesai, dan langkah berikut.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SummaryOut {
+    #[serde(default)]
+    pub request: String,
+    #[serde(default)]
+    pub investigated: String,
+    #[serde(default)]
+    pub learned: String,
+    #[serde(default)]
+    pub completed: String,
+    #[serde(default)]
+    pub next_steps: String,
+}
+
+/// Satu observasi: hal yang mahal ditemukan ulang (keputusan, bugfix, temuan, fitur, refactor, perubahan).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ObservationOut {
+    /// decision | bugfix | discovery | feature | refactor | change
+    #[serde(default)]
+    pub obs_type: String,
+    pub title: String,
+    /// Narasi 2-6 kalimat yang berdiri sendiri (tanpa perlu membaca sesi aslinya).
+    #[serde(default)]
+    pub narrative: String,
+    /// Fakta atomik tentang kode/proyek (teks bebas) untuk ringkasan.
+    #[serde(default)]
+    pub facts_text: Vec<String>,
+    #[serde(default)]
+    pub concepts: Vec<String>,
+    #[serde(default)]
+    pub files_read: Vec<String>,
+    #[serde(default)]
+    pub files_modified: Vec<String>,
+    #[serde(default)]
+    pub entities: Vec<EntityOut>,
+    #[serde(default)]
+    pub facts: Vec<FactOut>,
+    #[serde(default)]
+    pub decisions: Vec<Decision>,
+    #[serde(default)]
+    pub lessons: Vec<LessonOut>,
+    /// Kutipan pendukung dari teks sesi (disalin persis).
+    #[serde(default)]
+    pub quotes: Vec<String>,
 }

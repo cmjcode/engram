@@ -162,9 +162,7 @@ pub fn proper_noun_count(text: &str) -> usize {
     for w in text.split_whitespace() {
         let clean = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '_' && c != '-' && c != '.');
         let first = clean.chars().next();
-        if !sentence_start && first.is_some_and(char::is_uppercase) && clean.chars().count() > 1 {
-            count += 1;
-        } else if is_technical_token(clean) {
+        if (!sentence_start && first.is_some_and(char::is_uppercase) && clean.chars().count() > 1) || is_technical_token(clean) {
             count += 1;
         }
         sentence_start = w.ends_with(['.', '!', '?', ':']);

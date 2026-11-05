@@ -65,23 +65,32 @@ memprosesnya ulang otomatis tiap `[schedule] retry_failed_minutes` (default 10)
 ## Menghubungkan agent AI (MCP)
 
 Paling mudah: di aplikasi desktop, klik ikon roda gigi (Pengaturan) > tab **Agent AI**, lalu **Pasang** pada
-Antigravity, VS Code, atau Claude Code. Aplikasi menambah server `engram` ke config client itu
-(`~/.gemini/antigravity/mcp_config.json`, `mcp.json` di folder User VS Code, atau `claude mcp add -s user`),
+Antigravity, VS Code, Claude Code, Cursor, Codex CLI, atau Windsurf. Aplikasi menambah server `engram` ke
+config client itu (`~/.gemini/antigravity/mcp_config.json`, `mcp.json` di folder User VS Code,
+`claude mcp add -s user`, `~/.cursor/mcp.json`, `~/.codex/config.toml`, `~/.codeium/windsurf/mcp_config.json`),
 tanpa mengubah server lain, dan menyimpan cadangan `.bak`. Tombol yang sama ada di `engram serve` bila
 server berjalan di 127.0.0.1.
 
-Lewat terminal (Antigravity, Gemini CLI, Claude Code, Cursor):
+**Profil tool.** Client koding murni (VS Code, Cursor, Codex, Windsurf) didaftarkan dengan `?profile=coding`:
+hanya `project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles` yang dimuat, sehingga konteks
+agent tidak terisi tool memori hidup (`family_tree`, `persona_context`, `memory_gaps`, `compact`, `list_subjects`).
+Antigravity dan Claude Code memakai profil `full`. Untuk stdio: `engram mcp --profile coding`.
+
+Lewat terminal (Antigravity, Gemini CLI, Claude Code, Cursor, Codex, Windsurf):
 
 ```bash
 scripts/install-mcp.sh                      # Antigravity, lewat HTTP ke aplikasi desktop
 scripts/install-mcp.sh --client all         # semua client (MCP + Global Rule + Hook otomatis)
 scripts/install-mcp.sh --mode stdio         # tanpa aplikasi desktop (jalankan binary engram)
+scripts/install-mcp.sh --client codex                # Codex CLI (~/.codex/config.toml), profil coding
+scripts/install-mcp.sh --client cursor --profile full # timpa profil bawaan
 scripts/install-mcp.sh --uninstall --client all
 ```
 
 Selain mendaftarkan server MCP `engram`, script ini juga memasang:
-- **Global Rule** (`~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, `~/.claude/CLAUDE.md`) agar agent otomatis menyimpan fakta/cerita hidup lewat `remember` dan mengambil konteks lewat `recall`/`who_is`/`timeline`/`principles`.
+- **Global Rule** (`~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, `~/.claude/CLAUDE.md`; versi ringkas di `~/.codex/AGENTS.md` dan `~/.codeium/windsurf/memories/global_rules.md`) agar agent otomatis memanggil `project_context`/`recall` di awal tugas dan menyimpan keputusan lewat `remember`.
 - **Hook Otomatis** (`~/.local/bin/engram-auto-remember` dari `scripts/auto-remember-hook.py`) pada event `Stop` (Antigravity & Claude Code) dan `AfterAgent` (Gemini CLI) yang mengirim percakapan baru ke MCP `remember` (atau ke `vault/inbox/` bila server sedang mati).
+- **Hook SessionStart** di Claude Code dan Gemini CLI: menyuntik indeks konteks proyek untuk repositori yang sedang dibuka sebagai konteks awal sesi (`engram hook <client> context`; cadangan Python `scripts/session-context-hook.py` bila binary tidak ada).
 
 Mode HTTP membuat token tetap `MEMORY_TOKEN` (disimpan di `mcp_token` dan LaunchAgent
 `id.engram.ai.token`, jadi tetap ada setelah reboot). Setelah pertama kali dijalankan, keluar
@@ -97,8 +106,12 @@ claude mcp add engram -- /path/ke/engram --config /path/ke/memory.toml mcp
 Atau lewat HTTP: `POST http://127.0.0.1:7878/mcp` (pakai header
 `Authorization: Bearer $MEMORY_TOKEN` bila token diset).
 
-Tool: `recall`, `who_is`, `timeline`, `principles`, `persona_context`,
-`family_tree`, `remember`, `memory_gaps`, `list_subjects`.
+Transport HTTP mengikuti Streamable HTTP tanpa sesi (spesifikasi MCP 2026-07-28; versi 2024-11-05 s/d
+2025-11-25 tetap dinegosiasikan). `GET /mcp` dengan `Accept: text/event-stream` membuka stream keep-alive.
+
+Tool (deskripsi dalam bahasa Inggris, lengkap dengan `title`, `annotations`, dan `outputSchema`):
+`project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles`, `persona_context`,
+`family_tree`, `memory_gaps`, `list_subjects`, `compact`.
 
 ## Melihat dan mengoreksi
 
@@ -113,7 +126,7 @@ Klik ikon roda gigi di kanan atas UI:
 - **Umum**: tema (ikuti sistem/terang/gelap), subjek default, dan (desktop) tombol buka folder
   data, inbox, dan konfigurasi.
 - **Data & Sync**: lokasi data dan sinkronisasi Google Drive (lihat di bawah).
-- **Agent AI**: pasang server MCP ke Antigravity, VS Code, atau Claude Code.
+- **Agent AI**: pasang server MCP ke Antigravity, VS Code, Claude Code, Cursor, Codex CLI, atau Windsurf (lencana *profil coding* menandai client yang hanya memuat tool sesi koding).
 - **Layanan** (desktop): status server, worker, penjadwal, dan pemantau inbox; jalankan lagi yang berhenti.
   Titik merah di ikon roda gigi = ada layanan berhenti; titik hijau = ada update baru.
 - **Model AI**: alamat server & model LLM, embedding, dan transkripsi Whisper, termasuk API key.
@@ -209,3 +222,38 @@ Catatan: setiap segmen dinilai seolah vault kosong (tanpa bonus kebaruan atau
 sebutan orang yang sudah dikenal), jadi angkanya sedikit lebih ketat daripada
 saat import sungguhan. Pakai `--refresh` setelah mengganti model atau prompt
 segmentasi. Usulan tuning dari label yang sedikit (< 40) mudah overfit.
+
+
+## Sesi kerja agent, privasi, dan pengambilan bertahap
+
+**Apa yang direkam.** Setelah `scripts/install-mcp.sh --client claude` (dengan binary `engram` terpasang),
+setiap giliran kerja di Claude Code tersimpan: prompt Anda, ringkasan tiap pemanggilan tool (berkas yang
+dibaca/diubah, perintah, hasil singkat), dan jawaban akhir agent. Saat giliran selesai, pipeline mengubahnya
+menjadi observasi bertipe (keputusan, bugfix, temuan, fitur, refactor, perubahan), satu ringkasan sesi, dan
+pelajaran proyek (konvensi, koreksi Anda, jebakan). I/O tool mentah tetap ada di `vault/sessions/<sesi>/`
+agar setiap memori bisa ditelusuri ke sumbernya. Giliran basa-basi dilewati oleh LLM (`skip`).
+
+**Apa yang disuntik saat sesi mulai.** Hook `SessionStart` menambahkan blok ≤ 9.500 karakter berisi
+sesi terakhir, konvensi & jebakan proyek, fakta arsitektur yang berlaku, prinsip kerja, dan indeks observasi
+terbaru (ID + perkiraan token). Agent lalu memanggil `get_episodes(ids)` hanya untuk yang relevan.
+Ukuran blok diukur dan dikurangi otomatis (narasi sesi → prinsip → sesi → fakta → observasi) sampai muat.
+Atur di Pengaturan atau `[inject]` di `memory.toml`; `enabled = false` mematikannya.
+
+**Privasi.** Bungkus bagian yang tidak boleh disimpan dengan `<private>…</private>`. Rahasia yang terdeteksi
+(AWS, GitHub, OpenAI/Anthropic, Slack, JWT, kunci PEM, webhook, kredensial di URL, dll.) diganti penanda
+`<redacted type='…'/>` sebelum disimpan; pola generik (`*_PASSWORD=`, `Authorization: Bearer`) aktif bila
+`privacy.redact_generic = true`. Penyaring ini berjalan di satu titik (tahap Ingest) sehingga berlaku untuk
+hook, tool `remember`, dan import berkas.
+
+**Bila server mati.** Hook menyimpan event ke `~/Library/Application Support/id.engram.ai/hook-spool/`
+(Linux: `~/.local/share/id.engram.ai/`) dan mengirim ulang saat server kembali hidup. Konteks awal sesi
+hanya kosong (agent tetap jalan).
+
+**Memeriksa.** Tampilan *Sesi & pelajaran* di UI; `GET /api/subjects/<subjek>/context/inject?project=<nama>`
+untuk melihat blok yang akan disuntik; `ENGRAM_HOOK_DEBUG=1` membuat hook mencetak durasi ke stderr.
+
+**Import & berbagi.**
+- `engram import-claude-memory` (tanpa `--apply` hanya menampilkan) mengimpor auto-memory Claude Code
+  langsung sebagai episode, tanpa LLM, karena isinya sudah terdistilasi.
+- `engram repo export <repo>` menulis `<repo>/.engram/` (manifest, `lessons.jsonl`, `decisions.jsonl`,
+  `facts.jsonl`, README); `engram repo import <repo>` menggabungkannya ke vault lain berdasarkan kunci stabil.

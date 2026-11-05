@@ -1,6 +1,7 @@
 //! `engram`: CLI platform engram.
 
 mod bench;
+mod hook;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -78,8 +79,42 @@ enum Cmd {
         #[arg(long)]
         no_worker: bool,
     },
-    /// Server MCP lewat stdio (untuk Claude Code, Claude Desktop, dll.).
-    Mcp,
+    /// Impor auto-memory Claude Code (~/.claude/projects/*/memory/*.md) langsung sebagai
+    /// episode tanpa LLM: isinya sudah terdistilasi. Dry-run bawaan; pakai --apply untuk menyimpan.
+    #[command(name = "import-claude-memory")]
+    ImportClaudeMemory {
+        /// Semua proyek di ~/.claude/projects (bawaan: folder memory milik repo saat ini).
+        #[arg(long)]
+        all: bool,
+        /// Folder memory tertentu.
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Nama proyek untuk episode yang diimpor (bawaan: ditebak dari nama folder/repo).
+        #[arg(long)]
+        project: Option<String>,
+        /// Simpan sungguhan (tanpa ini hanya menampilkan apa yang akan diimpor).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Bundel memori per-repositori `.engram/` (pelajaran, keputusan, fakta) untuk di-commit & dibagikan.
+    Repo {
+        #[command(subcommand)]
+        cmd: RepoCmd,
+    },
+    /// Hook agent AI (dipanggil Claude Code/Gemini CLI/Antigravity, payload JSON di stdin).
+    /// Tidak membuka vault; mengirim event ke server engram dan selalu keluar 0.
+    Hook {
+        /// claude-code | gemini-cli | antigravity | cursor
+        client: String,
+        /// context | session-init | observation | summarize | pre-compact | session-end | file-context | turn
+        event: String,
+    },
+    /// Server MCP lewat stdio (untuk Claude Code, Codex, Cursor, dll.).
+    Mcp {
+        /// Subset tool yang diekspos: full (semua) | coding (hanya tool sesi koding).
+        #[arg(long, default_value = "full")]
+        profile: String,
+    },
     /// Cari memori.
     Recall {
         query: String,
@@ -243,6 +278,26 @@ enum SubjectCmd {
 }
 
 #[derive(Subcommand)]
+enum RepoCmd {
+    /// Tulis <repo>/.engram/ dari memori proyek ini.
+    Export {
+        /// Folder repositori (bawaan: folder saat ini).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Nama proyek (bawaan: dari akar git / nama folder).
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Gabungkan <repo>/.engram/ ke vault ini (tidak menghapus apa pun).
+    Import {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        project: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum VaultCmd {
     /// Tampilkan lokasi vault.
     Where,
@@ -355,6 +410,26 @@ fn load_config(path: &Path) -> Result<MemoryConfig> {
     Ok(cfg)
 }
 
+/// Frontmatter YAML sederhana (`key: value`) + isi.
+fn split_frontmatter(raw: &str) -> (std::collections::BTreeMap<String, String>, String) {
+    let mut map = std::collections::BTreeMap::new();
+    let t = raw.trim_start();
+    if let Some(rest) = t.strip_prefix("---")
+        && let Some(end) = rest.find("\n---")
+    {
+        for line in rest[..end].lines() {
+            if let Some((k, v)) = line.split_once(':') {
+                let k = k.trim();
+                if !k.is_empty() && !line.starts_with(' ') {
+                    map.insert(k.to_string(), v.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        return (map, rest[end + 4..].trim_start_matches('-').to_string());
+    }
+    (map, raw.to_string())
+}
+
 fn date(s: &str) -> Result<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").with_context(|| format!("tanggal tidak valid (YYYY-MM-DD): {s}"))
 }
@@ -423,6 +498,13 @@ async fn main() -> Result<()> {
         println!("Vault siap di {} dengan subjek '{}' ({}).", rt.vault.root().display(), s.name, s.id);
         return Ok(());
     }
+    if let Cmd::Hook { client, event } = &cli.cmd {
+        if let Err(e) = hook::run(&cli.config, client, event).await {
+            eprintln!("engram hook: {e}");
+            println!("{{}}");
+        }
+        return Ok(());
+    }
     if let Cmd::Vault { cmd } = &cli.cmd {
         let cfg = load_config(&cli.config)?;
         return match cmd {
@@ -454,7 +536,7 @@ async fn main() -> Result<()> {
     let j = cli.json;
 
     match cli.cmd {
-        Cmd::Init { .. } | Cmd::Bench { .. } | Cmd::Vault { .. } => unreachable!(),
+        Cmd::Init { .. } | Cmd::Bench { .. } | Cmd::Vault { .. } | Cmd::Hook { .. } => unreachable!(),
         Cmd::Subject { cmd } => match cmd {
             SubjectCmd::List => {
                 let subs = rt.store.list_subjects().await?;
@@ -556,10 +638,11 @@ async fn main() -> Result<()> {
                 let _ = h.await;
             }
         }
-        Cmd::Mcp => {
+        Cmd::Mcp { profile } => {
+            let profile = memory_server::mcp::Profile::parse(&profile).ok_or_else(|| anyhow::anyhow!("profile tidak dikenal: {profile} (pakai 'full' atau 'coding')"))?;
             let stop = shutdown_signal();
             let _hs = background(&rt, &stop, false).await;
-            memory_server::mcp::serve_stdio(memory_server::AppState::new(rt.clone(), importer(&rt))).await?;
+            memory_server::mcp::serve_stdio(memory_server::AppState::new(rt.clone(), importer(&rt)), profile).await?;
         }
         Cmd::Recall { query, from, to, as_of } => {
             let r = rt.retriever.recall(&RecallQuery { from, to, as_of, ..RecallQuery::new(&subject, &query) }).await?;
@@ -673,6 +756,85 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Export { dir } => println!("{}", memory_jobs::archive::export(&rt, dir).await?.display()),
+        Cmd::Repo { cmd } => match cmd {
+            RepoCmd::Export { path, project } => {
+                let r = memory_jobs::repo_bundle::export_repo(&rt, &subject, &std::path::absolute(&path)?, project.as_deref()).await?;
+                print(j, &r, || format!("Bundel {} ditulis ke {}: {} pelajaran, {} keputusan, {} fakta.", r.project, r.dir.display(), r.lessons, r.decisions, r.facts));
+            }
+            RepoCmd::Import { path, project } => {
+                let r = memory_jobs::repo_bundle::import_repo(&rt, &subject, &std::path::absolute(&path)?, project.as_deref()).await?;
+                print(j, &r, || format!("Impor {}: pelajaran {} baru / {} digabung; keputusan {} baru / {} duplikat; {} fakta hanya dibaca.", r.project, r.lessons_new, r.lessons_merged, r.decisions_new, r.decisions_duplicate, r.facts));
+            }
+        },
+        Cmd::ImportClaudeMemory { all, source, project, apply } => {
+            let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME tidak diketahui")?;
+            let projects_dir = home.join(".claude").join("projects");
+            let mut dirs: Vec<(PathBuf, Option<String>)> = Vec::new();
+            if let Some(src) = source {
+                dirs.push((src, project.clone()));
+            } else if all {
+                if let Ok(rd) = std::fs::read_dir(&projects_dir) {
+                    for e in rd.flatten() {
+                        let m = e.path().join("memory");
+                        if m.is_dir() {
+                            dirs.push((m, project.clone()));
+                        }
+                    }
+                }
+            } else {
+                let cwd = std::env::current_dir()?;
+                let root = memory_core::project::detect_project(&cwd).map(|p| p.root).unwrap_or(cwd);
+                let encoded: String = root.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+                let proj = project.clone().or_else(|| memory_core::project::detect_project(&root).map(|p| p.name));
+                dirs.push((projects_dir.join(encoded).join("memory"), proj));
+            }
+            let known: Vec<String> = rt.store.list_entities(&subject, Some(memory_core::model::EntityKind::Project), 2000, 0).await?.into_iter().map(|e| e.name).collect();
+            let guess = |dir: &std::path::Path| -> Option<String> {
+                let enc = dir.parent()?.file_name()?.to_string_lossy().to_lowercase();
+                known.iter().filter(|n| { let k: String = n.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect(); enc.ends_with(&format!("-{k}")) || enc == k }).max_by_key(|n| n.len()).cloned()
+            };
+            let (mut found, mut saved, mut dup) = (0u32, 0u32, 0u32);
+            for (dir, proj) in dirs {
+                let proj = proj.or_else(|| guess(&dir));
+                let Ok(rd) = std::fs::read_dir(&dir) else {
+                    eprintln!("lewati (tidak ada): {}", dir.display());
+                    continue;
+                };
+                let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md") && p.file_name().is_some_and(|n| n != "MEMORY.md")).collect();
+                files.sort();
+                for f in files {
+                    let raw = std::fs::read_to_string(&f)?;
+                    let (fm, body) = split_frontmatter(&raw);
+                    let title = fm.get("name").cloned().filter(|t| !t.is_empty()).unwrap_or_else(|| f.file_stem().unwrap_or_default().to_string_lossy().to_string());
+                    if body.trim().is_empty() {
+                        continue;
+                    }
+                    found += 1;
+                    if !apply {
+                        println!("{}	{}	{}", proj.as_deref().unwrap_or("-"), title, f.display());
+                        continue;
+                    }
+                    let out = rt
+                        .pipeline
+                        .ingest_distilled(memory_extract::ingest::DistilledDoc {
+                            subject: subject.clone(),
+                            title,
+                            summary: fm.get("description").cloned().unwrap_or_default(),
+                            text: body.trim().to_string(),
+                            project: proj.clone(),
+                            original_name: Some(f.file_name().unwrap_or_default().to_string_lossy().to_string()),
+                            meta: json!({"via": "claude-memory", "path": f.display().to_string(), "type": fm.get("type")}),
+                        })
+                        .await?;
+                    if out.duplicate { dup += 1 } else { saved += 1 }
+                }
+            }
+            if apply {
+                println!("{found} berkas: {saved} disimpan sebagai episode, {dup} duplikat (tanpa LLM).");
+            } else {
+                println!("{found} berkas akan diimpor. Jalankan lagi dengan --apply untuk menyimpan.");
+            }
+        }
         Cmd::Backup { out, recipient } => {
             let r = recipient.or_else(|| rt.cfg.backup.age_recipient.clone());
             let p = memory_jobs::archive::backup(&rt, &out, r.as_deref()).await?;
@@ -896,4 +1058,17 @@ async fn smoke(rt: &Runtime) -> Result<()> {
         Err(e) => println!("Embedding: GAGAL -> {e}"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn frontmatter_split() {
+        let (fm, body) = super::split_frontmatter("---\nname: disk-space\ndescription: \"disk nearly full\"\ntype: project\n---\n\nIsi catatan.");
+        assert_eq!(fm.get("name").map(String::as_str), Some("disk-space"));
+        assert_eq!(fm.get("description").map(String::as_str), Some("disk nearly full"));
+        assert_eq!(body.trim(), "Isi catatan.");
+        let (fm2, body2) = super::split_frontmatter("tanpa frontmatter");
+        assert!(fm2.is_empty() && body2 == "tanpa frontmatter");
+    }
 }

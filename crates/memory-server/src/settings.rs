@@ -160,6 +160,14 @@ const FIELDS: &[(&str, &str, Ty)] = &[
     ("schedule", "retry_failed_max", Ty::Int(0, 10000)),
     ("score", "stream_ttl_days", Ty::Int(1, 36500)),
     ("retrieval", "top_k", Ty::Int(1, 100)),
+    ("retrieval", "tool_budget_tokens", Ty::Int(200, 50_000)),
+    ("privacy", "redact", Ty::Bool),
+    ("privacy", "redact_generic", Ty::Bool),
+    ("inject", "enabled", Ty::Bool),
+    ("inject", "max_chars", Ty::Int(1000, 10_000)),
+    ("inject", "observations", Ty::Int(0, 200)),
+    ("inject", "sessions", Ty::Int(0, 20)),
+    ("inject", "include_all_clients", Ty::Bool),
     ("server", "max_upload_mb", Ty::Int(1, 102_400)),
 ];
 

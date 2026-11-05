@@ -181,5 +181,59 @@ async fn project_context_and_project_scoped_recall() {
     assert!(res.episodes.iter().any(|e| e.project.as_deref() == Some("LLM-MEMORY")));
 }
 
+#[tokio::test]
+async fn index_mode_get_episodes_and_anchor_timeline() {
+    let (r, p, _d) = setup().await;
+    // Memori proyek dengan alias: "engram" adalah alias LLM-MEMORY.
+    let out = p
+        .ingest(IngestDoc {
+            subject: "budi".into(),
+            kind: SourceKind::AgentConversation,
+            title: "Diingat agent: claude-code:LLM-MEMORY".into(),
+            text: "Pada project LLM-MEMORY kita memutuskan memakai SurrealDB embedded untuk penyimpanan vektor karena ekspor JSONL tetap sederhana.".into(),
+            meta: json!({"source": "claude-code:LLM-MEMORY"}),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    p.process_source(&out.source.id, None).await.unwrap();
+
+    // Mode indeks: satu baris per episode dengan ID & perkiraan token, tanpa kutipan panjang.
+    let q = RecallQuery { detail: Some("index".into()), project: Some("LLM-MEMORY".into()), ..RecallQuery::new("budi", "penyimpanan vektor SurrealDB") };
+    let res = r.recall(&q).await.unwrap();
+    assert!(res.found);
+    assert!(res.context.contains("## Indeks memori"), "{}", res.context);
+    let line = res.context.lines().find(|l| l.starts_with("- ep:")).expect("baris indeks");
+    assert!(line.contains(" tok"), "{line}");
+    assert!(res.context.chars().count() < 1500, "{}", res.context);
+    // Fakta kategori peristiwa disembunyikan di indeks kecuali diminta.
+    assert!(!res.context.contains("## Fakta") || !res.context.contains("peristiwa"));
+
+    // Detail per ID.
+    let id = res.episodes[0].id.clone();
+    let d = r.get_episodes("budi", &[format!("ep:{id}"), "tidakada".into()], 2000).await.unwrap();
+    assert_eq!(d.episodes.len(), 1);
+    assert_eq!(d.missing, vec!["tidakada".to_string()]);
+    assert!(d.context.contains("SurrealDB"));
+    assert!(d.context.contains(&format!("[ep:{id}]")));
+
+    // Timeline jangkar: episode proyek yang sama di sekitar jangkar.
+    let tl = r.timeline_around("budi", &id, 3, 3, None).await.unwrap();
+    assert!(tl.items.iter().any(|i| i.anchor && i.id == id));
+    assert!(tl.items.iter().all(|i| i.project.as_deref() == Some("LLM-MEMORY")));
+    assert!(r.timeline_around("budi", "ep:nope", 1, 1, None).await.is_err());
+
+    // Anggaran: project_context dengan budget kecil tetap valid dan pendek.
+    let pc = r
+        .project_context_with("budi", "LLM-MEMORY", None, &crate::ToolOpts { budget_tokens: Some(200) })
+        .await
+        .unwrap();
+    assert!(pc.found);
+    assert!(pc.context.chars().count() <= 200 * 4 + 200, "{}", pc.context.chars().count());
+    assert!(pc.context.starts_with("# Konteks Proyek"));
+    assert_eq!(crate::fit_text("a\nb\nc", 100), "a\nb\nc");
+    assert!(crate::fit_text(&"x".repeat(1000), 200).chars().count() <= 200);
+}
+
 #[allow(dead_code)]
 fn _unused(_: Value) {}

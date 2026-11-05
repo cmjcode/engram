@@ -547,7 +547,7 @@ impl Pipeline {
             .find_map(|e| e.project.clone().filter(|p| !p.trim().is_empty()));
         let observed_at = members
             .iter()
-            .filter_map(|e| (!e.observed_at.is_empty()).then(|| e.observed_at.clone()))
+            .filter(|e| !e.observed_at.is_empty()).map(|e| e.observed_at.clone())
             .max()
             .unwrap_or_else(today_iso);
         let retell_count: u32 = members
@@ -644,6 +644,28 @@ impl Pipeline {
             quotes,
             trait_signals,
             entity_ids: entity_ids.clone(),
+            obs_type: members.iter().find_map(|m| m.obs_type.clone()),
+            concepts: {
+                let mut c: Vec<String> = members.iter().flat_map(|m| m.concepts.iter().cloned()).collect();
+                c.sort();
+                c.dedup();
+                c.truncate(12);
+                c
+            },
+            files_read: {
+                let mut f: Vec<String> = members.iter().flat_map(|m| m.files_read.iter().cloned()).collect();
+                f.sort();
+                f.dedup();
+                f
+            },
+            files_modified: {
+                let mut f: Vec<String> = members.iter().flat_map(|m| m.files_modified.iter().cloned()).collect();
+                f.sort();
+                f.dedup();
+                f
+            },
+            session_id: None,
+            prompt_number: None,
             observed_at,
             created_at: now,
         };

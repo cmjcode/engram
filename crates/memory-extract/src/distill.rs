@@ -28,6 +28,9 @@ pub struct DistillReport {
     pub dispositions: u32,
     pub pending_review: u32,
     pub rejected: u32,
+    /// Pelajaran lintas proyek yang diangkat menjadi kandidat prinsip.
+    #[serde(default)]
+    pub lessons_promoted: u32,
 }
 
 fn period(e: &Episode) -> Option<String> {
@@ -102,7 +105,65 @@ impl Pipeline {
         let mut report = DistillReport::default();
         self.distill_principles(subject, &eps, &mut report).await?;
         self.distill_dispositions(subject, &eps, &mut report).await?;
+        self.promote_lessons(subject, &mut report).await?;
         Ok(report)
+    }
+
+    /// Pelajaran proyek yang berulang (minimal `distill.min_evidence` kemunculan) dan muncul
+    /// di minimal 2 proyek berbeda (judul ternormalisasi sama) menjadi kandidat prinsip kerja
+    /// lintas proyek: masuk Wisdom Layer sebagai `PendingReview`, bukan langsung aktif.
+    async fn promote_lessons(&self, subject: &str, report: &mut DistillReport) -> Result<()> {
+        let dc = &self.cfg.distill;
+        let lessons = self.store.list_lessons(subject, &[], Some("active"), 2000).await?;
+        let mut by_key: std::collections::HashMap<String, Vec<&Lesson>> = std::collections::HashMap::new();
+        for l in &lessons {
+            by_key.entry(l.title_key.clone()).or_default().push(l);
+        }
+        for (_, group) in by_key {
+            let total: u32 = group.iter().map(|l| l.occurrences).sum();
+            let projects: std::collections::HashSet<&str> = group.iter().filter_map(|l| l.project.as_deref()).collect();
+            if (total as usize) < dc.min_evidence.max(2) || projects.len() < 2 {
+                continue;
+            }
+            let lead = group[0];
+            let id = det_id(&[subject, "principle", "lesson", &lead.title_key]);
+            if self.store.get::<Principle>("principle", &id).await?.is_some() {
+                continue;
+            }
+            let mut evidence: Vec<Evidence> = Vec::new();
+            for l in &group {
+                for ev in &l.evidence {
+                    if !evidence.iter().any(|x| x.episode_id == ev.episode_id) {
+                        evidence.push(ev.clone());
+                    }
+                }
+            }
+            let confidence = (0.5 + 0.1 * projects.len() as f32).min(0.74);
+            let p = Principle {
+                id: id.clone(),
+                subject: subject.to_string(),
+                statement: lead.title.clone(),
+                domain: "kerja".into(),
+                origin: Some(format!("pelajaran berulang di {} proyek", projects.len())),
+                confidence,
+                evidence,
+                valid_from: None,
+                valid_to: None,
+                status: ReflectiveStatus::PendingReview,
+                derived_at: now_rfc3339(),
+            };
+            self.review_reflective(subject, "principle", &p.id, &p.statement, p.confidence).await?;
+            self.store.put_principle(&p).await?;
+            for l in &group {
+                let mut l = (*l).clone();
+                l.promoted_to = Some(id.clone());
+                l.updated_at = now_rfc3339();
+                self.store.put_lesson(&l).await?;
+            }
+            report.lessons_promoted += 1;
+            report.pending_review += 1;
+        }
+        Ok(())
     }
 
     async fn verify(&self, statement: &str, evidence: &[&Episode]) -> Result<Verification> {

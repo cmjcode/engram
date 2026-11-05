@@ -227,6 +227,66 @@ async fn two_computers_sync_through_shared_folder() {
     assert!(sync::set_passphrase(&c.vault, Some("pendek")).is_err());
 }
 
+#[tokio::test]
+async fn repo_bundle_roundtrip_distilled_import_and_lesson_promotion() {
+    use memory_core::model::{Evidence, Lesson, LessonKind};
+    let d1 = tempfile::tempdir().unwrap();
+    let r = rt(d1.path()).await;
+    r.pipeline.ensure_subject("budi", Some("Budi")).await.unwrap();
+    let now = memory_core::ids::now_rfc3339();
+    let mk = |project: &str, title: &str, n: u32| Lesson {
+        id: memory_extract::det_id(&["lesson", "budi", project, &Lesson::title_key_of(title)]),
+        subject: "budi".into(),
+        project: Some(project.into()),
+        kind: LessonKind::Convention,
+        title: title.into(),
+        title_key: Lesson::title_key_of(title),
+        detail: String::new(),
+        occurrences: n,
+        evidence: vec![Evidence { episode_id: format!("ep-{project}"), quote: String::new() }],
+        status: "active".into(),
+        promoted_to: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    r.store.put_lesson(&mk("api-a", "Jangan commit tanpa diminta", 2)).await.unwrap();
+    r.store.put_lesson(&mk("api-b", "Jangan commit tanpa diminta!", 2)).await.unwrap();
+    r.store.put_lesson(&mk("api-a", "Pakai cargo test -p", 1)).await.unwrap();
+
+    // Impor terdistilasi tanpa LLM: episode langsung jadi, duplikat terdeteksi.
+    let doc = || memory_extract::ingest::DistilledDoc { subject: "budi".into(), title: "Arsitektur api-a".into(), summary: "Pakai Postgres".into(), text: "api-a memakai Postgres 16 dan Redis untuk cache sesi.".into(), project: Some("api-a".into()), original_name: None, meta: json!({}) };
+    let o1 = r.pipeline.ingest_distilled(doc()).await.unwrap();
+    assert!(!o1.duplicate && o1.episode_id.is_some());
+    assert!(r.pipeline.ingest_distilled(doc()).await.unwrap().duplicate);
+    let ep = r.store.get_episode(o1.episode_id.as_deref().unwrap()).await.unwrap().unwrap();
+    assert_eq!(ep.project.as_deref(), Some("api-a"));
+    assert_eq!(ep.title, "Arsitektur api-a");
+
+    // Pelajaran lintas proyek yang berulang -> kandidat prinsip (pending review).
+    let rep = r.pipeline.distill("budi").await.unwrap();
+    assert_eq!(rep.lessons_promoted, 1, "{rep:?}");
+    let ps = r.store.list_principles("budi", None).await.unwrap();
+    assert!(ps.iter().any(|p| p.statement.starts_with("Jangan commit") && p.status == memory_core::model::ReflectiveStatus::PendingReview));
+    assert!(r.store.list_lessons("budi", &[], None, 50).await.unwrap().iter().filter(|l| l.promoted_to.is_some()).count() == 2);
+
+    // Ekspor bundel repo lalu impor ke vault lain.
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+    let ex = crate::repo_bundle::export_repo(&r, "budi", repo.path(), Some("api-a")).await.unwrap();
+    assert_eq!(ex.lessons, 2);
+    assert!(repo.path().join(".engram/manifest.json").exists() && repo.path().join(".engram/README.md").exists());
+    let d2 = tempfile::tempdir().unwrap();
+    let r2 = rt(d2.path()).await;
+    r2.pipeline.ensure_subject("budi", Some("Budi")).await.unwrap();
+    let im = crate::repo_bundle::import_repo(&r2, "budi", repo.path(), None).await.unwrap();
+    assert_eq!((im.project.as_str(), im.lessons_new, im.lessons_merged), ("api-a", 2, 0));
+    let im2 = crate::repo_bundle::import_repo(&r2, "budi", repo.path(), None).await.unwrap();
+    assert_eq!((im2.lessons_new, im2.lessons_merged), (0, 2));
+    let l = r2.store.list_lessons("budi", &["api-a".into()], None, 10).await.unwrap();
+    assert_eq!(l.len(), 2);
+    assert!(l.iter().all(|x| x.promoted_to.is_none() && x.subject == "budi"));
+}
+
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir).unwrap().flatten() {

@@ -73,6 +73,57 @@ DEFINE TABLE IF NOT EXISTS _meta SCHEMALESS;
     )
 }
 
+/// v2: atribusi proyek & sesi agent (indeks proyek/waktu/berkas, tabel sesi & pelajaran).
+const V2: &str = r#"
+DEFINE INDEX IF NOT EXISTS episode_project ON episode FIELDS subject, project;
+DEFINE INDEX IF NOT EXISTS episode_created ON episode FIELDS subject, created_at;
+DEFINE INDEX IF NOT EXISTS episode_files_read ON episode FIELDS files_read;
+DEFINE INDEX IF NOT EXISTS episode_files_modified ON episode FIELDS files_modified;
+DEFINE INDEX IF NOT EXISTS episode_session ON episode FIELDS session_id;
+DEFINE TABLE IF NOT EXISTS session SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS session_subject ON session FIELDS subject, last_activity_at;
+DEFINE INDEX IF NOT EXISTS session_project ON session FIELDS subject, project;
+DEFINE TABLE IF NOT EXISTS lesson SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS lesson_subject ON lesson FIELDS subject, status;
+DEFINE INDEX IF NOT EXISTS lesson_key ON lesson FIELDS subject, project, title_key;
+"#;
+
+/// Isi `episode.project` yang kosong dari sumbernya (data lama sebelum v2).
+async fn backfill_episode_project(store: &Store) -> Result<u64> {
+    let rows = store
+        .rows("SELECT id, source_id FROM episode WHERE project = NONE OR project = NULL;", binds! {})
+        .await?;
+    let mut n = 0u64;
+    let mut cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    for r in rows {
+        let (Some(id), Some(sid)) = (r["id"].as_str(), r["source_id"].as_str()) else { continue };
+        let project = match cache.get(sid) {
+            Some(p) => p.clone(),
+            None => {
+                let p = store
+                    .rows("SELECT project, meta, title FROM type::record('source', $id);", binds! {"id" => sid})
+                    .await?
+                    .pop()
+                    .and_then(|src| {
+                        src["project"]
+                            .as_str()
+                            .map(str::to_string)
+                            .or_else(|| src["meta"]["source"].as_str().and_then(|t| memory_core::model::parse_source_tag(t).1))
+                            .or_else(|| src["title"].as_str().and_then(|t| t.strip_prefix("Diingat agent: ")).and_then(|t| memory_core::model::parse_source_tag(t).1))
+                            .filter(|p| !p.trim().is_empty())
+                    });
+                cache.insert(sid.to_string(), p.clone());
+                p
+            }
+        };
+        if let Some(p) = project {
+            store.patch("episode", id, json!({"project": p})).await?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 pub(crate) async fn run(store: &Store) -> Result<()> {
     let meta = store.rows("SELECT * FROM _meta:schema;", binds! {}).await.unwrap_or_default();
     let current = meta.first().and_then(|m| m["version"].as_u64()).unwrap_or(0) as u32;
@@ -88,6 +139,15 @@ pub(crate) async fn run(store: &Store) -> Result<()> {
     if current < 1 {
         let idx = store.index_config();
         store.execute(&v1(store.dim, &idx.vector, idx.hnsw_m, idx.hnsw_efc), binds! {}).await?;
+    }
+    if current < 2 {
+        store.execute(V2, binds! {}).await?;
+        if current >= 1 {
+            let n = backfill_episode_project(store).await?;
+            if n > 0 {
+                tracing::info!(episodes = n, "atribusi proyek episode lama dilengkapi dari sumbernya");
+            }
+        }
     }
     if current < memory_core::SCHEMA_VERSION {
         store

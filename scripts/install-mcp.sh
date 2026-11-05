@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Pasang server MCP engram ke agent AI (Antigravity, Claude Code, Cursor).
+# Pasang server MCP engram ke agent AI (Antigravity, Gemini CLI, Claude Code,
+# Cursor, Codex CLI, Windsurf).
+#
+# Profil tool: client koding murni (cursor, codex, windsurf) memakai profil
+# `coding` (hanya project_context, recall, remember, who_is, timeline, principles)
+# agar konteks agent tidak dipenuhi tool memori hidup; antigravity, gemini, dan
+# claude memakai profil `full`. Timpa dengan --profile.
 #
 # Mode http (bawaan): agent tersambung ke aplikasi desktop / `engram serve`
 #   lewat http://127.0.0.1:7878/mcp dengan token tetap (MEMORY_TOKEN).
@@ -10,12 +16,14 @@
 #   scripts/install-mcp.sh                       # Antigravity, mode http
 #   scripts/install-mcp.sh --client all
 #   scripts/install-mcp.sh --client claude --mode stdio
+#   scripts/install-mcp.sh --client codex                # ~/.codex/config.toml, profil coding
 #   scripts/install-mcp.sh --uninstall --client all
 set -euo pipefail
 
 NAME="engram"
 CLIENT="antigravity"
 MODE="http"
+PROFILE="auto"
 TOKEN=""
 UNINSTALL=0
 DRY_RUN=0
@@ -33,8 +41,10 @@ usage() {
   cat <<EOF
 Pemakaian: $(basename "$0") [opsi]
 
-  --client NAMA   antigravity | gemini | claude | cursor | all   (bawaan: antigravity)
+  --client NAMA   antigravity | gemini | claude | cursor | codex | windsurf | all
+                  (bawaan: antigravity; 'all' = yang terpasang di komputer ini)
   --mode MODE     http | stdio                          (bawaan: http)
+  --profile P     auto | full | coding                  (bawaan: auto, per client)
   --name NAMA     nama server MCP                       (bawaan: engram)
   --token TOKEN   pakai token ini (mode http); bila kosong, pakai yang ada atau buat baru
   --config PATH   memory.toml untuk mode stdio          (bawaan: config aplikasi desktop)
@@ -49,6 +59,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --client) CLIENT="$2"; shift 2 ;;
     --mode) MODE="$2"; shift 2 ;;
+    --profile) PROFILE="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --token) TOKEN="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
@@ -61,11 +72,28 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$CLIENT" in
-  antigravity|gemini|claude|cursor) CLIENTS=("$CLIENT") ;;
-  all) CLIENTS=(antigravity gemini claude cursor) ;;
+  antigravity|gemini|claude|cursor|codex|windsurf) CLIENTS=("$CLIENT") ;;
+  all)
+    CLIENTS=(antigravity gemini claude cursor)
+    if [[ -d "$HOME/.codex" ]] || command -v codex >/dev/null; then CLIENTS+=(codex); fi
+    if [[ -d "$HOME/.codeium/windsurf" || -d "/Applications/Windsurf.app" ]]; then CLIENTS+=(windsurf); fi
+    ;;
   *) echo "Client tidak dikenal: $CLIENT" >&2; exit 2 ;;
 esac
 case "$MODE" in http|stdio) ;; *) echo "Mode tidak dikenal: $MODE" >&2; exit 2 ;; esac
+case "$PROFILE" in auto|full|coding) ;; *) echo "Profile tidak dikenal: $PROFILE" >&2; exit 2 ;; esac
+
+# profile_for CLIENT -> full | coding
+profile_for() {
+  if [[ "$PROFILE" != "auto" ]]; then echo "$PROFILE"; return; fi
+  case "$1" in cursor|codex|windsurf) echo coding ;; *) echo full ;; esac
+}
+
+# url_for CLIENT -> URL server + ?profile=coding bila perlu
+url_for() {
+  local prof; prof="$(profile_for "$1")"
+  if [[ "$prof" == "full" ]]; then echo "$URL"; else echo "$URL?profile=$prof"; fi
+}
 
 info() { printf '  %s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -160,20 +188,23 @@ PY
   info "Diperbarui: $file"
 }
 
-# entry_json STYLE -> JSON entri server untuk gaya client (antigravity | gemini | cursor)
+# entry_json CLIENT -> JSON entri server untuk gaya client
+# (antigravity & windsurf: serverUrl; gemini: httpUrl; cursor/claude: url)
 entry_json() {
-  python3 - "$1" "$MODE" "$URL" "$TOKEN" "$BIN" "$CONFIG" <<'PY'
+  python3 - "$1" "$MODE" "$(url_for "$1")" "$TOKEN" "$BIN" "$CONFIG" "$(profile_for "$1")" <<'PY'
 import json, sys
-style, mode, url, token, bin_, cfg = sys.argv[1:]
+style, mode, url, token, bin_, cfg, profile = sys.argv[1:]
 if mode == "http":
     if style == "antigravity":
         e = {"serverUrl": url, "headers": {"Authorization": f"Bearer {token}"}, "disabled": False}
+    elif style == "windsurf":
+        e = {"serverUrl": url, "headers": {"Authorization": f"Bearer {token}"}}
     elif style == "gemini":
         e = {"httpUrl": url, "headers": {"Authorization": f"Bearer {token}"}, "trust": True}
     else:
         e = {"url": url, "headers": {"Authorization": f"Bearer {token}"}}
 else:
-    e = {"command": bin_, "args": ["--config", cfg, "mcp"]}
+    e = {"command": bin_, "args": ["--config", cfg, "mcp", "--profile", profile]}
     if style == "antigravity":
         e["disabled"] = False
     elif style == "gemini":
@@ -182,34 +213,107 @@ print(json.dumps(e))
 PY
 }
 
+# edit_toml FILE NAME -> tambah/ganti (atau hapus bila UNINSTALL) [mcp_servers.NAME] di config Codex.
+# Bagian lain berkas (komentar, urutan) tidak disentuh.
+edit_toml() {
+  local file="$1" name="$2"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    if [[ $UNINSTALL -eq 1 ]]; then info "[dry-run] $file: hapus [mcp_servers.$name]"
+    else info "[dry-run] $file: [mcp_servers.$name] url=$(url_for codex)"; fi
+    return
+  fi
+  mkdir -p "$(dirname "$file")"
+  [[ -f "$file" ]] && cp -p "$file" "$file.bak.$(date +%Y%m%d%H%M%S)"
+  python3 - "$file" "$name" "$UNINSTALL" "$MODE" "$(url_for codex)" "$TOKEN" "$BIN" "$CONFIG" "$(profile_for codex)" <<'PY'
+import json, os, sys, tomllib
+path, name, uninstall, mode, url, token, bin_, cfg, profile = sys.argv[1:]
+path = os.path.realpath(path)
+text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+tomllib.loads(text)  # gagal = berkas rusak, jangan sentuh
+def is_header(line):
+    t = line.lstrip()
+    return t.startswith("[") and t.rstrip().endswith("]")
+def is_ours(line, n):
+    t = line.strip().strip("[]").replace('"', "").replace("'", "").replace(" ", "")
+    return t == f"mcp_servers.{n}" or t.startswith(f"mcp_servers.{n}.")
+out, skip = [], False
+for line in text.splitlines():
+    if is_header(line):
+        skip = is_ours(line, name) or is_ours(line, "memori")
+    if not skip:
+        out.append(line)
+body = "\n".join(out).rstrip()
+if uninstall != "1":
+    q = json.dumps  # kutip string gaya TOML basic
+    sec = [f"[mcp_servers.{name}]"]
+    if mode == "http":
+        sec.append(f"url = {q(url)}")
+        if token:
+            sec.append(f"http_headers = {{ Authorization = {q('Bearer ' + token)} }}")
+    else:
+        sec.append(f"command = {q(bin_)}")
+        sec.append("args = [" + ", ".join(q(a) for a in ["--config", cfg, "mcp", "--profile", profile]) + "]")
+    body = (body + "\n\n" if body else "") + "\n".join(sec)
+body = body.rstrip() + "\n"
+tomllib.loads(body)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(body)
+os.chmod(tmp, 0o600)  # berisi token
+os.replace(tmp, path)
+PY
+  info "Diperbarui: $file"
+}
+
 HOOK_SRC="$ROOT/scripts/auto-remember-hook.py"
 HOOK_BIN="$HOME/.local/bin/engram-auto-remember"
+CTX_SRC="$ROOT/scripts/session-context-hook.py"
+CTX_BIN="$HOME/.local/bin/engram-session-context"
+
+# Hook utama memakai binary `engram hook <client> <event>` (cepat, tanpa Python, merekam
+# tiap pemanggilan tool + ringkasan sesi, menyuntik indeks konteks saat sesi mulai, dan
+# menyimpan event ke spool bila server mati). Skrip Python di atas hanya cadangan bila
+# binary belum terpasang. Timpa dengan env ENGRAM_BIN.
+if [[ -z "${ENGRAM_BIN:-}" ]]; then
+  ENGRAM_BIN="$(command -v engram 2>/dev/null || true)"
+  [[ -z "$ENGRAM_BIN" && -x "$HOME/.local/bin/engram" ]] && ENGRAM_BIN="$HOME/.local/bin/engram"
+  [[ -z "$ENGRAM_BIN" && -x "$BIN" ]] && ENGRAM_BIN="$BIN"
+fi
 
 ensure_hook_bin() {
   if [[ $DRY_RUN -eq 1 ]]; then
-    info "[dry-run] pasang $HOOK_BIN"
+    info "[dry-run] pasang $HOOK_BIN dan $CTX_BIN"
     return
   fi
   mkdir -p "$(dirname "$HOOK_BIN")"
   cp "$HOOK_SRC" "$HOOK_BIN"
-  chmod 755 "$HOOK_BIN"
+  cp "$CTX_SRC" "$CTX_BIN"
+  chmod 755 "$HOOK_BIN" "$CTX_BIN"
   rm -f "$HOME/.local/bin/mnemonic-auto-remember"
 }
 
+# upsert_rule_section FILE [full|coding]
 upsert_rule_section() {
-  local file="$1"
+  local file="$1" variant="${2:-full}"
   if [[ $DRY_RUN -eq 1 ]]; then
-    info "[dry-run] perbarui rule engram di $file"
+    info "[dry-run] perbarui rule engram ($variant) di $file"
     return
   fi
   mkdir -p "$(dirname "$file")"
-  python3 - "$file" "$UNINSTALL" <<'PY'
+  python3 - "$file" "$UNINSTALL" "$variant" <<'PY'
 import os, re, sys
-path, uninstall = sys.argv[1], sys.argv[2] == "1"
+path, uninstall, variant = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
 marker_start = "<!-- ENGRAM_START -->"
 marker_end = "<!-- ENGRAM_END -->"
 legacy_start = "<!-- MNEMONIC_MEMORY_START -->"
 legacy_end = "<!-- MNEMONIC_MEMORY_END -->"
+coding_block = f"""{marker_start}
+## Engram (`engram` MCP)
+
+- **Awal tugas**: panggil `project_context` (parameter `project` = nama repositori/folder kerja, `task` = tugas saat ini) sebelum membaca kode, agar keputusan arsitektur, konvensi, dan akar masalah bug dari sesi sebelumnya ikut dipertimbangkan. Untuk pertanyaan spesifik pakai `recall` dengan parameter `project`.
+- **Fakta berlabel waktu**: hasil tool membedakan fakta yang masih berlaku dan riwayat. Jangan menyajikan fakta lama sebagai kondisi sekarang; bila tool menjawab tidak ada catatan, katakan apa adanya.
+- **Simpan keputusan (`remember`)**: setelah keputusan teknis, perubahan arsitektur, konvensi baru, atau akar masalah bug ditemukan, simpan ringkasannya lewat `remember` dengan `source` berformat `<client>:<nama-project>` (misal `codex:LLM-MEMORY`).
+{marker_end}"""
 block = f"""{marker_start}
 ## Engram (`engram` MCP)
 
@@ -217,6 +321,8 @@ block = f"""{marker_start}
 - **Ambil Konteks (`project_context`, `recall`, `who_is`, `timeline`, `principles`, `family_tree`)**: Saat mulai mengerjakan tugas di suatu project atau saat pengguna bertanya tentang arsitektur/keputusan teknis/masa lalu/keluarga/prinsip kerja, panggil tool MCP `engram` yang relevan terlebih dahulu (`project_context` untuk ringkasan lengkap project, atau `recall` dengan parameter `project`). Selalu bedakan fakta yang masih berlaku sekarang dengan riwayat masa lalu.
 - **Rangkum & Padatkan Memori (`compact`)**: Saat memori sudah cukup banyak atau pengguna meminta merangkum/memadatkan memori, panggil tool MCP `compact` dengan `mode="candidates"` untuk meninjau klaster episode serupa, fakta redundan/sesaat per entitas, dan review terbuka; lalu kirim rangkuman intinya lewat `compact` dengan `mode="apply"` dan `plan`.
 {marker_end}"""
+if variant == "coding":
+    block = coding_block
 
 text = ""
 if os.path.exists(path):
@@ -247,7 +353,7 @@ PY
 # ---------- per client ----------
 
 do_antigravity() {
-  step "Antigravity"
+  step "Antigravity (profil $(profile_for antigravity))"
   local cfg_main="$HOME/.gemini/config/mcp_config.json"
   local cfg_agy="$HOME/.gemini/antigravity/mcp_config.json"
   local hooks_f="$HOME/.gemini/config/hooks.json"
@@ -280,7 +386,9 @@ PY
   upsert_rule_section "$HOME/.gemini/config/GEMINI.md"
 
   if [[ $DRY_RUN -eq 0 ]]; then
-    python3 - "$hooks_f" "$HOOK_BIN" <<'PY'
+    local a_turn="$HOOK_BIN"
+    [[ -n "$ENGRAM_BIN" ]] && a_turn="$ENGRAM_BIN hook antigravity turn"
+    python3 - "$hooks_f" "$a_turn" <<'PY'
 import json, os, sys
 p, hook_bin = sys.argv[1], sys.argv[2]
 os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -299,6 +407,7 @@ d["engram-auto-remember"] = {
         }
     ]
 }
+# (hook_bin = `engram hook antigravity turn` bila binary tersedia, selain itu skrip Python)
 with open(p, "w") as f:
     json.dump(d, f, indent=2)
     f.write("\n")
@@ -309,7 +418,7 @@ PY
 }
 
 do_gemini() {
-  step "Gemini CLI"
+  step "Gemini CLI (profil $(profile_for gemini))"
   local f="$HOME/.gemini/settings.json"
   if [[ $UNINSTALL -eq 1 ]]; then
     edit_json "$f" "$NAME" ""
@@ -320,8 +429,9 @@ import json, os, sys
 p = sys.argv[1]
 d = json.load(open(p))
 hooks = d.get("hooks", {})
-if "AfterAgent" in hooks:
-    hooks["AfterAgent"] = [x for x in hooks["AfterAgent"] if not any(h.get("name") == "engram-auto-remember" for h in x.get("hooks", []))]
+for ev, nm in (("AfterAgent", "engram-auto-remember"), ("SessionStart", "engram-session-context")):
+    if ev in hooks:
+        hooks[ev] = [x for x in hooks[ev] if not any(h.get("name") == nm for h in x.get("hooks", []))]
 json.dump(d, open(p, "w"), indent=2)
 PY
     fi
@@ -333,45 +443,60 @@ PY
   upsert_rule_section "$HOME/.gemini/GEMINI.md"
 
   if [[ $DRY_RUN -eq 0 ]]; then
-    python3 - "$f" "$HOOK_BIN" <<'PY'
+    local g_turn="$HOOK_BIN" g_ctx="$CTX_BIN"
+    if [[ -n "$ENGRAM_BIN" ]]; then g_turn="$ENGRAM_BIN hook gemini-cli turn"; g_ctx="$ENGRAM_BIN hook gemini-cli context"; fi
+    python3 - "$f" "$g_turn" "$g_ctx" <<'PY'
 import json, os, sys
-p, hook_bin = sys.argv[1], sys.argv[2]
+p, hook_bin, ctx_bin = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
 hooks = d.setdefault("hooks", {})
-after_agent = hooks.setdefault("AfterAgent", [])
-after_agent = [x for x in after_agent if not any(h.get("name") in ("engram-auto-remember", "mnemonic-auto-remember") for h in x.get("hooks", []))]
-after_agent.append({
-    "matcher": "*",
-    "hooks": [
-        {
-            "name": "engram-auto-remember",
-            "type": "command",
-            "command": hook_bin,
-            "description": "Simpan percakapan otomatis ke engram",
-            "timeout": 10000
-        }
-    ]
-})
-hooks["AfterAgent"] = after_agent
+def upsert(event, name, command, description):
+    lst = hooks.setdefault(event, [])
+    lst = [x for x in lst if not any(h.get("name") in (name, "mnemonic-auto-remember") for h in x.get("hooks", []))]
+    lst.append({
+        "matcher": "*",
+        "hooks": [{"name": name, "type": "command", "command": command, "description": description, "timeout": 10000}],
+    })
+    hooks[event] = lst
+upsert("AfterAgent", "engram-auto-remember", hook_bin, "Simpan percakapan otomatis ke engram")
+upsert("SessionStart", "engram-session-context", ctx_bin, "Suntik konteks proyek dari engram saat sesi mulai")
 with open(p, "w") as f:
     json.dump(d, f, indent=2)
     f.write("\n")
 PY
-    info "Hook AfterAgent dipasang: $f"
+    info "Hook AfterAgent & SessionStart dipasang: $f"
   fi
 }
 
 do_cursor() {
-  step "Cursor"
+  step "Cursor (profil $(profile_for cursor))"
   local f="$HOME/.cursor/mcp.json"
   if [[ $UNINSTALL -eq 1 ]]; then edit_json "$f" "$NAME" ""; return; fi
   edit_json "$f" "$NAME" "$(entry_json cursor)"
+  info "Di Cursor: Settings > MCP, pastikan '$NAME' aktif."
+}
+
+do_codex() {
+  step "Codex CLI (profil $(profile_for codex))"
+  local f="$HOME/.codex/config.toml"
+  upsert_rule_section "$HOME/.codex/AGENTS.md" "$(profile_for codex)"
+  edit_toml "$f" "$NAME"
+  [[ $UNINSTALL -eq 1 ]] || info "Mulai sesi Codex baru; cek dengan /mcp."
+}
+
+do_windsurf() {
+  step "Windsurf (profil $(profile_for windsurf))"
+  local f="$HOME/.codeium/windsurf/mcp_config.json"
+  upsert_rule_section "$HOME/.codeium/windsurf/memories/global_rules.md" "$(profile_for windsurf)"
+  if [[ $UNINSTALL -eq 1 ]]; then edit_json "$f" "$NAME" ""; return; fi
+  edit_json "$f" "$NAME" "$(entry_json windsurf)"
+  info "Di Windsurf: panel Cascade > MCP Servers > Refresh."
 }
 
 do_claude() {
-  step "Claude Code"
+  step "Claude Code (profil $(profile_for claude))"
   local settings_f="$HOME/.claude/settings.json"
-  upsert_rule_section "$HOME/.claude/CLAUDE.md"
+  upsert_rule_section "$HOME/.claude/CLAUDE.md" "$(profile_for claude)"
 
   if [[ $UNINSTALL -eq 1 ]]; then
     if command -v claude >/dev/null; then
@@ -379,13 +504,18 @@ do_claude() {
     run claude mcp remove -s user "memori" >/dev/null 2>&1 || true
     fi
     if [[ $DRY_RUN -eq 0 && -f "$settings_f" ]]; then
-      python3 - "$settings_f" "$HOOK_BIN" <<'PY'
+      python3 - "$settings_f" "$HOOK_BIN" "$CTX_BIN" <<'PY'
 import json, os, sys
-p, hook_bin = sys.argv[1], sys.argv[2]
+p, hook_bin, ctx_bin = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(p))
 hooks = d.get("hooks", {})
-if "Stop" in hooks:
-    hooks["Stop"] = [x for x in hooks["Stop"] if not any(h.get("command") == hook_bin for h in x.get("hooks", []))]
+def ours(h):
+    c = str(h.get("command", ""))
+    return c in (hook_bin, ctx_bin) or " hook claude-code " in c or "mnemonic-auto-remember" in c
+for ev in list(hooks):
+    hooks[ev] = [x for x in hooks[ev] if not any(ours(h) for h in x.get("hooks", []))]
+    if not hooks[ev]:
+        del hooks[ev]
 json.dump(d, open(p, "w"), indent=2)
 PY
     fi
@@ -398,18 +528,18 @@ PY
     run claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
     run claude mcp remove -s user "memori" >/dev/null 2>&1 || true
     if [[ "$MODE" == "http" ]]; then
-      run claude mcp add -s user --transport http "$NAME" "$URL" --header "Authorization: Bearer $TOKEN"
+      run claude mcp add -s user --transport http "$NAME" "$(url_for claude)" --header "Authorization: Bearer $TOKEN"
     else
-      run claude mcp add -s user "$NAME" -- "$BIN" --config "$CONFIG" mcp
+      run claude mcp add -s user "$NAME" -- "$BIN" --config "$CONFIG" mcp --profile "$(profile_for claude)"
     fi
   else
     info "CLI 'claude' tidak ditemukan, konfigurasi MCP dilewati."
   fi
 
   if [[ $DRY_RUN -eq 0 ]]; then
-    python3 - "$settings_f" "$HOOK_BIN" <<'PY'
+    python3 - "$settings_f" "$HOOK_BIN" "$CTX_BIN" "$ENGRAM_BIN" <<'PY'
 import json, os, sys
-p, hook_bin = sys.argv[1], sys.argv[2]
+p, hook_bin, ctx_bin, engram_bin = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 os.makedirs(os.path.dirname(p), exist_ok=True)
 d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) > 0 else {}
 perms = d.setdefault("permissions", {}).setdefault("allow", [])
@@ -418,23 +548,46 @@ if "mcp__memori__*" in perms:
 if "mcp__engram__*" not in perms:
     perms.append("mcp__engram__*")
 hooks = d.setdefault("hooks", {})
-stop_hooks = hooks.setdefault("Stop", [])
-stop_hooks = [x for x in stop_hooks if not any(h.get("command") == hook_bin or "mnemonic-auto-remember" in str(h.get("command", "")) for h in x.get("hooks", []))]
-stop_hooks.append({
-    "hooks": [
-        {
-            "type": "command",
-            "command": hook_bin,
-            "timeout": 10
-        }
-    ]
-})
-hooks["Stop"] = stop_hooks
+def ours(h):
+    c = str(h.get("command", ""))
+    return c in (hook_bin, ctx_bin) or " hook claude-code " in c or "mnemonic-auto-remember" in c
+for ev in list(hooks):
+    hooks[ev] = [x for x in hooks[ev] if not any(ours(h) for h in x.get("hooks", []))]
+    if not hooks[ev]:
+        del hooks[ev]
+def upsert(event, command, timeout, matcher=None, async_=False):
+    h = {"type": "command", "command": command, "timeout": timeout}
+    if async_:
+        h["async"] = True
+    entry = {"hooks": [h]}
+    if matcher:
+        entry["matcher"] = matcher
+    hooks.setdefault(event, []).append(entry)
+if engram_bin:
+    q = json.dumps(engram_bin) if " " in engram_bin else engram_bin
+    cmd = lambda ev: f"{q} hook claude-code {ev}"
+    upsert("SessionStart", cmd("context"), 5, "startup|resume|clear|compact")
+    upsert("UserPromptSubmit", cmd("session-init"), 3)
+    upsert("PreToolUse", cmd("file-context"), 3, "Read|Edit|MultiEdit|Write|NotebookEdit")
+    upsert("PostToolUse", cmd("observation"), 10, "*", True)
+    upsert("PostToolUseFailure", cmd("observation"), 10, "*", True)
+    upsert("Stop", cmd("summarize"), 15, None, True)
+    upsert("PreCompact", cmd("pre-compact"), 15)
+    upsert("SessionEnd", cmd("session-end"), 15, None, True)
+else:
+    upsert("Stop", hook_bin, 10)
+    upsert("SessionStart", ctx_bin, 10)
 with open(p, "w") as f:
     json.dump(d, f, indent=2)
     f.write("\n")
 PY
-    info "Hook Stop & izin MCP dipasang: $settings_f"
+    if [[ -n "$ENGRAM_BIN" ]]; then
+      info "Hook engram (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, PreCompact, SessionEnd) & izin MCP dipasang: $settings_f"
+      info "  memakai binary: $ENGRAM_BIN"
+    else
+      info "Binary engram tidak ditemukan; hook Python cadangan (Stop, SessionStart) dipasang: $settings_f"
+      info "  Pasang CLI (install.sh) lalu jalankan ulang skrip ini untuk observasi per tool."
+    fi
   fi
 }
 

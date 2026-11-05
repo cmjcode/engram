@@ -23,6 +23,26 @@ fn llm(req: &ChatRequest) -> memory_llm::Result<String> {
             "facts": [{"subject": "Pakde Karno", "predicate": "membuka", "object": "toko batik di Solo", "category": "pekerjaan", "quote": "Pakde Karno membuka toko batik di Solo"}],
             "kin": [{"person": "Pakde Karno", "term": "pakde", "quote": "Pakde Karno"}]}).to_string(),
         "interview" => json!({"text": "Ceritakan masa kecil Bapak?"}).to_string(),
+        "session" => {
+            if user.contains("Pengguna: halo") {
+                json!({"skip": true, "skip_reason": "basa-basi"}).to_string()
+            } else {
+                json!({
+                    "skip": false,
+                    "summary": {"request": "Perbaiki bug token login", "investigated": "src/auth.rs", "learned": "expiry memakai detik, bukan milidetik", "completed": "Perbaikan di src/auth.rs", "next_steps": "tambah tes regresi"},
+                    "observations": [{
+                        "obs_type": "bugfix", "title": "Bug expiry token login diperbaiki",
+                        "narrative": "Token login kedaluwarsa terlalu cepat karena expiry dihitung dalam milidetik di src/auth.rs; diperbaiki menjadi detik.",
+                        "concepts": ["token expiry"], "files_read": ["src/auth.rs"], "files_modified": ["src/auth.rs"],
+                        "entities": [{"name": "src/auth.rs", "kind": "component"}, {"name": "LLM-MEMORY", "kind": "project"}],
+                        "facts": [{"subject": "LLM-MEMORY", "predicate": "menyimpan expiry token dalam", "object": "detik", "category": "konvensi_kode", "quote": "expiry dihitung dalam detik"}],
+                        "decisions": [{"situation": "token kedaluwarsa terlalu cepat", "action": "ubah satuan expiry ke detik", "reason": "server membandingkan dengan epoch detik"}],
+                        "lessons": [{"kind": "pitfall", "title": "Expiry token harus dalam detik", "detail": "Jangan pakai milidetik", "quote": "expiry dihitung dalam detik"}],
+                        "quotes": ["expiry dihitung dalam detik"]
+                    }]
+                }).to_string()
+            }
+        }
         _ => json!({"text": "ok"}).to_string(),
     })
 }
@@ -110,6 +130,22 @@ async fn http_api_and_mcp_end_to_end() {
     // MCP lewat HTTP.
     let init = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})).await;
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(init["result"]["serverInfo"]["name"], "engram");
+    // Versi tidak dikenal -> versi terbaru yang didukung server.
+    let init2 = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2030-01-01"}})).await;
+    assert_eq!(init2["result"]["protocolVersion"], crate::mcp::PROTOCOL_VERSION);
+    // Streamable HTTP: GET membuka stream SSE, tanpa Accept SSE -> 405.
+    let no_sse = c.get(format!("{base}/mcp")).send().await.unwrap();
+    assert_eq!(no_sse.status(), 405);
+    let sse = c.get(format!("{base}/mcp")).header("Accept", "text/event-stream").send().await.unwrap();
+    assert_eq!(sse.status(), 200);
+    assert!(sse.headers()["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+    drop(sse);
+    // Profil coding hanya memuat tool sesi koding; profil tidak dikenal -> 400.
+    let coding = post(&c, format!("{base}/mcp?profile=coding"), json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
+    let coding_names: Vec<&str> = coding["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(coding_names, crate::mcp::CODING_TOOLS);
+    assert_eq!(c.post(format!("{base}/mcp?profile=nope")).json(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).send().await.unwrap().status(), 400);
     let notif = c.post(format!("{base}/mcp")).json(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).send().await.unwrap();
     assert_eq!(notif.status(), 202);
     let tools = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
@@ -117,8 +153,13 @@ async fn http_api_and_mcp_end_to_end() {
     for n in ["recall", "who_is", "timeline", "principles", "persona_context", "family_tree", "remember", "memory_gaps", "compact"] {
         assert!(names.contains(&n), "{n}");
     }
+    let recall_tool = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "recall").unwrap();
+    assert_eq!(recall_tool["annotations"]["readOnlyHint"], true);
+    assert_eq!(recall_tool["outputSchema"]["type"], "object");
     let comp = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": {"name": "compact", "arguments": {"mode": "candidates"}}})).await;
     assert_eq!(comp["result"]["isError"], false, "{comp}");
+    assert_eq!(comp["result"]["structuredContent"]["mode"], "candidates");
+    assert!(comp["result"]["structuredContent"]["candidates"].is_object());
     let call = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "who_is", "arguments": {"name": "Karno"}}})).await;
     let text = call["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("pakde dari subjek"), "{text}");
@@ -128,6 +169,124 @@ async fn http_api_and_mcp_end_to_end() {
     assert_eq!(unknown["error"]["code"], -32601);
     let persona = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "persona_context", "arguments": {"question": "toko batik", "as_of": "1990-01-01"}}})).await;
     assert!(persona["result"]["content"][0]["text"].as_str().unwrap().contains("TIDAK tahu"));
+}
+
+#[tokio::test]
+async fn mcp_progressive_disclosure_budget_and_redaction() {
+    let (base, st, _d) = spawn(None).await;
+    let c = reqwest::Client::new();
+    post(&c, format!("{base}/api/subjects"), json!({"id": "budi", "name": "Budi"})).await;
+    // Rahasia di teks yang diingat tidak pernah tersimpan mentah; blok <private> dibuang.
+    let secret_text = "Pakde Karno membuka toko batik di Solo. <private>alamat rumah rahasia</private> Token deploy: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij0123 dipakai CI.";
+    let r = post(&c, format!("{base}/api/subjects/budi/remember"), json!({"text": secret_text, "source": "claude-code:LLM-MEMORY"})).await;
+    let src: Value = c.get(format!("{base}/api/sources/{}", r["source_id"].as_str().unwrap())).send().await.unwrap().json().await.unwrap();
+    let stored = serde_json::to_string(&src).unwrap();
+    assert!(!stored.contains("ghp_ABCDEFGHIJ"), "{stored}");
+    assert!(!stored.contains("alamat rumah rahasia"), "{stored}");
+    assert!(stored.contains("<redacted type='github_pat'/>"), "{stored}");
+    assert_eq!(src["source"]["project"], "LLM-MEMORY");
+    // Teks yang seluruhnya privat ditolak.
+    let bad = c.post(format!("{base}/api/subjects/budi/remember")).json(&json!({"text": "<private>semua</private>"})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    st.rt.drain().await.unwrap();
+
+    // recall lewat MCP: indeks ringkas + structuredContent; get_episodes mengambil detail.
+    let rec = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "recall", "arguments": {"query": "toko batik Pakde Karno", "project": "LLM-MEMORY"}}})).await;
+    let text = rec["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Indeks memori"), "{text}");
+    let id = rec["result"]["structuredContent"]["episodes"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(rec["result"]["structuredContent"]["episodes"][0]["project"], "LLM-MEMORY");
+    let det = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "get_episodes", "arguments": {"ids": [format!("ep:{id}")]}}})).await;
+    assert_eq!(det["result"]["isError"], false, "{det}");
+    assert!(det["result"]["content"][0]["text"].as_str().unwrap().contains("toko batik"));
+    // Anggaran kecil memotong teks pada pagar terakhir.
+    let small = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "recall", "arguments": {"query": "toko batik", "detail": "full", "budget": 200}}})).await;
+    assert!(small["result"]["content"][0]["text"].as_str().unwrap().chars().count() <= 200 * 4 + 400);
+    // timeline dengan jangkar & project_context slim.
+    let tl = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "timeline", "arguments": {"anchor": id}}})).await;
+    assert!(tl["result"]["content"][0]["text"].as_str().unwrap().contains("<- jangkar"));
+    let pc = post(&c, format!("{base}/mcp"), json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "project_context", "arguments": {"project": "LLM-MEMORY", "budget": 800}}})).await;
+    assert_eq!(pc["result"]["structuredContent"]["found"], true, "{pc}");
+    assert!(pc["result"]["content"][0]["text"].as_str().unwrap().chars().count() <= 800 * 4 + 400);
+    // Episode tersimpan dengan project (bukan null) dan API by-ids bekerja.
+    let by: Value = post(&c, format!("{base}/api/subjects/budi/episodes/by-ids"), json!({"ids": [id]})).await;
+    assert_eq!(by["episodes"][0]["project"], "LLM-MEMORY");
+    let lessons: Value = c.get(format!("{base}/api/subjects/budi/lessons")).send().await.unwrap().json().await.unwrap();
+    assert!(lessons.is_array());
+}
+
+#[tokio::test]
+async fn hook_session_lifecycle_inject_and_file_context() {
+    let (base, st, _d) = spawn(None).await;
+    let c = reqwest::Client::new();
+    post(&c, format!("{base}/api/subjects"), json!({"id": "budi", "name": "Budi"})).await;
+    let hook = |ev: &str, body: Value| post(&c, format!("{base}/api/hooks/claude-code/{ev}"), body);
+    // Giliran basa-basi: LLM melewatkannya, tidak jadi episode.
+    hook("session-init", json!({"session_id": "s1", "project": "LLM-MEMORY", "cwd": "/tmp/x", "prompt": "halo"})).await;
+    let r = hook("summarize", json!({"session_id": "s1", "project": "LLM-MEMORY", "assistant_text": "Halo juga, ada yang bisa dibantu hari ini di proyek ini?"})).await;
+    assert_eq!(r["ingested"], true, "{r}");
+    st.rt.drain().await.unwrap();
+    assert_eq!(st.rt.store.count_episodes("budi").await.unwrap(), 0);
+
+    // Giliran kerja: prompt, dua tool (satu dilewati karena duplikat id), stop.
+    let init = hook("session-init", json!({"session_id": "s1", "project": "LLM-MEMORY", "cwd": "/tmp/x", "prompt": "perbaiki bug token login <private>password: rahasia123</private>"})).await;
+    assert_eq!(init["prompt_number"], 2);
+    hook("observation", json!({"session_id": "s1", "project": "LLM-MEMORY", "cwd": "/tmp/x", "tool_use_id": "t1", "tool_name": "Read", "tool_input": {"file_path": "/tmp/x/src/auth.rs"}, "tool_response": "fn expiry() { ms }"})).await;
+    hook("observation", json!({"session_id": "s1", "project": "LLM-MEMORY", "cwd": "/tmp/x", "tool_use_id": "t1", "tool_name": "Read", "tool_input": {"file_path": "/tmp/x/src/auth.rs"}, "tool_response": "dup"})).await;
+    let obs = hook("observation", json!({"session_id": "s1", "project": "LLM-MEMORY", "cwd": "/tmp/x", "tool_use_id": "t2", "tool_name": "Edit", "tool_input": {"file_path": "/tmp/x/src/auth.rs", "old_string": "ms", "new_string": "s"}, "tool_response": {"stdout": "ok AKIAABCDEFGHIJKLMNOP"}})).await;
+    assert_eq!(obs["tool_uses"], 2);
+    let sum = hook("summarize", json!({"session_id": "s1", "project": "LLM-MEMORY", "assistant_text": "Selesai. Akar masalah: expiry dihitung dalam detik, bukan milidetik; src/auth.rs diperbaiki."})).await;
+    assert_eq!(sum["ingested"], true, "{sum}");
+    // Stop kedua pada giliran yang sama tidak menyimpan ulang.
+    let again = hook("summarize", json!({"session_id": "s1", "project": "LLM-MEMORY", "assistant_text": "Selesai. Akar masalah: expiry dihitung dalam detik, bukan milidetik; src/auth.rs diperbaiki."})).await;
+    assert!(again["ingested"] == false || again["duplicate"] == true, "{again}");
+    st.rt.drain().await.unwrap();
+
+    let src: Value = c.get(format!("{base}/api/sources/{}", sum["source_id"].as_str().unwrap())).send().await.unwrap().json().await.unwrap();
+    let dump = src.to_string();
+    assert!(!dump.contains("rahasia123") && !dump.contains("AKIAABCDEFGHIJKLMNOP"), "{dump}");
+    assert_eq!(src["source"]["kind"], "agent_session");
+    let eps: Value = c.get(format!("{base}/api/subjects/budi/episodes?limit=50")).send().await.unwrap().json().await.unwrap();
+    let eps = eps.as_array().unwrap();
+    assert_eq!(eps.len(), 2, "{eps:?}");
+    let bug = eps.iter().find(|e| e["obs_type"] == "bugfix").expect("observasi bugfix");
+    assert_eq!(bug["project"], "LLM-MEMORY");
+    assert_eq!(bug["files_modified"][0], "src/auth.rs");
+    assert_eq!(bug["session_id"], "s1");
+    assert!(eps.iter().any(|e| e["obs_type"] == "session_summary"));
+    let lessons: Value = c.get(format!("{base}/api/subjects/budi/lessons?project=LLM-MEMORY")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(lessons[0]["title"], "Expiry token harus dalam detik");
+    assert_eq!(lessons[0]["kind"], "pitfall");
+    let sessions: Value = c.get(format!("{base}/api/subjects/budi/sessions")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(sessions[0]["id"], "s1");
+    assert_eq!(sessions[0]["episodes"], 2);
+
+    // Injeksi konteks awal sesi: indeks ber-ID, muat anggaran, menyebut pelajaran & sesi terakhir.
+    let ctx = hook("context", json!({"session_id": "s2", "project": "LLM-MEMORY", "cwd": "/tmp/x"})).await;
+    assert_eq!(ctx["found"], true, "{ctx}");
+    let text = ctx["text"].as_str().unwrap();
+    assert!(text.contains("## Sesi terakhir") && text.contains("Expiry token harus dalam detik") && text.contains("[bugfix]"), "{text}");
+    assert!(text.chars().count() <= 9500);
+    let tight = hook("context", json!({"session_id": "s2", "project": "LLM-MEMORY", "max_chars": 600})).await;
+    assert!(tight["text"].as_str().unwrap().chars().count() <= 600, "{tight}");
+    assert!(tight["reductions"].as_u64().unwrap() > 0);
+    let none = hook("context", json!({"session_id": "s3", "project": "PROYEK-ASING"})).await;
+    assert_eq!(none["found"], false);
+    // Konteks per berkas.
+    let fc = hook("file-context", json!({"session_id": "s2", "project": "LLM-MEMORY", "file_path": "/tmp/x/src/auth.rs"})).await;
+    assert_eq!(fc["found"], true, "{fc}");
+    assert!(fc["text"].as_str().unwrap().contains("[diubah]"));
+    let fc2 = hook("file-context", json!({"session_id": "s2", "file_path": "/tmp/x/src/lain.rs"})).await;
+    assert_eq!(fc2["found"], false);
+    // Giliran Gemini/Antigravity tanpa tool.
+    let turn = post(&c, format!("{base}/api/hooks/antigravity/turn"), json!({"session_id": "c9", "project": "LLM-MEMORY", "user_text": "catat: kita pakai SurrealDB embedded", "assistant_text": "Baik, dicatat bahwa LLM-MEMORY memakai SurrealDB embedded sebagai penyimpanan utama."})).await;
+    assert_eq!(turn["ingested"], true, "{turn}");
+    let end = hook("session-end", json!({"session_id": "s1", "project": "LLM-MEMORY"})).await;
+    assert_eq!(end["ok"], true);
+    let s1 = st.rt.store.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s1.status, "completed");
+    let bad = c.post(format!("{base}/api/hooks/claude-code/nope")).json(&json!({"session_id": "x"})).send().await.unwrap();
+    assert_eq!(bad.status(), 404);
 }
 
 #[tokio::test]

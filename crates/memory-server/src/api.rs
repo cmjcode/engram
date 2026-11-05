@@ -26,6 +26,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects/{s}/timeline", get(timeline))
         .route("/api/subjects/{s}/episodes", get(episodes))
         .route("/api/subjects/{s}/episodes/{id}", get(episode))
+        .route("/api/subjects/{s}/episodes/by-ids", post(episodes_by_ids))
+        .route("/api/subjects/{s}/lessons", get(lessons))
+        .route("/api/subjects/{s}/context/inject", get(context_inject))
+        .route("/api/subjects/{s}/sessions", get(sessions))
         .route("/api/subjects/{s}/stream", get(stream_items))
         .route("/api/subjects/{s}/entities", get(entities))
         .route("/api/subjects/{s}/entities/{id}", get(entity))
@@ -730,6 +734,61 @@ async fn jobs(State(st): State<AppState>, Query(p): Query<Page>) -> ApiResult<Va
 }
 
 #[derive(Deserialize)]
+struct IdsIn {
+    ids: Vec<String>,
+    #[serde(default)]
+    budget: Option<usize>,
+}
+
+async fn episodes_by_ids(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<IdsIn>) -> ApiResult<memory_retrieve::EpisodesDetail> {
+    check(&s)?;
+    let budget = b.budget.unwrap_or(st.rt.cfg.retrieval.tool_budget_tokens);
+    Ok(Json(st.rt.retriever.get_episodes(&s, &b.ids, budget).await?))
+}
+
+#[derive(Deserialize, Default)]
+struct InjectQ {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    client: Option<String>,
+    #[serde(default)]
+    max_chars: Option<usize>,
+}
+
+async fn context_inject(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<InjectQ>) -> ApiResult<memory_retrieve::InjectResult> {
+    check(&s)?;
+    let opts = memory_retrieve::InjectOpts { project: q.project, client: q.client, max_chars: q.max_chars, ..Default::default() };
+    Ok(Json(st.rt.retriever.inject_context(&s, &opts).await?))
+}
+
+#[derive(Deserialize, Default)]
+struct ProjectQ {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn lessons(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<ProjectQ>) -> ApiResult<Vec<Lesson>> {
+    check(&s)?;
+    let names = match q.project.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(p) => st.rt.store.project_names(&s, p).await?,
+        None => vec![],
+    };
+    Ok(Json(st.rt.store.list_lessons(&s, &names, None, q.limit.unwrap_or(200).min(1000)).await?))
+}
+
+async fn sessions(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<ProjectQ>) -> ApiResult<Vec<Session>> {
+    check(&s)?;
+    let names = match q.project.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(p) => st.rt.store.project_names(&s, p).await?,
+        None => vec![],
+    };
+    Ok(Json(st.rt.store.list_sessions(&s, &names, q.limit.unwrap_or(100).min(500)).await?))
+}
+
+#[derive(Deserialize)]
 struct RememberIn {
     text: String,
     #[serde(default)]
@@ -769,6 +828,9 @@ pub(crate) async fn remember_text_with_project(
 ) -> Result<Value, ApiError> {
     if text.trim().is_empty() {
         return Err(ApiError::BadRequest("teks kosong".into()));
+    }
+    if memory_core::privacy::sanitize(text, &st.rt.cfg.privacy).is_none() {
+        return Err(ApiError::BadRequest("teks kosong setelah blok <private> dibuang; tidak ada yang disimpan".into()));
     }
     let out = st
         .rt

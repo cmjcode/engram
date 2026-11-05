@@ -935,3 +935,7 @@ code {
     border-radius: 0;
   }
 }
+/* Tabel sesi (Sesi & pelajaran) */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th, .tbl td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line, #e5e7eb); vertical-align: top; }
+.tbl th { font-weight: 600; opacity: .8; }

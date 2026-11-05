@@ -16,6 +16,13 @@ pub struct EpisodeFilter {
     pub status: Option<EpisodeStatus>,
     pub source_id: Option<String>,
     pub project: Option<String>,
+    /// Cocok salah satu nama (alias/varian proyek); mengalahkan `project` bila terisi.
+    pub projects: Vec<String>,
+    /// Hanya episode dengan `obs_type` ini (mis. "session_summary").
+    pub obs_type: Option<String>,
+    pub session_id: Option<String>,
+    /// Urutkan dari yang terbaru dibuat (bukan kronologi cerita).
+    pub newest_first: bool,
     pub life_phase: Option<String>,
     /// Jendela waktu (ISO date) yang dipotong rentang episode.
     pub from: Option<String>,
@@ -172,9 +179,20 @@ impl Store {
             cond.push_str(" AND source_id = $src");
             b.insert("src".into(), json!(src));
         }
-        if let Some(proj) = &f.project {
+        if !f.projects.is_empty() {
+            cond.push_str(" AND project IN $projs");
+            b.insert("projs".into(), json!(f.projects));
+        } else if let Some(proj) = &f.project {
             cond.push_str(" AND project = $proj");
             b.insert("proj".into(), json!(proj));
+        }
+        if let Some(ot) = &f.obs_type {
+            cond.push_str(" AND obs_type = $ot");
+            b.insert("ot".into(), json!(ot));
+        }
+        if let Some(sid) = &f.session_id {
+            cond.push_str(" AND session_id = $sid");
+            b.insert("sid".into(), json!(sid));
         }
         if let Some(lp) = &f.life_phase {
             cond.push_str(" AND life_phase = $lp");
@@ -189,11 +207,107 @@ impl Store {
             b.insert("from".into(), json!(from));
         }
         let limit = if f.limit == 0 { 100 } else { f.limit };
+        let order = if f.newest_first { "created_at DESC" } else { "time_start ASC, created_at ASC" };
         self.rows_as(
-            &format!("{EP} WHERE {cond} ORDER BY time_start ASC, created_at ASC LIMIT {limit} START {};", f.offset),
+            &format!("{EP} WHERE {cond} ORDER BY {order} LIMIT {limit} START {};", f.offset),
             b,
         )
         .await
+    }
+
+    /// Episode di sekitar satu episode jangkar menurut urutan dibuat (untuk tool
+    /// `timeline(anchor)`): `before` sebelum dan `after` sesudahnya, dalam proyek yang
+    /// sama bila `projects` terisi. Hasil urut kronologis, jangkar disertakan.
+    pub async fn episodes_around(&self, subject: &str, anchor: &Episode, projects: &[String], before: usize, after: usize) -> Result<Vec<Episode>> {
+        let mut cond = String::from("subject = $s AND status = 'active'");
+        let mut b = binds! {"s" => subject, "at" => anchor.created_at.clone(), "aid" => anchor.id.clone()};
+        if !projects.is_empty() {
+            cond.push_str(" AND project IN $projs");
+            b.insert("projs".into(), json!(projects));
+        }
+        let mut prev: Vec<Episode> = self
+            .rows_as(&format!("{EP} WHERE {cond} AND created_at <= $at AND id != type::record('episode', $aid) ORDER BY created_at DESC LIMIT {};", before.max(1)), b.clone())
+            .await?;
+        let next: Vec<Episode> = self
+            .rows_as(&format!("{EP} WHERE {cond} AND created_at >= $at AND id != type::record('episode', $aid) ORDER BY created_at ASC LIMIT {};", after.max(1)), b)
+            .await?;
+        prev.reverse();
+        prev.truncate(before);
+        let mut out = prev;
+        out.push(anchor.clone());
+        out.extend(next.into_iter().take(after));
+        Ok(out)
+    }
+
+    /// Episode yang menyentuh berkas (dibaca/diubah). `path` dicocokkan persis dan
+    /// sebagai akhiran path (relatif vs absolut).
+    pub async fn episodes_touching_file(&self, subject: &str, path: &str, limit: usize) -> Result<Vec<Episode>> {
+        let p = path.replace('\\', "/");
+        let tail = p.rsplit('/').next().unwrap_or(&p).to_string();
+        let rows: Vec<Episode> = self
+            .rows_as(
+                &format!(
+                    "{EP} WHERE subject = $s AND status = 'active' AND (array::any(files_modified, |$f| string::ends_with($f, $tail)) OR array::any(files_read, |$f| string::ends_with($f, $tail))) ORDER BY created_at DESC LIMIT {};",
+                    (limit * 3).max(10)
+                ),
+                binds! {"s" => subject, "tail" => tail},
+            )
+            .await?;
+        let matches = |f: &str| {
+            let f = f.replace('\\', "/");
+            f == p || f.ends_with(&format!("/{p}")) || p.ends_with(&format!("/{f}")) || (f.len() > 3 && p.ends_with(&f))
+        };
+        Ok(rows.into_iter().filter(|e| e.files_modified.iter().chain(e.files_read.iter()).any(|f| matches(f))).take(limit).collect())
+    }
+
+    // ---------------------------------------------------------------- session
+    pub async fn put_session(&self, s: &Session) -> Result<()> {
+        self.upsert("session", &s.id, s, None).await
+    }
+
+    pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
+        self.get("session", id).await
+    }
+
+    pub async fn list_sessions(&self, subject: &str, projects: &[String], limit: usize) -> Result<Vec<Session>> {
+        let mut cond = String::from("subject = $s");
+        let mut b = binds! {"s" => subject};
+        if !projects.is_empty() {
+            cond.push_str(" AND project IN $projs");
+            b.insert("projs".into(), json!(projects));
+        }
+        self.rows_as(&format!("SELECT * FROM session WHERE {cond} ORDER BY last_activity_at DESC LIMIT {limit};"), b).await
+    }
+
+    // ----------------------------------------------------------------- lesson
+    pub async fn put_lesson(&self, l: &Lesson) -> Result<()> {
+        self.upsert("lesson", &l.id, l, None).await
+    }
+
+    pub async fn get_lesson(&self, id: &str) -> Result<Option<Lesson>> {
+        self.get("lesson", id).await
+    }
+
+    pub async fn lesson_by_key(&self, subject: &str, project: Option<&str>, title_key: &str) -> Result<Option<Lesson>> {
+        let mut rows: Vec<Lesson> = match project {
+            Some(p) => self.rows_as("SELECT * FROM lesson WHERE subject = $s AND project = $p AND title_key = $k LIMIT 1;", binds! {"s" => subject, "p" => p, "k" => title_key}).await?,
+            None => self.rows_as("SELECT * FROM lesson WHERE subject = $s AND (project = NONE OR project = NULL) AND title_key = $k LIMIT 1;", binds! {"s" => subject, "k" => title_key}).await?,
+        };
+        Ok(rows.pop())
+    }
+
+    pub async fn list_lessons(&self, subject: &str, projects: &[String], status: Option<&str>, limit: usize) -> Result<Vec<Lesson>> {
+        let mut cond = String::from("subject = $s");
+        let mut b = binds! {"s" => subject};
+        if !projects.is_empty() {
+            cond.push_str(" AND project IN $projs");
+            b.insert("projs".into(), json!(projects));
+        }
+        if let Some(st) = status {
+            cond.push_str(" AND status = $st");
+            b.insert("st".into(), json!(st));
+        }
+        self.rows_as(&format!("SELECT * FROM lesson WHERE {cond} ORDER BY occurrences DESC, updated_at DESC LIMIT {limit};"), b).await
     }
 
     pub async fn episodes_mentioning(&self, entity_id: &str, limit: usize) -> Result<Vec<Episode>> {
@@ -261,6 +375,19 @@ impl Store {
             binds! {"s" => subject, "k" => key},
         )
         .await
+    }
+
+    /// Semua nama yang merujuk proyek `name`: nama entitas proyek beserta alias-aliasnya
+    /// (dan varian huruf kecil / segmen terakhir), untuk filter `project IN [...]`.
+    pub async fn project_names(&self, subject: &str, name: &str) -> Result<Vec<String>> {
+        let mut names: Vec<String> = vec![name.trim().to_string()];
+        for e in self.entities_by_alias(subject, name).await? {
+            if e.kind == EntityKind::Project || e.kind == EntityKind::Org {
+                names.push(e.name.clone());
+                names.extend(e.aliases.iter().cloned());
+            }
+        }
+        Ok(memory_core::project::project_variants(names.iter().map(String::as_str)))
     }
 
     pub async fn list_entities(&self, subject: &str, kind: Option<EntityKind>, limit: usize, offset: usize) -> Result<Vec<Entity>> {

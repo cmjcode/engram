@@ -152,6 +152,12 @@ mod repo_tests {
             quotes: vec![],
             trait_signals: vec![],
             entity_ids: vec!["e1".into()],
+            obs_type: None,
+            concepts: vec![],
+            files_read: vec![],
+            files_modified: vec![],
+            session_id: None,
+            prompt_number: None,
             observed_at: "2024-01-01".into(),
             created_at: memory_core::ids::now_rfc3339(),
         }

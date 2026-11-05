@@ -25,6 +25,7 @@ const ICONS = {
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   download: '<path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/>',
   external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v6H4V6h6"/>',
+  code: '<path d="m8 8-4 4 4 4M16 8l4 4-4 4M14 5l-4 14"/>',
 };
 const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -67,6 +68,7 @@ const ROUTES = [
   ["berpikir", "compass", "Cara berpikir", viewThinking],
   ["cari", "search", "Cari & tanya", viewSearch],
   ["wawancara", "mic", "Wawancara", viewInterview],
+  ["sesi", "code", "Sesi & pelajaran", viewSessions],
   ["review", "flag", "Review", viewReview],
   ["sumber", "inbox", "Sumber & import", viewSources],
 ];
@@ -622,6 +624,38 @@ async function viewHome(el) {
   await next();
 }
 
+// Sesi kerja agent (hook engram) dan pelajaran proyek (konvensi/koreksi/jebakan).
+async function viewSessions(el, projectArg) {
+  const project = projectArg || "";
+  const q = project ? `?project=${encodeURIComponent(project)}` : "";
+  const [sessions, lessons, eps] = await Promise.all([
+    api(`/api/subjects/${S()}/sessions${q}`),
+    api(`/api/subjects/${S()}/lessons${q}`),
+    api(`/api/subjects/${S()}/episodes?limit=500`),
+  ]);
+  const obs = eps.filter((e) => e.obs_type && (!project || (e.project || "") === project)).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  const projects = [...new Set([...sessions.map((s) => s.project), ...obs.map((e) => e.project)].filter(Boolean))].sort();
+  const label = (t) => ({ decision: "keputusan", bugfix: "bugfix", discovery: "temuan", feature: "fitur", refactor: "refactor", change: "perubahan", session_summary: "sesi" }[t] || t);
+  const kindLabel = (k) => ({ correction: "koreksi", convention: "konvensi", pitfall: "jebakan", discovery: "temuan" }[k] || k);
+  const when = (s) => (s || "").slice(0, 16).replace("T", " ");
+  el.innerHTML = `<h1>Sesi & pelajaran</h1>
+    <div class="card row small"><label>Proyek <select id="proj"><option value="">semua</option>${projects.map((p) => `<option value="${esc(p)}" ${p === project ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label>
+      <span class="muted">Direkam otomatis oleh hook <code>engram hook</code> (Claude Code, Gemini CLI, Antigravity). Konteks awal sesi dapat dilihat di <a href="/api/subjects/${S()}/context/inject${q}" target="_blank">endpoint inject</a>.</span></div>
+    <h2>Konvensi, koreksi & jebakan proyek</h2>
+    ${lessons.length ? `<div class="card">${lessons.map((l) => `<div class="fact"><span class="badge">${esc(kindLabel(l.kind))}</span> <b>${esc(l.title)}</b> <span class="small muted">x${l.occurrences}${l.project ? " · " + esc(l.project) : ""}${l.promoted_to ? " · diangkat jadi prinsip" : ""}</span>
+      ${l.detail ? `<div class="small">${esc(l.detail)}</div>` : ""}
+      <div class="small">${(l.evidence || []).slice(0, 4).map((ev) => `<a class="cite" data-ep="${esc(ev.episode_id)}">[ep:${esc(ev.episode_id.slice(0, 6))}]</a>`).join(" ")}</div></div>`).join("")}</div>` : '<p class="muted">Belum ada pelajaran. Pelajaran lahir dari koreksi pengguna dan konvensi yang disebut selama sesi kerja.</p>'}
+    <h2>Observasi terbaru</h2>
+    ${obs.length ? obs.slice(0, 200).map((e) => `<div class="tl-item" data-ep="${esc(e.id)}"><span class="tl-time">${esc(when(e.created_at))}<br><span class="small">${esc(e.project || "")}</span></span>
+      <span><span class="badge">${esc(label(e.obs_type))}</span> <b>${esc(e.title || "Tanpa judul")}</b><br><span class="small muted">${esc(e.summary || e.text.slice(0, 200))}</span>
+      ${(e.files_modified || []).length ? `<br><span class="small">diubah: ${e.files_modified.slice(0, 5).map(esc).join(", ")}</span>` : ""}</span></div>`).join("") : '<p class="muted">Belum ada observasi. Pasang hook dengan <code>scripts/install-mcp.sh --client claude</code>.</p>'}
+    <h2>Sesi</h2>
+    ${sessions.length ? `<table class="tbl"><thead><tr><th>Mulai</th><th>Client</th><th>Proyek</th><th>Prompt pertama</th><th>Prompt</th><th>Tool</th><th>Episode</th><th>Status</th></tr></thead><tbody>
+      ${sessions.map((s) => `<tr><td>${esc(when(s.started_at))}</td><td>${esc(s.client)}</td><td>${esc(s.project || "-")}</td><td>${esc(s.first_prompt || "")}</td><td>${s.prompt_counter}</td><td>${s.tool_uses}</td><td>${s.episodes}</td><td>${esc(s.status)}</td></tr>`).join("")}</tbody></table>` : '<p class="muted">Belum ada sesi tercatat.</p>'}`;
+  $("#proj", el).onchange = (ev) => { location.hash = ev.target.value ? `#sesi/${encodeURIComponent(ev.target.value)}` : "#sesi"; };
+  bindCites(el);
+}
+
 async function viewReview(el) {
   const items = await api(`/ api / subjects / ${ S() }/reviews`);
             const kinds = { gray_zone: "Layak jadi cerita?", conflict: "Fakta bertentangan", entity_merge: "Entitas yang sama?", quarantine: "Fakta meragukan", reflective: "Konfirmasi prinsip/sifat" };
@@ -875,7 +909,8 @@ async function viewReview(el) {
             });
           }
 
-          // Pasang server MCP ke agent AI (Antigravity, VS Code, Claude Code) dengan satu klik.
+          // Pasang server MCP ke agent AI (Antigravity, VS Code, Claude Code, Cursor, Codex, Windsurf) dengan satu klik.
+          // Client koding murni memakai profil tool `coding` (lihat install.rs).
           const MCP_STATE = {
             installed: ["now", "Terpasang"],
             outdated: ["warn", "Perlu diperbarui"],
@@ -900,7 +935,7 @@ async function viewReview(el) {
               const has = c.state === "installed" || c.state === "outdated";
               return `<div class="card" data-client="${esc(c.id)}">
         <div class="row" style="justify-content:space-between">
-          <div><b>${esc(c.label)}</b> <span class="badge ${cls}">${esc(label)}</span>${c.detected ? "" : ' <span class="small muted">(tidak terdeteksi)</span>'}</div>
+          <div><b>${esc(c.label)}</b> <span class="badge ${cls}">${esc(label)}</span>${c.profile === "coding" ? ' <span class="badge" title="Hanya tool sesi koding: project_context, recall, remember, who_is, timeline, principles">profil coding</span>' : ""}${c.detected ? "" : ' <span class="small muted">(tidak terdeteksi)</span>'}</div>
           <div class="row">
             ${has ? `<button data-act="uninstall" class="ghost" title="Hapus dari ${esc(c.label)}">${icon("x")}</button>` : ""}
             <button data-act="install" class="${c.state === "installed" ? "" : "primary"}">${icon(c.state === "installed" ? "refresh" : "plug")} ${c.state === "installed" ? "Pasang ulang" : c.state === "outdated" ? "Perbarui" : "Pasang"}</button>

@@ -1,9 +1,14 @@
-//! Pasang server MCP ini ke agent AI (Antigravity, VS Code, Claude Code) dengan satu klik.
+//! Pasang server MCP ini ke agent AI (Antigravity, VS Code, Claude Code, Cursor,
+//! Codex CLI, Windsurf) dengan satu klik.
 //!
-//! Setiap client menyimpan daftar server MCP di berkas JSON milik pengguna. Modul ini
-//! menambah/mengganti satu entri bernama [`SERVER_NAME`] tanpa menyentuh entri lain,
-//! membuat cadangan `.bak` lebih dulu, dan menulis berkas secara atomik dengan izin
-//! hanya-pemilik (entri berisi token akses).
+//! Setiap client menyimpan daftar server MCP di berkas milik pengguna (JSON, atau
+//! TOML untuk Codex). Modul ini menambah/mengganti satu entri bernama
+//! [`SERVER_NAME`] tanpa menyentuh entri lain, membuat cadangan `.bak` lebih dulu,
+//! dan menulis berkas secara atomik dengan izin hanya-pemilik (entri berisi token).
+//!
+//! Client koding murni (VS Code, Cursor, Codex, Windsurf) didaftarkan dengan
+//! `?profile=coding` agar hanya tool sesi koding yang dimuat ke konteks; client
+//! yang juga dipakai untuk memori hidup (Antigravity, Claude Code) memakai profil penuh.
 //!
 //! Fitur ini hanya aktif bila server tahu alamat MCP-nya sendiri ([`crate::AppState::mcp_url`]),
 //! yaitu saat dijalankan aplikasi desktop atau `engram serve` di 127.0.0.1.
@@ -13,6 +18,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use crate::mcp::Profile;
+
 /// Nama entri server di config client.
 pub const SERVER_NAME: &str = "engram";
 
@@ -21,16 +28,29 @@ pub enum Client {
     Antigravity,
     Vscode,
     ClaudeCode,
+    Cursor,
+    Codex,
+    Windsurf,
+}
+
+/// Format berkas config client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    Json,
+    Toml,
 }
 
 impl Client {
-    pub const ALL: [Client; 3] = [Client::Antigravity, Client::Vscode, Client::ClaudeCode];
+    pub const ALL: [Client; 6] = [Client::Antigravity, Client::Vscode, Client::ClaudeCode, Client::Cursor, Client::Codex, Client::Windsurf];
 
     pub fn id(self) -> &'static str {
         match self {
             Client::Antigravity => "antigravity",
             Client::Vscode => "vscode",
             Client::ClaudeCode => "claude-code",
+            Client::Cursor => "cursor",
+            Client::Codex => "codex",
+            Client::Windsurf => "windsurf",
         }
     }
 
@@ -39,6 +59,9 @@ impl Client {
             Client::Antigravity => "Antigravity",
             Client::Vscode => "VS Code",
             Client::ClaudeCode => "Claude Code",
+            Client::Cursor => "Cursor",
+            Client::Codex => "Codex CLI",
+            Client::Windsurf => "Windsurf",
         }
     }
 
@@ -46,10 +69,26 @@ impl Client {
         Client::ALL.into_iter().find(|c| c.id() == id)
     }
 
+    /// Profil tool yang dipasang untuk client ini.
+    pub fn profile(self) -> Profile {
+        match self {
+            Client::Antigravity | Client::ClaudeCode => Profile::Full,
+            Client::Vscode | Client::Cursor | Client::Codex | Client::Windsurf => Profile::Coding,
+        }
+    }
+
+    fn format(self) -> Format {
+        match self {
+            Client::Codex => Format::Toml,
+            _ => Format::Json,
+        }
+    }
+
     /// Kunci objek daftar server di berkas config.
     fn servers_key(self) -> &'static str {
         match self {
             Client::Vscode => "servers",
+            Client::Codex => "mcp_servers",
             _ => "mcpServers",
         }
     }
@@ -60,7 +99,18 @@ impl Client {
             Client::Antigravity => "Di Antigravity: panel Agent > ... > MCP Servers > Manage MCP Servers > Refresh.",
             Client::Vscode => "VS Code memuat ulang mcp.json otomatis. Aktifkan tool 'engram' di mode Agent pada Chat.",
             Client::ClaudeCode => "Mulai sesi Claude Code baru; cek dengan perintah /mcp.",
+            Client::Cursor => "Di Cursor: Settings > MCP, pastikan 'engram' aktif (hijau).",
+            Client::Codex => "Mulai sesi Codex baru; cek dengan perintah /mcp.",
+            Client::Windsurf => "Di Windsurf: panel Cascade > MCP Servers > Refresh.",
         }
+    }
+}
+
+/// Alamat yang didaftarkan ke client: URL server + `?profile=...` bila bukan profil penuh.
+pub fn client_url(c: Client, url: &str) -> String {
+    match c.profile() {
+        Profile::Full => url.to_string(),
+        p => format!("{url}{}profile={}", if url.contains('?') { '&' } else { '?' }, p.id()),
     }
 }
 
@@ -89,6 +139,9 @@ impl Dirs {
             Client::Antigravity => self.home.join(".gemini").join("antigravity").join("mcp_config.json"),
             Client::Vscode => self.vscode_user_dir().join("mcp.json"),
             Client::ClaudeCode => self.home.join(".claude.json"),
+            Client::Cursor => self.home.join(".cursor").join("mcp.json"),
+            Client::Codex => self.home.join(".codex").join("config.toml"),
+            Client::Windsurf => self.home.join(".codeium").join("windsurf").join("mcp_config.json"),
         }
     }
 
@@ -100,34 +153,43 @@ impl Dirs {
         }
     }
 
+    fn app_exists(&self, name: &str) -> bool {
+        Path::new("/Applications").join(name).exists() || self.home.join("Applications").join(name).exists()
+    }
+
     /// Apakah client tampaknya terpasang di komputer ini.
     pub fn detected(&self, c: Client) -> bool {
         match c {
-            Client::Antigravity => {
-                self.home.join(".gemini").join("antigravity").exists()
-                    || Path::new("/Applications/Antigravity.app").exists()
-                    || self.home.join("Applications").join("Antigravity.app").exists()
-            }
+            Client::Antigravity => self.home.join(".gemini").join("antigravity").exists() || self.app_exists("Antigravity.app"),
             Client::Vscode => self.vscode_user_dir().exists(),
-            Client::ClaudeCode => self.home.join(".claude.json").exists() || self.home.join(".claude").exists() || find_claude_cli(self).is_some(),
+            Client::ClaudeCode => self.home.join(".claude.json").exists() || self.home.join(".claude").exists() || find_cli(self, "claude").is_some(),
+            Client::Cursor => self.home.join(".cursor").exists() || self.app_exists("Cursor.app"),
+            Client::Codex => self.home.join(".codex").exists() || find_cli(self, "codex").is_some(),
+            Client::Windsurf => self.home.join(".codeium").join("windsurf").exists() || self.app_exists("Windsurf.app"),
         }
     }
 }
 
-/// Entri server MCP dalam format masing-masing client.
+/// Entri server MCP dalam format masing-masing client (sebagai JSON; untuk Codex
+/// dirender ke TOML oleh [`toml_section`]).
 pub fn entry(c: Client, url: &str, token: Option<&str>) -> Value {
+    let url = client_url(c, url);
     let mut e = Map::new();
     match c {
-        Client::Antigravity => {
+        Client::Antigravity | Client::Windsurf => {
             e.insert("serverUrl".into(), json!(url));
         }
         Client::Vscode | Client::ClaudeCode => {
             e.insert("type".into(), json!("http"));
             e.insert("url".into(), json!(url));
         }
+        Client::Cursor | Client::Codex => {
+            e.insert("url".into(), json!(url));
+        }
     }
     if let Some(t) = token {
-        e.insert("headers".into(), json!({"Authorization": format!("Bearer {t}")}));
+        let key = if c == Client::Codex { "http_headers" } else { "headers" };
+        e.insert(key.into(), json!({"Authorization": format!("Bearer {t}")}));
     }
     if c == Client::Antigravity {
         e.insert("disabled".into(), json!(false));
@@ -144,7 +206,7 @@ pub enum InstallState {
     Installed,
     /// Ada entri tetapi alamat/token berbeda (perlu diperbarui).
     Outdated,
-    /// Berkas config tidak bisa dibaca sebagai JSON.
+    /// Berkas config tidak bisa dibaca.
     Unreadable,
 }
 
@@ -155,37 +217,57 @@ pub struct ClientStatus {
     pub detected: bool,
     pub state: InstallState,
     pub config_path: String,
+    /// Profil tool yang dipasang (`full` | `coding`).
+    pub profile: &'static str,
+}
+
+fn read_text(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) if s.trim().is_empty() => Ok(None),
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("membaca {}: {e}", path.display())),
+    }
 }
 
 fn read_json(path: &Path) -> Result<Option<Value>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(s) if s.trim().is_empty() => Ok(None),
-        Ok(s) => serde_json::from_str(&s).map(Some).map_err(|e| {
-            format!("{} bukan JSON murni ({e}). Hapus komentar/koma berlebih di berkas itu, lalu coba lagi.", path.display())
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("membaca {}: {e}", path.display())),
+    read_text(path)?
+        .map(|s| {
+            serde_json::from_str(&s).map_err(|e| format!("{} bukan JSON murni ({e}). Hapus komentar/koma berlebih di berkas itu, lalu coba lagi.", path.display()))
+        })
+        .transpose()
+}
+
+/// Entri `engram` yang sekarang ada di config client (sebagai JSON), bila ada.
+fn current_entry(path: &Path, c: Client) -> Result<Option<Value>, String> {
+    match c.format() {
+        Format::Json => Ok(read_json(path)?.and_then(|d| d.get(c.servers_key()).and_then(|s| s.get(SERVER_NAME)).cloned())),
+        Format::Toml => {
+            let Some(text) = read_text(path)? else { return Ok(None) };
+            let doc: toml::Table = toml::from_str(&text).map_err(|e| format!("{} bukan TOML valid ({e})", path.display()))?;
+            let Some(e) = doc.get(c.servers_key()).and_then(|s| s.get(SERVER_NAME)) else { return Ok(None) };
+            Ok(Some(serde_json::to_value(e).map_err(|e| e.to_string())?))
+        }
     }
 }
 
 /// Status pemasangan satu client.
 pub fn status(dirs: &Dirs, c: Client, url: &str, token: Option<&str>) -> ClientStatus {
     let path = dirs.config_file(c);
-    let state = match read_json(&path) {
+    let state = match current_entry(&path, c) {
         Err(_) => InstallState::Unreadable,
-        Ok(doc) => match doc.as_ref().and_then(|d| d.get(c.servers_key())).and_then(|s| s.get(SERVER_NAME)) {
-            None => InstallState::Missing,
-            Some(cur) if same_entry(cur, &entry(c, url, token)) => InstallState::Installed,
-            Some(_) => InstallState::Outdated,
-        },
+        Ok(None) => InstallState::Missing,
+        Ok(Some(cur)) if same_entry(&cur, &entry(c, url, token)) => InstallState::Installed,
+        Ok(Some(_)) => InstallState::Outdated,
     };
-    ClientStatus { id: c.id(), label: c.label(), detected: dirs.detected(c), state, config_path: path.display().to_string() }
+    ClientStatus { id: c.id(), label: c.label(), detected: dirs.detected(c), state, config_path: path.display().to_string(), profile: c.profile().id() }
 }
 
 /// Bandingkan hanya alamat & header (client boleh menambah kunci lain, mis. `disabled`).
 fn same_entry(cur: &Value, want: &Value) -> bool {
     let url = |v: &Value| v.get("serverUrl").or_else(|| v.get("url")).cloned();
-    url(cur) == url(want) && cur.get("headers") == want.get("headers")
+    let headers = |v: &Value| v.get("headers").or_else(|| v.get("http_headers")).cloned();
+    url(cur) == url(want) && headers(cur) == headers(want)
 }
 
 /// Tambah/ganti (`Some`) atau hapus (`None`) entri server di berkas config JSON.
@@ -208,15 +290,102 @@ pub fn edit_config(path: &Path, servers_key: &str, value: Option<Value>) -> Resu
         }
     }
     let body = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n";
+    write_config(path, &body, "json")
+}
+
+/// Render entri (hasil [`entry`] untuk Codex) sebagai bagian TOML `[mcp_servers.engram]`.
+fn toml_section(servers_key: &str, value: &Value) -> String {
+    let quote = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let mut out = format!("[{servers_key}.{SERVER_NAME}]\n");
+    if let Some(obj) = value.as_object() {
+        for (k, v) in obj {
+            match v {
+                Value::String(s) => out.push_str(&format!("{k} = {}\n", quote(s))),
+                Value::Bool(b) => out.push_str(&format!("{k} = {b}\n")),
+                Value::Object(m) => {
+                    let inner: Vec<String> = m.iter().filter_map(|(ik, iv)| iv.as_str().map(|s| format!("{} = {}", quote(ik), quote(s)))).collect();
+                    out.push_str(&format!("{k} = {{ {} }}\n", inner.join(", ")));
+                }
+                Value::Array(a) => {
+                    let inner: Vec<String> = a.iter().filter_map(|x| x.as_str().map(quote)).collect();
+                    out.push_str(&format!("{k} = [{}]\n", inner.join(", ")));
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Apakah baris adalah header tabel TOML (`[x]` atau `[[x]]`).
+fn is_toml_header(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with('[') && t.trim_end().ends_with(']')
+}
+
+/// Apakah header menunjuk tabel `servers_key.name` atau subtabelnya (dengan/tanpa kutip).
+fn header_is_server(line: &str, servers_key: &str, name: &str) -> bool {
+    let t = line.trim().trim_start_matches('[').trim_end_matches(']').replace(['"', '\'', ' '], "");
+    let prefix = format!("{servers_key}.{name}");
+    t == prefix || t.starts_with(&format!("{prefix}."))
+}
+
+/// Hapus bagian `[servers_key.name]` (dan subtabelnya) dari teks TOML; isi lain utuh.
+fn strip_toml_section(text: &str, servers_key: &str, name: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut skipping = false;
+    let mut removed = false;
+    for line in text.lines() {
+        if is_toml_header(line) {
+            skipping = header_is_server(line, servers_key, name);
+            removed |= skipping;
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    (out, removed)
+}
+
+/// Tambah/ganti (`Some`) atau hapus (`None`) entri server di berkas config TOML (Codex).
+/// Bagian lain berkas tidak disentuh (komentar dan urutan tetap).
+pub fn edit_toml_config(path: &Path, servers_key: &str, value: Option<Value>) -> Result<(), String> {
+    let real_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = real_path.as_path();
+    let text = read_text(path)?.unwrap_or_default();
+    // Pastikan berkas valid sebelum diedit secara tekstual.
+    toml::from_str::<toml::Table>(&text).map_err(|e| format!("{} bukan TOML valid ({e}); perbaiki dulu lalu coba lagi.", path.display()))?;
+    let (text, _) = strip_toml_section(&text, servers_key, "memori");
+    let (mut body, removed) = strip_toml_section(&text, servers_key, SERVER_NAME);
+    match value {
+        Some(v) => {
+            let body_trim = body.trim_end();
+            body = if body_trim.is_empty() { String::new() } else { format!("{body_trim}\n\n") };
+            body.push_str(&toml_section(servers_key, &v));
+        }
+        None => {
+            if !removed {
+                return Ok(());
+            }
+            body = format!("{}\n", body.trim_end());
+        }
+    }
+    toml::from_str::<toml::Table>(&body).map_err(|e| format!("hasil edit {} tidak valid ({e})", path.display()))?;
+    write_config(path, &body, "toml")
+}
+
+/// Cadangkan (`.bak`) lalu tulis atomik dengan izin hanya-pemilik.
+fn write_config(path: &Path, body: &str, ext: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("membuat {}: {e}", dir.display()))?;
     }
     if path.exists() {
-        let bak = path.with_extension("json.bak");
+        let bak = path.with_extension(format!("{ext}.bak"));
         std::fs::copy(path, &bak).map_err(|e| format!("mencadangkan ke {}: {e}", bak.display()))?;
     }
-    let tmp = path.with_extension("json.tmp");
-    write_private(&tmp, &body).map_err(|e| format!("menulis {}: {e}", tmp.display()))?;
+    let tmp = path.with_extension(format!("{ext}.tmp"));
+    write_private(&tmp, body).map_err(|e| format!("menulis {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("mengganti {}: {e}", path.display()))?;
     Ok(())
 }
@@ -231,7 +400,7 @@ fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Folder yang biasa berisi CLI `claude`. Aplikasi yang dibuka dari Finder hanya
+/// Folder yang biasa berisi CLI `claude`/`codex`. Aplikasi yang dibuka dari Finder hanya
 /// mewarisi PATH minimal, jadi lokasi umum ditambahkan manual.
 fn search_path(dirs: &Dirs) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
@@ -251,14 +420,14 @@ fn search_path(dirs: &Dirs) -> Vec<PathBuf> {
     v
 }
 
-fn find_claude_cli(dirs: &Dirs) -> Option<PathBuf> {
-    let names: &[&str] = if cfg!(windows) { &["claude.exe", "claude.cmd"] } else { &["claude"] };
+fn find_cli(dirs: &Dirs, name: &str) -> Option<PathBuf> {
+    let names: Vec<String> = if cfg!(windows) { vec![format!("{name}.exe"), format!("{name}.cmd")] } else { vec![name.to_string()] };
     search_path(dirs).into_iter().flat_map(|d| names.iter().map(move |n| d.join(n))).find(|p| p.is_file())
 }
 
 /// Daftarkan lewat `claude mcp add` (cara resmi). Mengembalikan `Err` bila CLI tidak ada atau gagal.
 async fn claude_cli(dirs: &Dirs, url: Option<(&str, Option<&str>)>) -> Result<(), String> {
-    let bin = find_claude_cli(dirs).ok_or("CLI claude tidak ditemukan")?;
+    let bin = find_cli(dirs, "claude").ok_or("CLI claude tidak ditemukan")?;
     let path = std::env::join_paths(search_path(dirs)).map_err(|e| e.to_string())?;
     let run = |args: Vec<String>| {
         let mut cmd = tokio::process::Command::new(&bin);
@@ -268,7 +437,8 @@ async fn claude_cli(dirs: &Dirs, url: Option<(&str, Option<&str>)>) -> Result<()
     // Hapus dulu agar `add` tidak gagal karena nama sudah dipakai.
     let _ = run(vec!["mcp".into(), "remove".into(), "-s".into(), "user".into(), SERVER_NAME.into()]).await;
     let Some((url, token)) = url else { return Ok(()) };
-    let mut args: Vec<String> = ["mcp", "add", "-s", "user", "--transport", "http", SERVER_NAME, url].map(String::from).into();
+    let url = client_url(Client::ClaudeCode, url);
+    let mut args: Vec<String> = ["mcp", "add", "-s", "user", "--transport", "http", SERVER_NAME, url.as_str()].map(String::from).into();
     if let Some(t) = token {
         args.extend(["--header".into(), format!("Authorization: Bearer {t}")]);
     }
@@ -293,6 +463,15 @@ const RULE_BLOCK: &str = "<!-- ENGRAM_START -->
 - **Rangkum & Padatkan Memori (`compact`)**: Saat memori sudah cukup banyak atau pengguna meminta merangkum/memadatkan memori, panggil tool MCP `compact` dengan `mode=\"candidates\"` untuk meninjau klaster episode serupa, fakta redundan/sesaat per entitas, dan review terbuka; lalu kirim rangkuman intinya lewat `compact` dengan `mode=\"apply\"` dan `plan` (non-destruktif: episode mikro ditandai sebagai `retelling` dari episode kanonik baru sehingga bukti asli tetap utuh).
 <!-- ENGRAM_END -->";
 
+/// Rule ringkas untuk client koding (profil `coding`: tanpa tool memori hidup).
+const CODING_RULE_BLOCK: &str = "<!-- ENGRAM_START -->
+## Engram (`engram` MCP)
+
+- **Awal tugas**: panggil `project_context` (parameter `project` = nama repositori/folder kerja, `task` = tugas saat ini) sebelum membaca kode, agar keputusan arsitektur, konvensi, dan akar masalah bug dari sesi sebelumnya ikut dipertimbangkan. Untuk pertanyaan spesifik pakai `recall` dengan parameter `project`.
+- **Fakta berlabel waktu**: hasil tool membedakan fakta yang masih berlaku dan riwayat. Jangan menyajikan fakta lama sebagai kondisi sekarang; bila tool menjawab tidak ada catatan, katakan apa adanya.
+- **Simpan keputusan (`remember`)**: setelah keputusan teknis, perubahan arsitektur, konvensi baru, atau akar masalah bug ditemukan, simpan ringkasannya lewat `remember` dengan `source` berformat `<client>:<nama-project>` (misal `codex:LLM-MEMORY`).
+<!-- ENGRAM_END -->";
+
 fn strip_marker_block(text: &str, start: &str, end: &str) -> String {
     let Some(s) = text.find(start) else { return text.to_string() };
     let Some(e_rel) = text[s..].find(end) else { return text.to_string() };
@@ -303,7 +482,7 @@ fn strip_marker_block(text: &str, start: &str, end: &str) -> String {
     format!("{}{}", &text[..s], &text[e..])
 }
 
-fn upsert_rule_file(path: &Path, uninstall: bool) -> Result<(), String> {
+fn upsert_rule_file(path: &Path, block: &str, uninstall: bool) -> Result<(), String> {
     let existing = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -317,9 +496,9 @@ fn upsert_rule_file(path: &Path, uninstall: bool) -> Result<(), String> {
     } else {
         let trimmed = without_engram.trim_end();
         if trimmed.is_empty() {
-            format!("{RULE_BLOCK}\n")
+            format!("{block}\n")
         } else {
-            format!("{trimmed}\n\n{RULE_BLOCK}\n")
+            format!("{trimmed}\n\n{block}\n")
         }
     };
     if let Some(dir) = path.parent() {
@@ -328,19 +507,33 @@ fn upsert_rule_file(path: &Path, uninstall: bool) -> Result<(), String> {
     std::fs::write(path, new_text).map_err(|e| format!("menulis {}: {e}", path.display()))
 }
 
-fn sync_client_rules(dirs: &Dirs, c: Client, uninstall: bool) {
-    let files: Vec<PathBuf> = match c {
-        Client::Antigravity => vec![
-            dirs.home.join(".gemini").join("GEMINI.md"),
-            dirs.home.join(".gemini").join("config").join("GEMINI.md"),
-        ],
+/// Berkas rule global tiap client (kosong = client tidak punya rule global berbasis berkas).
+fn rule_files(dirs: &Dirs, c: Client) -> Vec<PathBuf> {
+    match c {
+        Client::Antigravity => vec![dirs.home.join(".gemini").join("GEMINI.md"), dirs.home.join(".gemini").join("config").join("GEMINI.md")],
         Client::ClaudeCode => vec![dirs.home.join(".claude").join("CLAUDE.md")],
-        Client::Vscode => vec![],
+        Client::Codex => vec![dirs.home.join(".codex").join("AGENTS.md")],
+        Client::Windsurf => vec![dirs.home.join(".codeium").join("windsurf").join("memories").join("global_rules.md")],
+        Client::Vscode | Client::Cursor => vec![],
+    }
+}
+
+fn sync_client_rules(dirs: &Dirs, c: Client, uninstall: bool) {
+    let block = match c.profile() {
+        Profile::Full => RULE_BLOCK,
+        Profile::Coding => CODING_RULE_BLOCK,
     };
-    for f in files {
-        if let Err(e) = upsert_rule_file(&f, uninstall) {
+    for f in rule_files(dirs, c) {
+        if let Err(e) = upsert_rule_file(&f, block, uninstall) {
             tracing::warn!(error = %e, path = %f.display(), "gagal memperbarui rule client");
         }
+    }
+}
+
+fn edit_client_config(path: &Path, c: Client, value: Option<Value>) -> Result<(), String> {
+    match c.format() {
+        Format::Json => edit_config(path, c.servers_key(), value),
+        Format::Toml => edit_toml_config(path, c.servers_key(), value),
     }
 }
 
@@ -355,8 +548,12 @@ pub async fn install(dirs: &Dirs, c: Client, url: &str, token: Option<&str>) -> 
             Err(e) => tracing::warn!(error = %e, "claude mcp add gagal, menulis ~/.claude.json langsung"),
         }
     }
-    edit_config(&path, c.servers_key(), Some(entry(c, url, token)))?;
-    Ok(format!("Terdaftar di {} ({}). {}", c.label(), path.display(), c.after_install()))
+    edit_client_config(&path, c, Some(entry(c, url, token)))?;
+    let profile = match c.profile() {
+        Profile::Full => String::new(),
+        p => format!(" Profil tool: {}.", p.id()),
+    };
+    Ok(format!("Terdaftar di {} ({}).{profile} {}", c.label(), path.display(), c.after_install()))
 }
 
 /// Hapus server dari client.
@@ -365,7 +562,7 @@ pub async fn uninstall(dirs: &Dirs, c: Client) -> Result<String, String> {
     if c == Client::ClaudeCode {
         let _ = claude_cli(dirs, None).await;
     }
-    edit_config(&dirs.config_file(c), c.servers_key(), None)?;
+    edit_client_config(&dirs.config_file(c), c, None)?;
     Ok(format!("Dihapus dari {}.", c.label()))
 }
 
@@ -391,7 +588,8 @@ mod tests {
         let doc: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert_eq!(doc["servers"]["lain"]["command"], "x");
         assert_eq!(doc["inputs"], json!([]));
-        assert_eq!(doc["servers"]["engram"]["url"], "http://127.0.0.1:7878/mcp");
+        // Client koding murni memakai profil `coding`.
+        assert_eq!(doc["servers"]["engram"]["url"], "http://127.0.0.1:7878/mcp?profile=coding");
         assert_eq!(doc["servers"]["engram"]["headers"]["Authorization"], "Bearer tk");
         assert!(p.with_extension("json.bak").exists());
         // Kunci asli tetap di urutan semula.
@@ -414,6 +612,7 @@ mod tests {
         let p = d.config_file(Client::Antigravity);
         edit_config(&p, "mcpServers", Some(entry(Client::Antigravity, "http://h/mcp", None))).unwrap();
         let doc: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        // Antigravity dipakai juga untuk memori hidup: profil penuh, tanpa query.
         assert_eq!(doc, json!({"mcpServers": {"engram": {"serverUrl": "http://h/mcp", "disabled": false}}}));
         #[cfg(unix)]
         {
@@ -433,5 +632,72 @@ mod tests {
         assert!(edit_config(&p, "servers", Some(json!({}))).is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), jsonc);
         assert_eq!(status(&d, Client::Vscode, "u", None).state, InstallState::Unreadable);
+    }
+
+    #[test]
+    fn cursor_and_windsurf_entries() {
+        let cur = entry(Client::Cursor, "http://h/mcp", Some("tk"));
+        assert_eq!(cur, json!({"url": "http://h/mcp?profile=coding", "headers": {"Authorization": "Bearer tk"}}));
+        let ws = entry(Client::Windsurf, "http://h/mcp", Some("tk"));
+        assert_eq!(ws, json!({"serverUrl": "http://h/mcp?profile=coding", "headers": {"Authorization": "Bearer tk"}}));
+        assert_eq!(client_url(Client::Codex, "http://h/mcp?x=1"), "http://h/mcp?x=1&profile=coding");
+    }
+
+    #[test]
+    fn codex_toml_edit_keeps_rest_of_file() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs(&t);
+        let p = d.config_file(Client::Codex);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let before = "# config codex\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"npx\"\nargs = [\"-y\", \"x\"]\n\n[mcp_servers.\"engram\"]\nurl = \"http://lama/mcp\"\n\n[mcp_servers.engram.http_headers]\nAuthorization = \"Bearer lama\"\n\n[profiles.fast]\nmodel = \"gpt-5-mini\"\n";
+        std::fs::write(&p, before).unwrap();
+        assert_eq!(status(&d, Client::Codex, "http://127.0.0.1:7878/mcp", Some("tk")).state, InstallState::Outdated);
+
+        edit_toml_config(&p, "mcp_servers", Some(entry(Client::Codex, "http://127.0.0.1:7878/mcp", Some("tk")))).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(doc["model"].as_str(), Some("gpt-5"));
+        assert_eq!(doc["mcp_servers"]["other"]["command"].as_str(), Some("npx"));
+        assert_eq!(doc["profiles"]["fast"]["model"].as_str(), Some("gpt-5-mini"));
+        assert_eq!(doc["mcp_servers"]["engram"]["url"].as_str(), Some("http://127.0.0.1:7878/mcp?profile=coding"));
+        assert_eq!(doc["mcp_servers"]["engram"]["http_headers"]["Authorization"].as_str(), Some("Bearer tk"));
+        assert!(text.starts_with("# config codex\n"), "komentar harus utuh: {text}");
+        assert_eq!(text.matches("[mcp_servers.engram").count(), 1, "{text}");
+        assert!(p.with_extension("toml.bak").exists());
+        assert_eq!(status(&d, Client::Codex, "http://127.0.0.1:7878/mcp", Some("tk")).state, InstallState::Installed);
+
+        edit_toml_config(&p, "mcp_servers", None).unwrap();
+        let doc: toml::Table = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(doc["mcp_servers"].get("engram").is_none());
+        assert_eq!(doc["mcp_servers"]["other"]["command"].as_str(), Some("npx"));
+        assert_eq!(status(&d, Client::Codex, "u", None).state, InstallState::Missing);
+    }
+
+    #[test]
+    fn codex_toml_created_when_missing_and_invalid_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs(&t);
+        let p = d.config_file(Client::Codex);
+        edit_toml_config(&p, "mcp_servers", Some(entry(Client::Codex, "http://h/mcp", None))).unwrap();
+        let doc: toml::Table = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(doc["mcp_servers"]["engram"]["url"].as_str(), Some("http://h/mcp?profile=coding"));
+        assert!(doc["mcp_servers"]["engram"].get("http_headers").is_none());
+
+        let broken = "model = \n";
+        std::fs::write(&p, broken).unwrap();
+        assert!(edit_toml_config(&p, "mcp_servers", Some(json!({}))).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), broken);
+        assert_eq!(status(&d, Client::Codex, "u", None).state, InstallState::Unreadable);
+    }
+
+    #[test]
+    fn rule_block_per_profile() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs(&t);
+        sync_client_rules(&d, Client::Codex, false);
+        let agents = std::fs::read_to_string(d.home.join(".codex").join("AGENTS.md")).unwrap();
+        assert!(agents.contains("project_context") && !agents.contains("family_tree"), "{agents}");
+        sync_client_rules(&d, Client::Codex, true);
+        assert_eq!(std::fs::read_to_string(d.home.join(".codex").join("AGENTS.md")).unwrap(), "");
     }
 }

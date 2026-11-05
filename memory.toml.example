@@ -64,9 +64,23 @@ auto_accept_confidence = 0.75
 rrf_k = 60.0
 top_k = 8
 candidate_k = 40
-context_budget_tokens = 3000
+context_budget_tokens = 3000  # anggaran teks `recall` (perkiraan token)
+tool_budget_tokens = 2500     # anggaran teks tool MCP lain (project_context, get_episodes, ...); klien bisa menaikkan per panggilan lewat `budget`
 min_similarity = 0.35
 graph_hops = 2
+
+[privacy]                    # penyaring sebelum teks disimpan (hook agent, remember, import)
+redact = true               # ganti rahasia (API key, token, kunci privat, kredensial URL) dengan <redacted type='…'/>
+redact_generic = false      # juga pola generik: *_PASSWORD=, *_TOKEN=, Authorization: Bearer
+disabled_patterns = []      # nama pola bawaan yang dimatikan, mis. ["jwt"]
+                            # blok <private>…</private> selalu dibuang; teks yang seluruhnya privat tidak disimpan
+
+[inject]                     # konteks awal sesi agent (hook SessionStart -> `engram hook claude-code context`)
+enabled = true
+max_chars = 9500            # Claude Code memotong keluaran hook > 10.000 karakter
+observations = 30           # baris indeks observasi terbaru
+sessions = 3                # ringkasan sesi terakhir
+include_all_clients = true
 
 [schedule]
 consolidate_hours = 24

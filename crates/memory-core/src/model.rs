@@ -44,6 +44,9 @@ pub enum SourceKind {
     Photo,
     Audio,
     AgentConversation,
+    /// Satu giliran sesi kerja agent AI (prompt pengguna + pemanggilan tool + jawaban),
+    /// dari hook `engram hook`; diekstrak menjadi observasi bertipe + ringkasan sesi.
+    AgentSession,
 }
 
 impl SourceKind {
@@ -59,6 +62,7 @@ impl SourceKind {
                 | SourceKind::Audio
                 | SourceKind::Photo
                 | SourceKind::AgentConversation
+                | SourceKind::AgentSession
         )
     }
 
@@ -68,6 +72,7 @@ impl SourceKind {
         matches!(
             self,
             SourceKind::AgentConversation
+                | SourceKind::AgentSession
                 | SourceKind::Document
                 | SourceKind::Chat
                 | SourceKind::Lifelog
@@ -91,6 +96,7 @@ impl SourceKind {
             SourceKind::Photo => "photo",
             SourceKind::Audio => "audio",
             SourceKind::AgentConversation => "agent_conversation",
+            SourceKind::AgentSession => "agent_session",
         }
     }
 }
@@ -288,6 +294,24 @@ pub struct Episode {
     pub trait_signals: Vec<TraitSignal>,
     #[serde(default)]
     pub entity_ids: Vec<String>,
+    /// Jenis observasi untuk episode dari sesi kerja agent:
+    /// `bugfix | feature | decision | refactor | discovery | change | session_summary`.
+    /// Kosong untuk cerita/fakta biasa.
+    #[serde(default)]
+    pub obs_type: Option<String>,
+    /// Tag konsep (pola, trade-off, nama fitur) untuk pengindeksan.
+    #[serde(default)]
+    pub concepts: Vec<String>,
+    /// Berkas yang dibaca/diubah dalam observasi (relatif akar proyek bila bisa).
+    #[serde(default)]
+    pub files_read: Vec<String>,
+    #[serde(default)]
+    pub files_modified: Vec<String>,
+    /// Sesi agent & nomor prompt asal observasi.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub prompt_number: Option<u32>,
     /// Kapan diceritakan/direkam (ISO date).
     #[serde(default)]
     pub observed_at: String,
@@ -295,7 +319,30 @@ pub struct Episode {
     pub created_at: String,
 }
 
+/// Jenis observasi yang dikenal (urutan = prioritas tampil di indeks konteks).
+pub const OBS_TYPES: &[&str] = &["decision", "bugfix", "discovery", "feature", "refactor", "change", "session_summary"];
+
+/// Label pendek ASCII untuk indeks konteks (tanpa emoji agar aman di semua terminal/font).
+pub fn obs_type_label(t: Option<&str>) -> &'static str {
+    match t.unwrap_or("") {
+        "decision" => "keputusan",
+        "bugfix" => "bugfix",
+        "discovery" => "temuan",
+        "feature" => "fitur",
+        "refactor" => "refactor",
+        "change" => "perubahan",
+        "session_summary" => "sesi",
+        "lesson" => "pelajaran",
+        _ => "cerita",
+    }
+}
+
 impl Episode {
+    /// Perkiraan token bila teks penuh episode diambil (karakter / 4).
+    pub fn approx_tokens(&self) -> usize {
+        (self.text.chars().count() + self.summary.chars().count()) / 4
+    }
+
     /// Label waktu manusiawi dengan fallback ke `time_start`, `observed_at`, atau `created_at`
     /// bila `time` bernilai `TimeRef::Unknown`.
     pub fn time_label(&self) -> String {
@@ -444,10 +491,10 @@ impl EntityKind {
     /// Parse `kind` dari keluaran LLM dengan fallback cerdas berdasarkan `name`.
     pub fn parse_with_name(kind_str: &str, name: &str) -> Self {
         let parsed = Self::parse(kind_str);
-        if parsed == EntityKind::Person {
-            if let Some(inferred) = Self::infer_from_name(name) {
-                return inferred;
-            }
+        if parsed == EntityKind::Person
+            && let Some(inferred) = Self::infer_from_name(name)
+        {
+            return inferred;
         }
         parsed
     }
@@ -872,6 +919,132 @@ pub struct ReviewItem {
     pub resolved_at: Option<String>,
 }
 
+/// Sesi kerja satu agent AI (Claude Code, Antigravity, ...) pada satu proyek.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Session {
+    /// ID sesi dari client (dibersihkan agar valid sebagai kunci record).
+    pub id: String,
+    pub subject: String,
+    #[serde(default)]
+    pub client: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// Prompt pengguna pertama (setelah penyaring privasi), untuk judul di UI.
+    #[serde(default)]
+    pub first_prompt: String,
+    #[serde(default)]
+    pub prompt_counter: u32,
+    /// Jumlah pemanggilan tool yang tercatat.
+    #[serde(default)]
+    pub tool_uses: u32,
+    /// Jumlah episode (observasi + ringkasan) yang lahir dari sesi ini.
+    #[serde(default)]
+    pub episodes: u32,
+    /// `active` | `completed`
+    #[serde(default = "default_session_status")]
+    pub status: String,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub last_activity_at: String,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+fn default_session_status() -> String {
+    "active".into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LessonKind {
+    /// Koreksi dari pengguna terhadap cara kerja/keluaran agent.
+    Correction,
+    /// Konvensi/aturan proyek (penamaan, struktur, alur kerja).
+    #[default]
+    Convention,
+    /// Jebakan: hal yang mahal ditemukan ulang (gotcha).
+    Pitfall,
+    /// Temuan tentang cara kerja sistem.
+    Discovery,
+}
+
+impl LessonKind {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "correction" | "koreksi" => LessonKind::Correction,
+            "pitfall" | "gotcha" | "jebakan" => LessonKind::Pitfall,
+            "discovery" | "temuan" => LessonKind::Discovery,
+            _ => LessonKind::Convention,
+        }
+    }
+    pub fn label_id(self) -> &'static str {
+        match self {
+            LessonKind::Correction => "koreksi",
+            LessonKind::Convention => "konvensi",
+            LessonKind::Pitfall => "jebakan",
+            LessonKind::Discovery => "temuan",
+        }
+    }
+}
+
+/// Pelajaran proyek: konvensi, koreksi, atau jebakan yang berulang. Judul yang
+/// sama (ternormalisasi) dalam satu proyek menambah `occurrences`, bukan duplikat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Lesson {
+    pub id: String,
+    pub subject: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub kind: LessonKind,
+    pub title: String,
+    /// Kunci dedup: judul ternormalisasi.
+    #[serde(default)]
+    pub title_key: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default = "default_occurrences")]
+    pub occurrences: u32,
+    #[serde(default)]
+    pub evidence: Vec<Evidence>,
+    /// `active` | `archived` | `promoted` (sudah menjadi prinsip)
+    #[serde(default = "default_session_status")]
+    pub status: String,
+    #[serde(default)]
+    pub promoted_to: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+fn default_occurrences() -> u32 {
+    1
+}
+
+impl Lesson {
+    /// Kunci dedup judul: huruf kecil, tanpa tanda baca, spasi tunggal.
+    pub fn title_key_of(title: &str) -> String {
+        let mut out = String::new();
+        let mut last_space = true;
+        for c in title.trim().to_lowercase().chars() {
+            if c.is_alphanumeric() {
+                out.push(c);
+                last_space = false;
+            } else if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+        }
+        out.trim().to_string()
+    }
+}
+
 impl Job {
     /// Job baru yang siap dijalankan sekarang.
     pub fn new(kind: &str, payload: serde_json::Value, idempotency_key: String, batch_id: Option<String>) -> Self {
@@ -978,6 +1151,13 @@ mod tests {
             EntityKind::parse_with_name("person", "Pakde Karno"),
             EntityKind::Person
         );
+    }
+
+    #[test]
+    fn lesson_title_key_normalizes() {
+        assert_eq!(Lesson::title_key_of("  Jangan commit tanpa izin!! (VOLTUNES) "), "jangan commit tanpa izin voltunes");
+        assert_eq!(obs_type_label(Some("bugfix")), "bugfix");
+        assert_eq!(obs_type_label(None), "cerita");
     }
 
     #[test]

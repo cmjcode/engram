@@ -20,6 +20,8 @@ pub struct MemoryConfig {
     pub server: ServerConfig,
     pub transcription: TranscriptionConfig,
     pub backup: BackupConfig,
+    pub privacy: PrivacyConfig,
+    pub inject: InjectConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,11 +231,15 @@ pub struct RetrievalConfig {
     /// Kemiripan vektor minimum agar hasil dianggap relevan.
     pub min_similarity: f32,
     pub graph_hops: usize,
+    /// Anggaran default (perkiraan token) untuk teks setiap tool MCP selain `recall`
+    /// (`project_context`, `who_is`, `timeline`, `get_episodes`, ...). Klien bisa
+    /// menaikkannya per panggilan lewat argumen `budget`.
+    pub tool_budget_tokens: usize,
 }
 
 impl Default for RetrievalConfig {
     fn default() -> Self {
-        Self { rrf_k: 60.0, top_k: 8, candidate_k: 40, context_budget_tokens: 3000, min_similarity: 0.35, graph_hops: 2 }
+        Self { rrf_k: 60.0, top_k: 8, candidate_k: 40, context_budget_tokens: 3000, min_similarity: 0.35, graph_hops: 2, tool_budget_tokens: 2500 }
     }
 }
 
@@ -305,6 +311,45 @@ impl Default for TranscriptionConfig {
 pub struct BackupConfig {
     /// Penerima `age` (age1...) untuk enkripsi backup. Kosong = tanpa enkripsi.
     pub age_recipient: Option<String>,
+}
+
+/// Penyaring privasi sebelum teks disimpan (lihat [`crate::privacy`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrivacyConfig {
+    /// Ganti rahasia (API key, token, kunci privat, kredensial URL) dengan penanda.
+    pub redact: bool,
+    /// Aktifkan juga pola generik (`*_PASSWORD=`, `*_TOKEN=`, `Authorization: Bearer`).
+    pub redact_generic: bool,
+    /// Nama pola bawaan yang dimatikan (lihat `privacy::pattern_names`).
+    pub disabled_patterns: Vec<String>,
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self { redact: true, redact_generic: false, disabled_patterns: vec![] }
+    }
+}
+
+/// Injeksi konteks saat sesi agent dimulai (hook `SessionStart`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InjectConfig {
+    pub enabled: bool,
+    /// Batas karakter keluaran; Claude Code memotong stdout hook > 10.000 karakter.
+    pub max_chars: usize,
+    /// Jumlah observasi/episode terbaru di indeks.
+    pub observations: usize,
+    /// Jumlah ringkasan sesi terakhir yang ditampilkan.
+    pub sessions: usize,
+    /// Sertakan memori dari semua client AI, bukan hanya client yang sedang dipakai.
+    pub include_all_clients: bool,
+}
+
+impl Default for InjectConfig {
+    fn default() -> Self {
+        Self { enabled: true, max_chars: 9500, observations: 30, sessions: 3, include_all_clients: true }
+    }
 }
 
 /// API key dari env var `env` (bila terisi), selain itu dari nilai langsung.

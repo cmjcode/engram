@@ -8,6 +8,8 @@ pub mod config;
 pub mod ids;
 pub mod kin;
 pub mod model;
+pub mod privacy;
+pub mod project;
 pub mod score;
 pub mod text;
 pub mod time;
@@ -19,7 +21,7 @@ pub use model::*;
 pub use time::{LifeAnchors, RawTime, ResolvedTime, TimeRef};
 
 /// Versi skema penyimpanan dan format ekspor. Dinaikkan setiap ada migrasi.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {

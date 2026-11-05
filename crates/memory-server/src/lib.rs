@@ -4,6 +4,7 @@
 //! `MEMORY_TOKEN`) diisi, semua `/api` dan `/mcp` wajib `Authorization: Bearer`.
 
 pub mod api;
+pub mod hooks;
 pub mod install;
 pub mod mcp;
 pub mod settings;
@@ -192,7 +193,8 @@ fn asset(body: &'static str, ctype: &'static str) -> Response {
 pub fn router(state: AppState) -> Router {
     let max = state.rt.cfg.server.max_upload_mb * 1024 * 1024;
     let protected = api::routes()
-        .route("/mcp", post(mcp::http_handler))
+        .merge(hooks::routes())
+        .route("/mcp", post(mcp::http_handler).get(mcp::http_get))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(axum::extract::DefaultBodyLimit::max(max));
     Router::new()

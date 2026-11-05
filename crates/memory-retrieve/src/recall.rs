@@ -35,9 +35,18 @@ pub struct RecallQuery {
     pub kinds: Vec<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// `index` (bawaan untuk agent: satu baris per hasil + biaya token) atau `full`.
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Anggaran teks konteks (perkiraan token); bawaan `retrieval.context_budget_tokens`.
+    #[serde(default)]
+    pub budget: Option<usize>,
 }
 
 impl RecallQuery {
+    pub fn index_mode(&self) -> bool {
+        self.detail.as_deref().is_some_and(|d| d.eq_ignore_ascii_case("index"))
+    }
     pub fn new(subject: &str, query: &str) -> Self {
         Self { subject: subject.into(), query: query.into(), ..Default::default() }
     }
@@ -57,6 +66,8 @@ pub struct EpisodeHit {
     pub life_phase: Option<String>,
     #[serde(default)]
     pub project: Option<String>,
+    #[serde(default)]
+    pub obs_type: Option<String>,
     pub retell_count: u32,
     pub score: f32,
     /// Jalur yang menemukan: vector, fulltext, graph, project.
@@ -195,12 +206,14 @@ impl Retriever {
         let flist: Vec<String> = self.store.fulltext_episodes(&q.subject, &q.query, rc.candidate_k).await?.into_iter().map(|(id, _)| id).collect();
         let mut entities = self.entities_in_query(&q.subject, &q.query).await?;
         let want_project = q.project.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let mut project_names: Vec<String> = Vec::new();
         if let Some(proj) = want_project {
             for e in self.store.entities_by_alias(&q.subject, proj).await? {
                 if !entities.iter().any(|x| x.id == e.id) {
                     entities.push(e);
                 }
             }
+            project_names = self.store.project_names(&q.subject, proj).await?;
         }
         if let Some(v) = &qvec {
             for h in index.search("entity", &q.subject, v, 5, "status != 'merged'").await? {
@@ -239,7 +252,9 @@ impl Retriever {
                     &memory_store::EpisodeFilter {
                         status: Some(EpisodeStatus::Active),
                         project: Some(proj.to_string()),
+                        projects: project_names.clone(),
                         limit: 20,
+                        newest_first: true,
                         ..Default::default()
                     },
                 )
@@ -275,7 +290,7 @@ impl Retriever {
             let proj_match = want_project.is_some_and(|wp| {
                 let nwp = normalize(wp);
                 plist.contains(id)
-                    || e.project.as_deref().is_some_and(|ep| normalize(ep) == nwp || normalize(ep).ends_with(&nwp))
+                    || e.project.as_deref().is_some_and(|ep| memory_core::project::same_project(ep, wp) || project_names.iter().any(|n| memory_core::project::same_project(ep, n)))
                     || (!nwp.is_empty() && normalize(&e.text).contains(&nwp))
             });
             if proj_match {
@@ -291,6 +306,7 @@ impl Retriever {
                 time_start: e.time_start.clone(),
                 life_phase: e.life_phase.clone(),
                 project: e.project.clone(),
+                obs_type: e.obs_type.clone(),
                 retell_count: e.retell_count,
                 score: *score * (1.0 + 0.05 * e.retell_count.min(10) as f32) * (0.75 + 0.5 * e.importance) * proj_boost,
                 via,
@@ -408,7 +424,14 @@ impl Retriever {
             result.episodes.clear();
             result.note = Some("Tidak ada catatan memori yang relevan untuk pertanyaan ini.".into());
         }
-        result.context = crate::assemble_context(&result, &reference, q.as_of.is_some(), rc.context_budget_tokens);
+        let budget = q.budget.unwrap_or(rc.context_budget_tokens).clamp(200, 50_000);
+        result.context = if q.index_mode() {
+            // Fakta "peristiwa" sekali-pakai hanya tampil bila agent memang meminta fakta.
+            let explicit_facts = q.kinds.iter().any(|k| k == "fact");
+            crate::assemble_index(&result, &reference, q.as_of.is_some(), budget, explicit_facts)
+        } else {
+            crate::assemble_context(&result, &reference, q.as_of.is_some(), budget)
+        };
         Ok(result)
     }
 }

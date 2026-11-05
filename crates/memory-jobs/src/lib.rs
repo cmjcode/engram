@@ -3,6 +3,7 @@
 //! scheduler pekerjaan berkala (konsolidasi, distilasi, profil suara, ekspor).
 
 pub mod archive;
+pub mod repo_bundle;
 pub mod storage;
 pub mod sync;
 pub mod watch;

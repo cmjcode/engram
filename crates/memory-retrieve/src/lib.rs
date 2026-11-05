@@ -11,6 +11,8 @@
 //! - hasil lemah -> `found = false`, bukan potongan acak.
 
 mod context;
+mod detail;
+mod inject;
 mod recall;
 mod tools;
 
@@ -20,7 +22,9 @@ use memory_core::MemoryConfig;
 use memory_llm::{Embedder, LlmProvider};
 use memory_store::Store;
 
-pub use context::{approx_tokens, assemble_context};
+pub use context::{approx_tokens, assemble_context, assemble_index, fit_text, index_line, is_event_fact};
+pub use detail::*;
+pub use inject::*;
 pub use recall::*;
 pub use tools::*;
 

@@ -53,6 +53,9 @@ pub struct SourceCtx {
     pub occurred_from: Option<String>,
     pub project: Option<String>,
     pub created_at: String,
+    /// Sesi agent asal (sumber dari hook `engram hook`).
+    pub session_id: Option<String>,
+    pub prompt_number: Option<u32>,
 }
 
 impl From<&Source> for SourceCtx {
@@ -73,6 +76,8 @@ impl From<&Source> for SourceCtx {
             occurred_from: s.occurred_from.clone(),
             project,
             created_at: s.created_at.clone(),
+            session_id: s.meta["session_id"].as_str().map(str::to_string),
+            prompt_number: s.meta["prompt_number"].as_u64().map(|n| n as u32),
         }
     }
 }
@@ -85,6 +90,7 @@ pub struct EpisodeCommit {
     pub facts: u32,
     pub rejected: u32,
     pub quarantined: u32,
+    pub lessons: u32,
 }
 
 fn parse_date(s: &str) -> Option<NaiveDate> {
@@ -180,11 +186,19 @@ impl Pipeline {
             }
         }
         self.progress(job_id, "selesai", total, total).await;
+        if let Some(sid) = &ctx.session_id
+            && stats.episodes > 0
+        {
+            self.bump_session_episodes(sid, stats.episodes).await?;
+        }
         Ok(stats)
     }
 
     /// Fase A: segment, score, extract.
     async fn stage(&self, source: &Source, subject: &Subject, job_id: Option<&str>) -> Result<Staging> {
+        if source.kind == SourceKind::AgentSession {
+            return self.stage_session(source, subject, job_id).await;
+        }
         let text = self.vault.read_rel(&source.path)?;
         self.progress(job_id, "segment", 0, 1).await;
         let examples = self.few_shot_examples(&subject.id).await;
@@ -256,6 +270,101 @@ impl Pipeline {
             };
             items[i].extraction = Some(ext);
         }
+        Ok(Staging { items })
+    }
+
+    /// Fase A untuk giliran sesi agent: satu panggilan LLM menghasilkan observasi bertipe
+    /// (keputusan, bugfix, temuan, ...) dan ringkasan giliran; tanpa segmentasi.
+    async fn stage_session(&self, source: &Source, subject: &Subject, job_id: Option<&str>) -> Result<Staging> {
+        use crate::llm_types::SessionExtraction;
+        let text = self.vault.read_rel(&source.path)?;
+        self.progress(job_id, "session", 0, 1).await;
+        let known = self.known_entities_prompt(&subject.id).await?;
+        let observed = source.occurred_from.clone().unwrap_or_else(|| source.created_at.chars().take(10).collect());
+        let project = source.project.clone().or_else(|| source.meta["project"].as_str().map(str::to_string));
+        let client = source.meta["client"].as_str().unwrap_or("agent").to_string();
+        let user = prompts::session_user(&subject.name, project.as_deref(), &client, &observed, &known, &text);
+        let ext: SessionExtraction = complete_json(self.llm.as_ref(), ModelRole::Extract, "session", prompts::SESSION_SYSTEM, &user, self.cfg.llm.max_retries).await?;
+        if ext.skip {
+            tracing::info!(source = %source.id, reason = ext.skip_reason.as_deref().unwrap_or(""), "giliran sesi dilewati");
+            return Ok(Staging::default());
+        }
+        let meta_files = |k: &str| -> Vec<String> { source.meta[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+        let mut items = Vec::new();
+        for (i, o) in ext.observations.iter().enumerate().take(8) {
+            if o.title.trim().is_empty() && o.narrative.trim().is_empty() {
+                continue;
+            }
+            // Kutipan pendukung yang benar-benar ada di dokumen giliran ikut ke teks episode,
+            // sehingga verifikasi kutipan fakta/pelajaran tetap berjalan seperti biasa.
+            let mut quotes: Vec<String> = Vec::new();
+            for q in o.quotes.iter().chain(o.facts.iter().map(|f| &f.quote)).chain(o.lessons.iter().map(|l| &l.quote)) {
+                if !q.trim().is_empty() && quote_supported(q, &text) && !quotes.contains(q) {
+                    quotes.push(q.clone());
+                }
+            }
+            let mut body = o.narrative.trim().to_string();
+            if body.is_empty() {
+                body = o.title.trim().to_string();
+            }
+            if !o.facts_text.is_empty() {
+                body.push_str("\n\nFakta:\n");
+                for f in o.facts_text.iter().take(12) {
+                    body.push_str(&format!("- {}\n", f.trim()));
+                }
+            }
+            if !quotes.is_empty() {
+                body.push_str("\nBukti:\n");
+                for q in quotes.iter().take(12) {
+                    body.push_str(&format!("- {}\n", q.trim()));
+                }
+            }
+            let obs_type = match o.obs_type.trim().to_lowercase().as_str() {
+                t @ ("decision" | "bugfix" | "discovery" | "feature" | "refactor" | "change") => t.to_string(),
+                _ => "change".to_string(),
+            };
+            let importance = match obs_type.as_str() {
+                "decision" | "bugfix" => 0.85,
+                "discovery" | "feature" => 0.75,
+                _ => 0.65,
+            };
+            let extraction = ExtractionOut {
+                title: truncate_chars(o.title.trim(), 120),
+                summary: truncate_chars(o.narrative.trim(), 400),
+                entities: o.entities.clone(),
+                facts: o.facts.iter().filter(|f| quote_supported(&f.quote, &text)).cloned().collect(),
+                decisions: o.decisions.clone(),
+                quotes: quotes.clone(),
+                obs_type: Some(obs_type),
+                concepts: o.concepts.clone(),
+                files_read: o.files_read.clone(),
+                files_modified: o.files_modified.clone(),
+                lessons: o.lessons.iter().filter(|l| l.quote.trim().is_empty() || quote_supported(&l.quote, &text)).cloned().collect(),
+                ..Default::default()
+            };
+            let seg = Segment { start: i, end: i, text: body, topic: o.title.trim().to_string(), about_subject: true, speaker: None, significance: Some(0.9), date: Some(observed.clone()) };
+            items.push(Staged { seg, route: Route::Episode, importance, back_refs: 0, about: true, extraction: Some(extraction) });
+        }
+        if let Some(sum) = &ext.summary {
+            let fields = [("Permintaan", &sum.request), ("Diselidiki", &sum.investigated), ("Dipelajari", &sum.learned), ("Selesai", &sum.completed), ("Langkah berikut", &sum.next_steps)];
+            let body: String = fields.iter().filter(|(_, v)| !v.trim().is_empty()).map(|(k, v)| format!("{k}: {}\n", v.trim())).collect();
+            if !body.trim().is_empty() {
+                let title = if sum.request.trim().is_empty() { "Ringkasan sesi".to_string() } else { truncate_chars(sum.request.trim(), 100) };
+                let summary = if sum.completed.trim().is_empty() { truncate_chars(&body, 300) } else { truncate_chars(sum.completed.trim(), 300) };
+                let extraction = ExtractionOut {
+                    title,
+                    summary,
+                    obs_type: Some("session_summary".into()),
+                    files_read: meta_files("files_read"),
+                    files_modified: meta_files("files_modified"),
+                    ..Default::default()
+                };
+                let n = items.len();
+                let seg = Segment { start: n, end: n, text: body, topic: "ringkasan sesi".into(), about_subject: true, speaker: None, significance: Some(0.7), date: Some(observed.clone()) };
+                items.push(Staged { seg, route: Route::Episode, importance: 0.6, back_refs: 0, about: true, extraction: Some(extraction) });
+            }
+        }
+        self.progress(job_id, "session", 1, 1).await;
         Ok(Staging { items })
     }
 
@@ -596,9 +705,58 @@ impl Pipeline {
             quotes,
             trait_signals,
             entity_ids,
+            obs_type: ext.obs_type.clone().map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()),
+            concepts: ext.concepts.iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).take(12).collect(),
+            files_read: ext.files_read.iter().map(|f| f.trim().replace('\\', "/")).filter(|f| !f.is_empty()).take(40).collect(),
+            files_modified: ext.files_modified.iter().map(|f| f.trim().replace('\\', "/")).filter(|f| !f.is_empty()).take(40).collect(),
+            session_id: src.session_id.clone(),
+            prompt_number: src.prompt_number,
             observed_at: observed,
             created_at: now.clone(),
         };
+
+        // Pelajaran proyek: dedup per (subjek, proyek, judul ternormalisasi); kemunculan bertambah.
+        let mut lessons_out: Vec<Lesson> = Vec::new();
+        for lo in ext.lessons.iter().filter(|l| !l.title.trim().is_empty()) {
+            if !lo.quote.trim().is_empty() && !quote_supported(&lo.quote, &seg.text) {
+                continue;
+            }
+            let key = Lesson::title_key_of(&lo.title);
+            if key.is_empty() {
+                continue;
+            }
+            let ev = Evidence { episode_id: ep_id.to_string(), quote: lo.quote.clone() };
+            let mut lesson = match self.store.lesson_by_key(&subject.id, src.project.as_deref(), &key).await? {
+                Some(mut l) => {
+                    if !l.evidence.iter().any(|e| e.episode_id == ev.episode_id) {
+                        l.occurrences += 1;
+                        l.evidence.push(ev);
+                    }
+                    if l.detail.trim().is_empty() {
+                        l.detail = lo.detail.trim().to_string();
+                    }
+                    l
+                }
+                None => Lesson {
+                    id: det_id(&["lesson", &subject.id, src.project.as_deref().unwrap_or(""), &key]),
+                    subject: subject.id.clone(),
+                    project: src.project.clone(),
+                    kind: LessonKind::parse(&lo.kind),
+                    title: lo.title.trim().to_string(),
+                    title_key: key,
+                    detail: lo.detail.trim().to_string(),
+                    occurrences: 1,
+                    evidence: vec![ev],
+                    status: "active".into(),
+                    promoted_to: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            };
+            lesson.updated_at = now.clone();
+            lessons_out.push(lesson);
+        }
+        out.lessons = lessons_out.len() as u32;
 
         // Commit atomik.
         let mut tx = self.store.tx();
@@ -621,6 +779,9 @@ impl Pipeline {
         }
         for k in &kin_out {
             tx.upsert("kin", &k.id, k, None)?;
+        }
+        for l in &lessons_out {
+            tx.upsert("lesson", &l.id, l, None)?;
         }
         for r in &res.reviews {
             tx.upsert("review_item", &r.id, r, None)?;
@@ -647,7 +808,7 @@ impl Pipeline {
         let subject = self.ensure_subject(&item.subject, None).await?;
         let ctx = match &source {
             Some(s) => SourceCtx::from(s),
-            None => SourceCtx { id: item.source_id.clone(), kind: SourceKind::Lifelog, occurred_from: None, project: None, created_at: item.created_at.clone() },
+            None => SourceCtx { id: item.source_id.clone(), kind: SourceKind::Lifelog, occurred_from: None, project: None, created_at: item.created_at.clone(), session_id: None, prompt_number: None },
         };
         let seg = Segment { start: 0, end: 0, text: item.text.clone(), topic: String::new(), about_subject: true, speaker: item.speaker.clone(), significance: None, date: item.occurred_at.clone() };
         let observed = seg.date.clone().unwrap_or_else(|| item.created_at.chars().take(10).collect());
