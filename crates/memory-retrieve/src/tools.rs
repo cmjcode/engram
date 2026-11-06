@@ -532,23 +532,36 @@ impl Retriever {
         };
 
         // Jalankan pencarian recall, entitas proyek, daftar episode proyek, prinsip, pelajaran, dan sesi secara paralel.
+        let ep_fut = async {
+            Ok::<_, crate::RetrieveError>(
+                self.store
+                    .list_episodes(
+                        subject,
+                        &EpisodeFilter {
+                            status: Some(EpisodeStatus::Active),
+                            project: Some(proj.to_string()),
+                            projects: project_names.clone(),
+                            limit: 25,
+                            newest_first: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await?,
+            )
+        };
+        let lessons_fut = async {
+            Ok::<_, crate::RetrieveError>(self.store.list_lessons(subject, &project_names, Some("active"), 16).await?)
+        };
+        let sessions_fut = async {
+            Ok::<_, crate::RetrieveError>(self.store.list_sessions(subject, &project_names, 5).await?)
+        };
         let (recall, entity, mut ep_list, principles_raw, mut lessons, sessions) = tokio::try_join!(
             self.recall(&rq),
             self.find_entity(subject, proj),
-            self.store.list_episodes(
-                subject,
-                &EpisodeFilter {
-                    status: Some(EpisodeStatus::Active),
-                    project: Some(proj.to_string()),
-                    projects: project_names.clone(),
-                    limit: 25,
-                    newest_first: true,
-                    ..Default::default()
-                },
-            ),
+            ep_fut,
             self.principles(subject, task.or(Some(proj))),
-            self.store.list_lessons(subject, &project_names, Some("active"), 16),
-            self.store.list_sessions(subject, &project_names, 5),
+            lessons_fut,
+            sessions_fut,
         )?;
 
         if let Some(ent) = &entity {

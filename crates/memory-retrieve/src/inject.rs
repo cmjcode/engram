@@ -174,26 +174,36 @@ impl Retriever {
         if project.is_some() && names.is_empty() {
             return Ok(InjectResult::default());
         }
-        let recent_fut = self.store.list_episodes(
-            subject,
-            &EpisodeFilter {
-                status: Some(EpisodeStatus::Active),
-                projects: names.clone(),
-                newest_first: true,
-                limit: (n_obs + n_sess) * 2 + 10,
-                ..Default::default()
-            },
-        );
+        let recent_fut = async {
+            Ok::<_, crate::RetrieveError>(
+                self.store
+                    .list_episodes(
+                        subject,
+                        &EpisodeFilter {
+                            status: Some(EpisodeStatus::Active),
+                            projects: names.clone(),
+                            newest_first: true,
+                            limit: (n_obs + n_sess) * 2 + 10,
+                            ..Default::default()
+                        },
+                    )
+                    .await?,
+            )
+        };
         let ent_fut = async {
             match project {
                 Some(p) => self.find_entity(subject, p).await,
                 None => Ok(None),
             }
         };
-        let lessons_fut = self.store.list_lessons(subject, &names, Some("active"), 10);
+        let lessons_fut = async {
+            Ok::<_, crate::RetrieveError>(self.store.list_lessons(subject, &names, Some("active"), 10).await?)
+        };
         let princ_fut = async {
             match project {
-                Some(p) => Ok(self.principles(subject, Some(p)).await?.into_iter().take(3).map(|v| v.principle).collect::<Vec<_>>()),
+                Some(p) => Ok::<_, crate::RetrieveError>(
+                    self.principles(subject, Some(p)).await?.into_iter().take(3).map(|v| v.principle).collect::<Vec<_>>(),
+                ),
                 None => Ok(vec![]),
             }
         };
