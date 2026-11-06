@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::watch::Receiver;
 
-use memory_core::model::{Job, JobStatus, Source, SourceStatus};
+use memory_core::model::{Job, JobStatus, ReviewStatus, Source, SourceStatus};
 use memory_core::{MemoryConfig, ids::now_rfc3339};
 use memory_extract::ingest::PROCESS_SOURCE;
 use memory_extract::review::Decision;
@@ -30,6 +30,7 @@ pub const VOICE: &str = "voice";
 pub const COMPACT: &str = "compact";
 pub const EXPORT: &str = "export";
 pub const REVIEW: &str = "review";
+pub const AUTO_REVIEW: &str = "auto_review";
 
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
@@ -75,6 +76,8 @@ pub struct Runtime {
     pub sync_lock: Arc<tokio::sync::Mutex<()>>,
     /// Satu pemindaian folder penting pada satu waktu (pemantau latar & tombol UI).
     pub watch_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Satu eksekusi review otomatis pada satu waktu (pemantau latar & tombol UI).
+    pub review_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Runtime {
@@ -123,6 +126,7 @@ impl Runtime {
             vault,
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             watch_lock: Arc::new(tokio::sync::Mutex::new(())),
+            review_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -154,11 +158,12 @@ impl Runtime {
             VOICE => json!(self.pipeline.build_voice_profile(&s("subject")?).await?),
             COMPACT => json!(self.pipeline.compact(&s("subject")?).await?),
             EXPORT => json!(archive::export(self, None).await?.display().to_string()),
+            AUTO_REVIEW => json!(watch::auto_review(self, &s("subject")?).await?),
             REVIEW => {
-                let d = if job.payload["decision"].as_str() == Some("approve") {
-                    Decision::Approve
-                } else {
-                    Decision::Reject
+                let d = match job.payload["decision"].as_str() {
+                    Some("approve") => Decision::Approve,
+                    Some("keep_both" | "both") => Decision::KeepBoth,
+                    _ => Decision::Reject,
                 };
                 json!(
                     self.pipeline
@@ -495,6 +500,35 @@ impl Runtime {
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "pemantau folder penting gagal"),
+            }
+            if watch::find_agy_cli().is_some()
+                && let Ok(subjects) = self.store.list_subjects().await
+            {
+                for sub in subjects {
+                    let has_open = self
+                        .store
+                        .list_reviews(&sub.id, ReviewStatus::Open, None, 1)
+                        .await
+                        .is_ok_and(|r| !r.is_empty());
+                    if has_open {
+                        match watch::auto_review(self, &sub.id).await {
+                            Ok(rep) if rep.resolved > 0 => {
+                                tracing::info!(
+                                    subject = %sub.id,
+                                    resolved = rep.resolved,
+                                    approved = rep.approved,
+                                    kept_both = rep.kept_both,
+                                    rejected = rep.rejected,
+                                    "review otomatis via agy CLI selesai"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::debug!(subject = %sub.id, error = %e, "review otomatis dilewati");
+                            }
+                        }
+                    }
+                }
             }
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(poll_secs.max(5))) => {}

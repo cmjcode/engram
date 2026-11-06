@@ -538,6 +538,7 @@ async function viewHome(el) {
     <div id="stat-panel"></div>
     <h2>Perawatan</h2>
     <div class="row">
+      <button data-m="review">${icon("flag")} Review otomatis (agy)</button>
       <button data-m="consolidate">${icon("refresh")} Konsolidasi</button>
       <button data-m="compact">${icon("book")} Padatkan memori</button>
       <button data-m="distill">${icon("compass")} Distilasi prinsip</button>
@@ -690,7 +691,7 @@ async function showStatDetail(panel, key, label, onClose) {
       renderFn = (list) => list.map((r) => `<div class="fact" data-rev="${esc(r.id)}">
         <span class="badge">${esc(revBadge(r))}</span> <span>${esc(r.summary)}</span>
         ${r.payload?.text ? `<pre class="src small" style="margin:6px 0">${esc(r.payload.text)}</pre>` : ""}
-        <div class="row" style="margin-top:6px"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button><button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button></div>
+        <div class="row" style="margin-top:6px"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button>${r.kind === "conflict" ? `<button data-d="keep_both" data-id="${esc(r.id)}">Keduanya berlaku</button>` : ""}<button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button></div>
       </div>`).join("");
     } else if (key === "sources") {
       rows = await api(`/api/subjects/${S()}/sources?limit=500`);
@@ -940,10 +941,13 @@ async function viewSessions(el, projectArg) {
 }
 
 async function viewReview(el) {
-  const items = await api(`/api/subjects/${S()}/reviews`);
+  const [items, watched] = await Promise.all([
+    api(`/api/subjects/${S()}/reviews`),
+    api(`/api/subjects/${S()}/watched-folders`).catch(() => ({ agy_available: false })),
+  ]);
   const kinds = { conflict: "Fakta bertentangan", reflective: "Konfirmasi prinsip/sifat", entity_merge: "Entitas yang sama?", quarantine: "Fakta meragukan", gray_zone: "Layak jadi cerita?" };
   const help = {
-    gray_zone: "Setuju = angkat jadi cerita. Tolak = biarkan meluruh.", conflict: "Setuju = fakta baru menggantikan yang lama. Tolak = fakta baru dibuang.",
+    gray_zone: "Setuju = angkat jadi cerita. Tolak = biarkan meluruh.", conflict: "Setuju = fakta baru menggantikan yang lama. Keduanya = aktif bersamaan. Tolak = fakta baru dibuang.",
     entity_merge: "Setuju = gabungkan jadi satu entitas. Tolak = entitas berbeda.", quarantine: "Setuju = fakta dipakai. Tolak = dibuang.", reflective: "Setuju = aktif. Tolak = dibuang."
   };
   const sub = (r) => {
@@ -953,21 +957,55 @@ async function viewReview(el) {
   };
   // Dua fakta yang bertentangan ditampilkan berdampingan bila payload membawa keduanya.
   const sideBySide = (r) => {
-    const a = r.payload?.new || r.payload?.incoming || r.payload?.fact_new, b = r.payload?.old || r.payload?.existing || r.payload?.fact_old;
-    const txt = (x) => (typeof x === "string" ? x : x ? (x.statement || [x.predicate, x.object_text].filter(Boolean).join(" ") || JSON.stringify(x)) : "");
+    const a = r.payload?.fact_new || r.payload?.incoming || r.payload?.new, b = r.payload?.fact_old || r.payload?.old || r.payload?.existing;
+    const renderSide = (x) => {
+      if (!x) return "";
+      if (typeof x === "string") return esc(x);
+      const stmt = x.statement || [x.predicate, x.object_text].filter(Boolean).join(" ") || JSON.stringify(x);
+      const time = x.time ? ` <span class="small muted">(${esc(x.time)})</span>` : "";
+      const quote = x.quote ? `<div class="quote small" style="margin-top:4px">${esc(x.quote)}</div>` : "";
+      return `<div>${esc(stmt)}${time}</div>${quote}`;
+    };
     if (!a && !b) return r.payload?.text ? `<pre class="src">${esc(r.payload.text)}</pre>` : (r.payload?.quote ? `<div class="quote">${esc(r.payload.quote)}</div>` : "");
-    return `<div class="versus"><div><div class="small muted">Baru</div>${esc(txt(a))}</div><div><div class="small muted">Lama</div>${esc(txt(b))}</div></div>`;
+    return `<div class="versus"><div><div class="small muted">Baru</div>${renderSide(a)}</div><div><div class="small muted">Lama</div>${renderSide(b)}</div></div>`;
   };
+  const agyBadge = watched.agy_available
+    ? `<span class="badge now" title="${esc(watched.agy_path || "")}">agy CLI siap</span>`
+    : `<span class="badge warn">agy CLI tidak ditemukan</span>`;
   const groups = {};
   for (const r of items) (groups[r.kind] ||= []).push(r);
   const order = ["conflict", "reflective", "entity_merge", "quarantine", "gray_zone"].filter((k) => groups[k]);
-  el.innerHTML = `<h1>Review (${items.length})</h1><p class="muted">Keputusan Anda juga menjadi contoh bagi sistem untuk menilai data berikutnya. Pilih beberapa lalu setujui/tolak sekaligus.</p>
+  el.innerHTML = `<div class="row" style="justify-content:space-between;align-items:center">
+      <h1 style="margin:0">Review (<span id="rev-total">${items.length}</span>)</h1>
+      <div class="row">
+        ${agyBadge}
+        <button class="primary" id="btn-auto-review" ${!items.length ? "disabled" : ""}>${icon("flag")} Review otomatis via agy</button>
+      </div>
+    </div>
+    <p class="muted">Engram menggunakan <code>agy</code> CLI secara otomatis di latar belakang maupun saat tombol di atas diklik untuk memutuskan konflik fakta, penggabungan entitas, dan karantina.</p>
     ${order.map((k) => `<section class="rev-group" data-kind="${k}"><h2>${esc(kinds[k] || k)} <span class="small muted">(${groups[k].length})</span></h2>
-      <div class="row small"><label><input type="checkbox" data-all> pilih semua</label><button data-bulk="approve">${icon("check")} Setujui terpilih</button><button data-bulk="reject">${icon("x")} Tolak terpilih</button><span class="muted">${esc(help[k] || "")}</span></div>
+      <div class="row small"><label><input type="checkbox" data-all> pilih semua</label><button data-bulk="approve">${icon("check")} Setujui terpilih</button>${k === "conflict" ? `<button data-bulk="keep_both">Keduanya berlaku</button>` : ""}<button data-bulk="reject">${icon("x")} Tolak terpilih</button><span class="muted">${esc(help[k] || "")}</span></div>
       ${groups[k].map((r) => `<div class="card rev" id="r-${esc(r.id)}"><label class="rev-pick"><input type="checkbox" data-pick="${esc(r.id)}"></label><div class="rev-body">
         ${sub(r) ? `<span class="badge">${esc(sub(r))}</span>` : ""}<p>${esc(r.summary)}</p>${sideBySide(r)}
-        <div class="row"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button><button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button>${(r.targets || []).slice(0, 2).map((t) => `<a class="cite" data-ep="${esc(t)}">bukti</a>`).join(" ")}</div></div></div>`).join("")}
+        <div class="row"><input type="text" placeholder="Catatan (opsional)" data-note><button class="primary" data-d="approve" data-id="${esc(r.id)}">${icon("check")} Setuju</button>${r.kind === "conflict" ? `<button data-d="keep_both" data-id="${esc(r.id)}">Keduanya berlaku</button>` : ""}<button data-d="reject" data-id="${esc(r.id)}">${icon("x")} Tolak</button>${(r.targets || []).slice(0, 2).map((t) => `<a class="cite" data-ep="${esc(t)}">bukti</a>`).join(" ")}</div></div></div>`).join("")}
     </section>`).join("") || '<div class="empty">Tidak ada yang perlu ditinjau.</div>'}`;
+  const btnAuto = $("#btn-auto-review", el);
+  if (btnAuto) {
+    btnAuto.onclick = async () => {
+      btnAuto.disabled = true;
+      const orig = btnAuto.innerHTML;
+      btnAuto.textContent = "agy sedang meninjau...";
+      try {
+        const res = await api(`/api/subjects/${S()}/reviews/auto`, { method: "POST" });
+        toast(`${res.resolved} review diselesaikan otomatis (${res.approved} setuju, ${res.kept_both} keduanya berlaku, ${res.rejected} ditolak)`);
+        await route();
+      } catch (e) {
+        toast(e.message);
+        btnAuto.disabled = false;
+        btnAuto.innerHTML = orig;
+      }
+    };
+  }
   const decide = async (id, d, note) => {
     await api(`/api/reviews/${encodeURIComponent(id)}`, { method: "POST", json: { decision: d, note: note || null } });
     $(`#r-${CSS.escape(id)}`, el)?.remove();

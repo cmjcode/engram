@@ -390,11 +390,18 @@ enum ReviewCmd {
         #[arg(long)]
         note: Option<String>,
     },
+    KeepBoth {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
     Reject {
         id: String,
         #[arg(long)]
         note: Option<String>,
     },
+    /// Tinjau dan putuskan semua review terbuka secara otomatis menggunakan `agy` CLI.
+    Auto,
 }
 
 fn load_config(path: &Path) -> Result<MemoryConfig> {
@@ -688,9 +695,22 @@ async fn main() -> Result<()> {
                 rt.pipeline.resolve_review(&id, Decision::Approve, note).await?;
                 println!("Disetujui.");
             }
+            ReviewCmd::KeepBoth { id, note } => {
+                rt.pipeline.resolve_review(&id, Decision::KeepBoth, note).await?;
+                println!("Keduanya berlaku.");
+            }
             ReviewCmd::Reject { id, note } => {
                 rt.pipeline.resolve_review(&id, Decision::Reject, note).await?;
                 println!("Ditolak.");
+            }
+            ReviewCmd::Auto => {
+                let rep = memory_jobs::watch::auto_review(&rt, &subject).await?;
+                print(j, &rep, || {
+                    format!(
+                        "{}/{} review diselesaikan via agy ({} setuju, {} keduanya berlaku, {} ditolak)",
+                        rep.resolved, rep.total_open, rep.approved, rep.kept_both, rep.rejected
+                    )
+                });
             }
         },
         Cmd::Consolidate => {

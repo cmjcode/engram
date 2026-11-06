@@ -15,11 +15,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use memory_core::ids::{is_valid_id, now_rfc3339};
-use memory_core::model::SourceKind;
+use memory_core::model::{Fact, ReviewItem, ReviewKind, ReviewStatus, SourceKind};
 use memory_core::text::truncate_chars;
 use memory_extract::Vault;
 use memory_extract::det_id;
 use memory_extract::ingest::IngestDoc;
+use memory_extract::reconcile::is_non_exclusive_category;
+use memory_extract::review::Decision as ReviewDecision;
 
 use crate::{JobError, Result, Runtime};
 
@@ -56,6 +58,11 @@ const IGNORED_DIRS: &[&str] = &[
     ".gradle",
     ".cargo",
     "Pods",
+    "cargo-vendor",
+    "flatpak-export",
+    "DerivedData",
+    "cmake-build-debug",
+    "cmake-build-release",
 ];
 
 /// Berkas lock/sementara yang diabaikan agar perubahan otomatisnya tidak memicu scan ulang.
@@ -428,7 +435,10 @@ fn update_folder(vault: &Vault, folder: &WatchedFolder) -> Result<()> {
 // ---------------------------------------------------------------- pemindaian pohon berkas
 
 fn is_ignored_dir(name: &str) -> bool {
-    name.starts_with('.') || name.starts_with('~') || IGNORED_DIRS.contains(&name)
+    name.starts_with('.')
+        || name.starts_with('~')
+        || name.ends_with("-vendor")
+        || IGNORED_DIRS.contains(&name)
 }
 
 fn is_ignored_file(path: &Path, name: &str) -> bool {
@@ -840,7 +850,12 @@ async fn scan_one_locked(
         ..Default::default()
     };
 
-    let snap = match scan_folder_tree(&folder.path, if force { 0 } else { min_age_secs }) {
+    let folder_path = folder.path.clone();
+    let min_age = if force { 0 } else { min_age_secs };
+    let snap_res = tokio::task::spawn_blocking(move || scan_folder_tree(&folder_path, min_age))
+        .await
+        .map_err(|e| JobError::Invalid(format!("scan task gagal: {e}")))?;
+    let snap = match snap_res {
         Ok(s) => s,
         Err(e) => {
             folder.last_scan_at = Some(now_rfc3339());
@@ -974,14 +989,537 @@ pub async fn scan_all(
     Ok(out)
 }
 
+// ---------------------------------------------------------------- review otomatis via agy CLI
+
+const AGY_REVIEW_BATCH_SIZE: usize = 20;
+const AGY_REVIEW_TIMEOUT_SECS: u64 = 180;
+
+/// Satu keputusan hasil review otomatis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoReviewDecisionItem {
+    pub review_id: String,
+    pub kind: String,
+    pub summary: String,
+    pub decision: ReviewDecision,
+    pub note: String,
+}
+
+/// Laporan hasil review otomatis via `agy` CLI (dengan fallback heuristik/LLM).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AutoReviewReport {
+    pub subject: String,
+    pub total_open: u32,
+    pub resolved: u32,
+    pub approved: u32,
+    pub rejected: u32,
+    pub kept_both: u32,
+    pub agy_used: bool,
+    pub agy_path: Option<String>,
+    pub decisions: Vec<AutoReviewDecisionItem>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgyReviewDecisionRaw {
+    review_id: String,
+    decision: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgyReviewOutRaw {
+    #[serde(default)]
+    decisions: Vec<AgyReviewDecisionRaw>,
+}
+
+fn parse_decision_str(raw: &str) -> Option<ReviewDecision> {
+    match raw.trim().to_lowercase().as_str() {
+        "approve" | "approved" | "setuju" | "accept" => Some(ReviewDecision::Approve),
+        "reject" | "rejected" | "tolak" | "drop" => Some(ReviewDecision::Reject),
+        "keep_both" | "both" | "keduanya" | "coexist" => Some(ReviewDecision::KeepBoth),
+        _ => None,
+    }
+}
+
+fn parse_agy_review_json(raw: &str) -> Vec<AgyReviewDecisionRaw> {
+    let trimmed = raw.trim();
+    if let Ok(wrapped) = serde_json::from_str::<AgyReviewOutRaw>(trimmed)
+        && !wrapped.decisions.is_empty()
+    {
+        return wrapped.decisions;
+    }
+    if let Ok(arr) = serde_json::from_str::<Vec<AgyReviewDecisionRaw>>(trimmed) {
+        return arr;
+    }
+    // Ekstrak blok JSON {...} atau [...] bila dibungkus markdown code fence atau teks pengantar.
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
+        && start < end
+        && let Ok(wrapped) = serde_json::from_str::<AgyReviewOutRaw>(&trimmed[start..=end])
+        && !wrapped.decisions.is_empty()
+    {
+        return wrapped.decisions;
+    }
+    if let (Some(start), Some(end)) = (trimmed.find('['), trimmed.rfind(']'))
+        && start < end
+        && let Ok(arr) = serde_json::from_str::<Vec<AgyReviewDecisionRaw>>(&trimmed[start..=end])
+    {
+        return arr;
+    }
+    vec![]
+}
+
+async fn run_agy_review(subject_name: &str, items_block: &str, work_dir: &Path) -> Result<Vec<AgyReviewDecisionRaw>> {
+    let bin = find_agy_cli().ok_or_else(|| {
+        JobError::Invalid("CLI `agy` tidak ditemukan di PATH atau ~/.local/bin/agy".into())
+    })?;
+    let prompt = format!(
+        "Kamu adalah kurator memori otomatis untuk sistem Engram milik subjek **{subject_name}**.\n\
+        Tugasmu adalah meninjau dan memutuskan daftar item Review berikut secara akurat.\n\n\
+        ATURAN KEPUTUSAN PER JENIS REVIEW:\n\
+        1. `conflict` (Dua fakta dianggap bertentangan):\n\
+           - Pilih `\"keep_both\"` bila kedua fakta SEBENARNYA TIDAK SALING MENGGANTIKAN dan dapat berlaku bersamaan \
+             (misal: dua fakta arsitektur, infrastruktur, komponen, fitur, konvensi, konfigurasi berbeda, atau path/proyek yang berbeda).\n\
+           - Pilih `\"approve\"` bila Fakta Baru merupakan pembaruan yang sah dan menggantikan Fakta Lama yang sudah usang \
+             (misal: pindah tempat tinggal, ganti versi/status dari atribut tunggal yang sama).\n\
+           - Pilih `\"reject\"` bila Fakta Baru adalah noise, status teknis sesaat, atau salah ekstrak.\n\
+        2. `entity_merge` (Apakah dua entitas sama?):\n\
+           - Pilih `\"approve\"` HANYA bila keduanya benar-benar merujuk orang, proyek, atau komponen yang persis sama (misal nama pendek vs nama lengkap).\n\
+           - Pilih `\"reject\"` bila keduanya adalah repositori, microservice, berkas, komponen, atau orang yang berbeda.\n\
+        3. `quarantine` (Fakta meragukan):\n\
+           - Pilih `\"approve\"` bila fakta didukung kutipan bukti dan bernilai jangka panjang.\n\
+           - Pilih `\"reject\"` bila fakta mengarang, terlalu kabur, atau hanya proses sesaat.\n\
+        4. `gray_zone` (Layak jadi episode cerita?):\n\
+           - Pilih `\"approve\"` bila berisi keputusan teknis, bugfix, arsitektur, atau cerita hidup yang bermakna.\n\
+           - Pilih `\"reject\"` bila hanya basa-basi, log kompilasi mentah, atau rutinitas tanpa nilai memori.\n\
+        5. `reflective` (Konfirmasi prinsip/sifat):\n\
+           - Pilih `\"approve\"` bila pernyataan prinsip/sifat konsisten dan akurat; `\"reject\"` bila meragukan.\n\n\
+        KELUARKAN HANYA JSON MURNI (tanpa penjelasan di luar JSON, tanpa blok markdown) dengan format persis:\n\
+        {{\"decisions\": [{{\"review_id\": \"<id>\", \"decision\": \"approve\" | \"reject\" | \"keep_both\", \"note\": \"[agy] <alasan singkat 1 kalimat bahasa Indonesia>\"}}]}}\n\n\
+        DAFTAR ITEM REVIEW:\n{items_block}"
+    );
+    let print_arg = format!("--print={prompt}");
+    let path_env =
+        std::env::join_paths(search_paths()).map_err(|e| JobError::Invalid(e.to_string()))?;
+
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.current_dir(work_dir)
+        .args([
+            "--disable-slash-commands",
+            "--dangerously-skip-permissions",
+            &print_arg,
+        ])
+        .env("PATH", &path_env)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    let out = tokio::time::timeout(Duration::from_secs(AGY_REVIEW_TIMEOUT_SECS), cmd.output())
+        .await
+        .map_err(|_| {
+            JobError::Invalid(format!(
+                "agy CLI review tidak selesai dalam {AGY_REVIEW_TIMEOUT_SECS} detik"
+            ))
+        })?
+        .map_err(JobError::Io)?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(JobError::Invalid(format!(
+            "agy CLI review gagal ({}): {}",
+            out.status,
+            truncate_chars(&detail, 300)
+        )));
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let parsed = parse_agy_review_json(&text);
+    if parsed.is_empty() {
+        return Err(JobError::Invalid(format!(
+            "agy CLI tidak mengembalikan JSON keputusan yang valid: {}",
+            truncate_chars(&text, 240)
+        )));
+    }
+    Ok(parsed)
+}
+
+fn fallback_decision(
+    r: &ReviewItem,
+    old_fact: Option<&Fact>,
+    new_fact: Option<&Fact>,
+    agy_tag: bool,
+) -> (ReviewDecision, String) {
+    let prefix = if agy_tag { "[agy]" } else { "[auto]" };
+    match r.kind {
+        ReviewKind::Conflict => {
+            if let (Some(old), Some(new)) = (old_fact, new_fact) {
+                if is_non_exclusive_category(&old.category)
+                    || is_non_exclusive_category(&new.category)
+                    || old.predicate != new.predicate
+                {
+                    return (
+                        ReviewDecision::KeepBoth,
+                        format!(
+                            "{prefix} Kedua fakta '{}' dapat berlaku berdampingan (bukan atribut tunggal eksklusif)",
+                            old.category
+                        ),
+                    );
+                }
+                if new.confidence >= old.confidence {
+                    return (
+                        ReviewDecision::Approve,
+                        format!("{prefix} Fakta baru memperbarui fakta lama"),
+                    );
+                }
+                return (
+                    ReviewDecision::Reject,
+                    format!("{prefix} Fakta lama dipertahankan karena keyakinan lebih tinggi"),
+                );
+            }
+            (
+                ReviewDecision::KeepBoth,
+                format!("{prefix} Kedua fakta disimpan berdampingan"),
+            )
+        }
+        ReviewKind::EntityMerge => (
+            ReviewDecision::Reject,
+            format!("{prefix} Dikonfirmasi sebagai dua entitas terpisah"),
+        ),
+        ReviewKind::Quarantine => {
+            let quote = r.payload["quote"].as_str().unwrap_or("").trim();
+            if !quote.is_empty() {
+                (
+                    ReviewDecision::Approve,
+                    format!("{prefix} Fakta didukung kutipan bukti"),
+                )
+            } else {
+                (
+                    ReviewDecision::Reject,
+                    format!("{prefix} Fakta tanpa kutipan bukti ditolak"),
+                )
+            }
+        }
+        ReviewKind::GrayZone => {
+            let imp = r.payload["importance"].as_f64().unwrap_or(0.0);
+            if imp >= 0.48 {
+                (
+                    ReviewDecision::Approve,
+                    format!("{prefix} Segmen cukup bermakna untuk diangkat menjadi episode"),
+                )
+            } else {
+                (
+                    ReviewDecision::Reject,
+                    format!("{prefix} Segmen dibiarkan di working memory"),
+                )
+            }
+        }
+        ReviewKind::Reflective => (
+            ReviewDecision::Approve,
+            format!("{prefix} Prinsip/disposisi dikonfirmasi aktif"),
+        ),
+    }
+}
+
+/// Jalankan review otomatis terhadap semua item `ReviewStatus::Open` milik `subject`
+/// menggunakan `agy` CLI (serta aturan sanitasi entitas teknis & fallback cerdas).
+pub async fn auto_review(rt: &Runtime, subject: &str) -> Result<AutoReviewReport> {
+    let _guard = rt
+        .review_lock
+        .try_lock()
+        .map_err(|_| JobError::Invalid("review otomatis sedang berjalan".into()))?;
+
+    let agy_bin = find_agy_cli();
+    let mut report = AutoReviewReport {
+        subject: subject.to_string(),
+        agy_used: agy_bin.is_some(),
+        agy_path: agy_bin.map(|p| p.display().to_string()),
+        ..Default::default()
+    };
+
+    let (_, dismissed) = rt
+        .pipeline
+        .sanitize_technical_entities(subject)
+        .await
+        .unwrap_or((0, 0));
+    if dismissed > 0 {
+        report.total_open += dismissed;
+        report.resolved += dismissed;
+        report.rejected += dismissed;
+    }
+
+    let open = rt
+        .store
+        .list_reviews(subject, ReviewStatus::Open, None, 500)
+        .await?;
+    report.total_open += open.len() as u32;
+    if open.is_empty() {
+        return Ok(report);
+    }
+
+    let subject_obj = rt.pipeline.ensure_subject(subject, None).await?;
+    let mut entity_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    struct PreparedReview {
+        item: ReviewItem,
+        old_fact: Option<Fact>,
+        new_fact: Option<Fact>,
+        prompt_desc: String,
+    }
+
+    let mut prepared: Vec<PreparedReview> = Vec::with_capacity(open.len());
+    for mut r in open {
+        match r.kind {
+            ReviewKind::Conflict => {
+                let old_id = r.payload["existing"]
+                    .as_str()
+                    .or_else(|| r.payload["old"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let new_id = r.payload["new"]
+                    .as_str()
+                    .or_else(|| r.payload["incoming"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let old_f = if !old_id.is_empty() {
+                    rt.store.get_fact(&old_id).await?
+                } else {
+                    None
+                };
+                let new_f = if !new_id.is_empty() {
+                    rt.store.get_fact(&new_id).await?
+                } else {
+                    None
+                };
+                let (Some(old), Some(new)) = (old_f, new_f) else {
+                    // Fakta sudah tidak ada; tutup item review yatim.
+                    r.status = ReviewStatus::Rejected;
+                    r.note = Some("[auto] Ditutup karena salah satu fakta sudah tidak ada".into());
+                    r.resolved_at = Some(now_rfc3339());
+                    rt.store.put_review(&r).await?;
+                    report.resolved += 1;
+                    report.rejected += 1;
+                    continue;
+                };
+                let ent_name = match entity_names.get(&old.entity_id) {
+                    Some(n) => n.clone(),
+                    None => {
+                        let n = rt
+                            .store
+                            .resolve_entity(&old.entity_id)
+                            .await?
+                            .map(|e| e.name)
+                            .unwrap_or_else(|| subject_obj.name.clone());
+                        entity_names.insert(old.entity_id.clone(), n.clone());
+                        n
+                    }
+                };
+                let old_quote = old
+                    .evidence
+                    .first()
+                    .map(|e| truncate_chars(&e.quote, 220))
+                    .unwrap_or_default();
+                let new_quote = new
+                    .evidence
+                    .first()
+                    .map(|e| truncate_chars(&e.quote, 220))
+                    .unwrap_or_default();
+                let desc = format!(
+                    "- review_id: {}\n  jenis: conflict (entitas: \"{}\", kategori: \"{}\")\n  ringkasan: {}\n  fakta_lama: \"{} {} {}\" (waktu: {}, sejak: {}, bukti: \"{}\")\n  fakta_baru: \"{} {} {}\" (waktu: {}, sejak: {}, bukti: \"{}\")",
+                    r.id,
+                    ent_name,
+                    old.category,
+                    r.summary,
+                    ent_name,
+                    old.predicate,
+                    old.object_text,
+                    old.time.label(),
+                    old.valid_from.as_deref().unwrap_or("?"),
+                    old_quote,
+                    ent_name,
+                    new.predicate,
+                    new.object_text,
+                    new.time.label(),
+                    new.valid_from.as_deref().unwrap_or("?"),
+                    new_quote,
+                );
+                prepared.push(PreparedReview {
+                    item: r,
+                    old_fact: Some(old),
+                    new_fact: Some(new),
+                    prompt_desc: desc,
+                });
+            }
+            ReviewKind::EntityMerge => {
+                let new_id = r.payload["new"].as_str().unwrap_or("");
+                let ex_id = r.payload["existing"].as_str().unwrap_or("");
+                let ea = if !new_id.is_empty() {
+                    rt.store.get_entity(new_id).await?
+                } else {
+                    None
+                };
+                let eb = if !ex_id.is_empty() {
+                    rt.store.get_entity(ex_id).await?
+                } else {
+                    None
+                };
+                let (Some(a), Some(b)) = (ea, eb) else {
+                    r.status = ReviewStatus::Rejected;
+                    r.note = Some("[auto] Ditutup karena salah satu entitas sudah tidak ada".into());
+                    r.resolved_at = Some(now_rfc3339());
+                    rt.store.put_review(&r).await?;
+                    report.resolved += 1;
+                    report.rejected += 1;
+                    continue;
+                };
+                let desc = format!(
+                    "- review_id: {}\n  jenis: entity_merge\n  ringkasan: {}\n  entitas_baru: \"{}\" (jenis: {:?}, alias: {:?}, deskripsi: \"{}\")\n  entitas_lama: \"{}\" (jenis: {:?}, alias: {:?}, deskripsi: \"{}\")",
+                    r.id, r.summary, a.name, a.kind, a.aliases, a.description, b.name, b.kind, b.aliases, b.description
+                );
+                prepared.push(PreparedReview {
+                    item: r,
+                    old_fact: None,
+                    new_fact: None,
+                    prompt_desc: desc,
+                });
+            }
+            ReviewKind::Quarantine => {
+                let quote = r.payload["quote"].as_str().unwrap_or("");
+                let desc = format!(
+                    "- review_id: {}\n  jenis: quarantine\n  ringkasan: {}\n  kutipan_bukti: \"{}\"",
+                    r.id,
+                    r.summary,
+                    truncate_chars(quote, 300)
+                );
+                prepared.push(PreparedReview {
+                    item: r,
+                    old_fact: None,
+                    new_fact: None,
+                    prompt_desc: desc,
+                });
+            }
+            ReviewKind::GrayZone => {
+                let txt = r.payload["text"].as_str().unwrap_or("");
+                let desc = format!(
+                    "- review_id: {}\n  jenis: gray_zone\n  ringkasan: {}\n  teks_segmen: \"{}\"",
+                    r.id,
+                    r.summary,
+                    truncate_chars(txt, 400)
+                );
+                prepared.push(PreparedReview {
+                    item: r,
+                    old_fact: None,
+                    new_fact: None,
+                    prompt_desc: desc,
+                });
+            }
+            ReviewKind::Reflective => {
+                let desc = format!(
+                    "- review_id: {}\n  jenis: reflective\n  ringkasan: {}",
+                    r.id, r.summary
+                );
+                prepared.push(PreparedReview {
+                    item: r,
+                    old_fact: None,
+                    new_fact: None,
+                    prompt_desc: desc,
+                });
+            }
+        }
+    }
+
+    for chunk in prepared.chunks(AGY_REVIEW_BATCH_SIZE) {
+        let block = chunk
+            .iter()
+            .map(|p| p.prompt_desc.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let mut agy_map: std::collections::HashMap<String, (ReviewDecision, String)> =
+            std::collections::HashMap::new();
+
+        if report.agy_used {
+            match run_agy_review(&subject_obj.name, &block, rt.vault.root()).await {
+                Ok(raw_list) => {
+                    for d in raw_list {
+                        if let Some(parsed_dec) = parse_decision_str(&d.decision) {
+                            let mut note = d
+                                .note
+                                .unwrap_or_else(|| "Direview otomatis oleh agy CLI".into())
+                                .trim()
+                                .to_string();
+                            if !note.starts_with("[agy]") {
+                                note = format!("[agy] {note}");
+                            }
+                            agy_map.insert(d.review_id.trim().to_string(), (parsed_dec, note));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "review via agy CLI gagal pada batch; memakai fallback");
+                    report.error = Some(e.to_string());
+                }
+            }
+        }
+
+        for p in chunk {
+            let (dec, note) = agy_map.remove(&p.item.id).unwrap_or_else(|| {
+                fallback_decision(
+                    &p.item,
+                    p.old_fact.as_ref(),
+                    p.new_fact.as_ref(),
+                    report.agy_used && report.error.is_none(),
+                )
+            });
+            match rt
+                .pipeline
+                .resolve_review(&p.item.id, dec, Some(note.clone()))
+                .await
+            {
+                Ok(_) => {
+                    report.resolved += 1;
+                    match dec {
+                        ReviewDecision::Approve => report.approved += 1,
+                        ReviewDecision::Reject => report.rejected += 1,
+                        ReviewDecision::KeepBoth => report.kept_both += 1,
+                    }
+                    report.decisions.push(AutoReviewDecisionItem {
+                        review_id: p.item.id.clone(),
+                        kind: format!("{:?}", p.item.kind).to_lowercase(),
+                        summary: p.item.summary.clone(),
+                        decision: dec,
+                        note,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(review = %p.item.id, error = %e, "gagal menyelesaikan item review");
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use memory_core::model::{Evidence, Fact, FactKind, FactStatus, ReviewItem, ReviewKind, ReviewStatus};
+    use memory_core::time::TimeRef;
     use memory_core::MemoryConfig;
     use memory_llm::HashEmbedder;
     use memory_llm::mock::ScriptedLlm;
     use memory_store::Store;
     use std::sync::Arc;
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn tree_scan_ignores_noise_and_detects_diffs() {
@@ -1039,6 +1577,7 @@ mod tests {
     #[cfg(unix)]
     async fn watch_folder_initial_and_incremental_ingest_via_agy_cli() {
         use std::os::unix::fs::PermissionsExt;
+        let _env_guard = ENV_LOCK.lock().await;
 
         let tmp = tempfile::tempdir().unwrap();
         let vault_dir = tmp.path().join("vault");
@@ -1115,5 +1654,123 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert!(remove_folder(&rt.vault, &f.id).unwrap());
         assert!(list_folders(&rt.vault, Some("budi")).is_empty());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn auto_review_via_agy_cli_resolves_conflicts_and_quarantines() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env_guard = ENV_LOCK.lock().await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let vault_dir = tmp.path().join("vault");
+        let mut cfg = MemoryConfig::for_tests(64);
+        cfg.vault.path = vault_dir.clone();
+        let store = Store::memory(64, &cfg.index).await.unwrap();
+        let vault = Vault::new(&vault_dir);
+        vault.init().unwrap();
+        let llm = Arc::new(ScriptedLlm::new(|_| Ok("{}".into())));
+        let emb = Arc::new(HashEmbedder::new(64));
+        let rt = Runtime::from_parts(cfg, store, llm, emb, vault);
+
+        rt.pipeline.ensure_subject("budi", Some("Budi")).await.unwrap();
+
+        let f_old = Fact {
+            id: "f_old_1".into(),
+            subject: "budi".into(),
+            entity_id: "ent1".into(),
+            predicate: "terletak di".into(),
+            category: "infrastruktur".into(),
+            object_entity: None,
+            object_text: "/Users/jayuda/PROJECT/FOX".into(),
+            kind: FactKind::Preference,
+            exclusive: true,
+            time: TimeRef::Unknown,
+            valid_from: None,
+            valid_to: None,
+            ongoing: true,
+            time_confidence: 0.9,
+            observed_at: "2026-11-06".into(),
+            confidence: 0.9,
+            evidence: vec![Evidence {
+                episode_id: "ep_1".into(),
+                quote: "Direktori lokal FOX".into(),
+            }],
+            status: FactStatus::Conflict,
+            superseded_by: None,
+            supersedes: None,
+            created_at: "2026-11-06T00:00:00Z".into(),
+        };
+        let f_new = Fact {
+            id: "f_new_1".into(),
+            subject: "budi".into(),
+            entity_id: "ent1".into(),
+            predicate: "terletak di".into(),
+            category: "infrastruktur".into(),
+            object_entity: None,
+            object_text: "mqtt.foxlogger.app".into(),
+            kind: FactKind::Preference,
+            exclusive: true,
+            time: TimeRef::Unknown,
+            valid_from: None,
+            valid_to: None,
+            ongoing: true,
+            time_confidence: 0.9,
+            observed_at: "2026-11-06".into(),
+            confidence: 0.9,
+            evidence: vec![Evidence {
+                episode_id: "ep_2".into(),
+                quote: "Endpoint broker MQTT".into(),
+            }],
+            status: FactStatus::Conflict,
+            superseded_by: None,
+            supersedes: None,
+            created_at: "2026-11-06T00:00:00Z".into(),
+        };
+        rt.store.put_fact(&f_old).await.unwrap();
+        rt.store.put_fact(&f_new).await.unwrap();
+
+        let rev_conflict = ReviewItem {
+            id: "rev_conf_1".into(),
+            subject: "budi".into(),
+            kind: ReviewKind::Conflict,
+            status: ReviewStatus::Open,
+            summary: "Dua fakta 'infrastruktur' bertentangan".into(),
+            payload: serde_json::json!({
+                "existing": f_old.id,
+                "new": f_new.id,
+                "category": "infrastruktur",
+            }),
+            targets: vec![],
+            created_at: "2026-11-06T00:00:00Z".into(),
+            resolved_at: None,
+            note: None,
+        };
+        rt.store.put_review(&rev_conflict).await.unwrap();
+
+        // Buat fake agy yang mengembalikan JSON array berisi keputusan untuk rev_conf_1.
+        let fake_agy = tmp.path().join("fake-agy-review");
+        std::fs::write(
+            &fake_agy,
+            "#!/bin/sh\n\
+             echo '[{\"review_id\":\"rev_conf_1\",\"decision\":\"keep_both\",\"note\":\"Endpoint MQTT dan direktori lokal keduanya berlaku bersamaan\"}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe {
+            std::env::set_var("ENGRAM_AGY_BIN", &fake_agy);
+        }
+
+        let rep = auto_review(&rt, "budi").await.unwrap();
+        assert_eq!(rep.total_open, 1);
+        assert_eq!(rep.resolved, 1);
+        assert_eq!(rep.kept_both, 1);
+
+        let f_old_after = rt.store.get_fact(&f_old.id).await.unwrap().unwrap();
+        let f_new_after = rt.store.get_fact(&f_new.id).await.unwrap().unwrap();
+        assert_eq!(f_old_after.status, FactStatus::Active);
+        assert_eq!(f_new_after.status, FactStatus::Active);
+        assert!(!f_old_after.exclusive);
+        assert!(!f_new_after.exclusive);
     }
 }

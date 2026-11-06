@@ -78,6 +78,33 @@ fn merge_evidence(into: &mut Fact, from: &Fact) {
     }
 }
 
+/// Kategori teknis/koleksi di mana satu entitas secara alami memiliki banyak
+/// fakta aktif sekaligus (tidak saling menggantikan hanya karena kategorinya sama).
+pub fn is_non_exclusive_category(category: &str) -> bool {
+    matches!(
+        category.trim().to_lowercase().as_str(),
+        "arsitektur"
+            | "infrastruktur"
+            | "komponen"
+            | "konvensi_kode"
+            | "konvensi"
+            | "aturan_bisnis"
+            | "bug_fix"
+            | "bugfix"
+            | "workflow"
+            | "proyek"
+            | "tech_stack"
+            | "preferensi_tool"
+            | "fitur"
+            | "peristiwa"
+            | "hobi"
+            | "kepemilikan"
+            | "usaha"
+            | "keputusan"
+            | "pelajaran"
+    )
+}
+
 fn conflict_review(a: &Fact, b: &Fact, now: &str) -> ReviewItem {
     ReviewItem {
         id: crate::det_id(&["conflict", &a.id, &b.id]),
@@ -92,7 +119,26 @@ fn conflict_review(a: &Fact, b: &Fact, now: &str) -> ReviewItem {
             b.time.label()
         ),
         targets: vec![a.id.clone(), b.id.clone()],
-        payload: json!({"existing": a.id, "new": b.id}),
+        payload: json!({
+            "existing": a.id,
+            "new": b.id,
+            "fact_old": {
+                "id": a.id,
+                "predicate": a.predicate,
+                "object_text": a.object_text,
+                "category": a.category,
+                "time": a.time.label(),
+                "quote": a.evidence.first().map(|e| e.quote.as_str()).unwrap_or(""),
+            },
+            "fact_new": {
+                "id": b.id,
+                "predicate": b.predicate,
+                "object_text": b.object_text,
+                "category": b.category,
+                "time": b.time.label(),
+                "quote": b.evidence.first().map(|e| e.quote.as_str()).unwrap_or(""),
+            },
+        }),
         status: ReviewStatus::Open,
         note: None,
         created_at: now.to_string(),
@@ -157,6 +203,9 @@ fn order(e: &Fact, n: &Fact) -> Order {
 /// & kategori sama). `existing` diperbarui di tempat agar fakta berikutnya di
 /// transaksi yang sama melihat keadaan terbaru.
 pub fn reconcile(mut new: Fact, existing: &mut Vec<Fact>, now: &str) -> Vec<Action> {
+    if is_non_exclusive_category(&new.category) {
+        new.exclusive = false;
+    }
     let mut actions = Vec::new();
     let related: Vec<usize> = existing
         .iter()

@@ -16,6 +16,9 @@ use crate::{ExtractError, Pipeline, Result};
 pub enum Decision {
     Approve,
     Reject,
+    /// Untuk `Conflict`: kedua fakta berlaku berdampingan (tidak saling menggantikan).
+    #[serde(alias = "both")]
+    KeepBoth,
 }
 
 fn day_before(iso: &str) -> Option<String> {
@@ -31,7 +34,7 @@ impl Pipeline {
         }
         let s = |k: &str| r.payload[k].as_str().map(str::to_string);
         match (r.kind, decision) {
-            (ReviewKind::GrayZone, Decision::Approve) => {
+            (ReviewKind::GrayZone, Decision::Approve | Decision::KeepBoth) => {
                 if let Some(item) = s("stream_item") {
                     self.promote_stream_item(&item).await?;
                 }
@@ -42,19 +45,28 @@ impl Pipeline {
                 let mut old: Fact = self.store.require("fact", &old_id).await?;
                 let mut new: Fact = self.store.require("fact", &new_id).await?;
                 old.status = FactStatus::Active;
-                if d == Decision::Approve {
-                    // Fakta baru menggantikan yang lama mulai awal berlakunya
-                    // (atau sejak diceritakan bila awalnya tidak diketahui).
-                    let start = new.valid_from.clone().unwrap_or_else(|| new.observed_at.chars().take(10).collect());
-                    if new.valid_from.is_none() {
-                        new.valid_from = Some(start.clone());
+                match d {
+                    Decision::Approve => {
+                        // Fakta baru menggantikan yang lama mulai awal berlakunya
+                        // (atau sejak diceritakan bila awalnya tidak diketahui).
+                        let start = new.valid_from.clone().unwrap_or_else(|| new.observed_at.chars().take(10).collect());
+                        if new.valid_from.is_none() {
+                            new.valid_from = Some(start.clone());
+                        }
+                        old.valid_to = day_before(&start).or(Some(start));
+                        old.superseded_by = Some(new.id.clone());
+                        new.supersedes = Some(old.id.clone());
+                        new.status = FactStatus::Active;
                     }
-                    old.valid_to = day_before(&start).or(Some(start));
-                    old.superseded_by = Some(new.id.clone());
-                    new.supersedes = Some(old.id.clone());
-                    new.status = FactStatus::Active;
-                } else {
-                    new.status = FactStatus::Rejected;
+                    Decision::KeepBoth => {
+                        // Kedua fakta berlaku berdampingan (tidak saling menggantikan).
+                        old.exclusive = false;
+                        new.status = FactStatus::Active;
+                        new.exclusive = false;
+                    }
+                    Decision::Reject => {
+                        new.status = FactStatus::Rejected;
+                    }
                 }
                 self.store.put_fact(&old).await?;
                 self.store.put_fact(&new).await?;
@@ -63,7 +75,7 @@ impl Pipeline {
                 let (Some(from), Some(into)) = (s("new"), s("existing")) else { return Err(ExtractError::Invalid("payload merge rusak".into())) };
                 self.merge_entities(&from, &into).await?;
             }
-            (ReviewKind::EntityMerge, Decision::Reject) => {
+            (ReviewKind::EntityMerge, Decision::Reject | Decision::KeepBoth) => {
                 // Dikonfirmasi sebagai entitas berbeda.
                 if let Some(id) = s("new") {
                     self.store.patch("entity", &id, json!({"status": "confirmed"})).await?;
@@ -71,7 +83,7 @@ impl Pipeline {
             }
             (ReviewKind::Quarantine, d) => {
                 if let Some(id) = s("fact") {
-                    let status = if d == Decision::Approve { "active" } else { "rejected" };
+                    let status = if matches!(d, Decision::Approve | Decision::KeepBoth) { "active" } else { "rejected" };
                     self.store.patch("fact", &id, json!({"status": status})).await?;
                 }
             }
@@ -80,12 +92,16 @@ impl Pipeline {
                     if !matches!(table.as_str(), "principle" | "disposition") {
                         return Err(ExtractError::Invalid(format!("tabel reflektif tidak dikenal: {table}")));
                     }
-                    let status = if d == Decision::Approve { "active" } else { "rejected" };
+                    let status = if matches!(d, Decision::Approve | Decision::KeepBoth) { "active" } else { "rejected" };
                     self.store.patch(&table, &id, json!({"status": status})).await?;
                 }
             }
         }
-        r.status = if decision == Decision::Approve { ReviewStatus::Approved } else { ReviewStatus::Rejected };
+        r.status = match (r.kind, decision) {
+            (ReviewKind::EntityMerge, Decision::KeepBoth) => ReviewStatus::Rejected,
+            (_, Decision::Approve | Decision::KeepBoth) => ReviewStatus::Approved,
+            (_, Decision::Reject) => ReviewStatus::Rejected,
+        };
         r.note = note;
         r.resolved_at = Some(now_rfc3339());
         self.store.put_review(&r).await?;

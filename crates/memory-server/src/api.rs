@@ -50,6 +50,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/subjects/{s}/ask", post(ask))
         .route("/api/subjects/{s}/reviews", get(reviews))
+        .route("/api/subjects/{s}/reviews/auto", post(reviews_auto))
         .route("/api/reviews/{id}", post(resolve_review))
         .route("/api/subjects/{s}/sources", get(sources))
         .route("/api/sources/{id}", get(source))
@@ -563,12 +564,82 @@ async fn reviews(
         .kind
         .as_deref()
         .and_then(|k| serde_json::from_value(json!(k)).ok());
-    Ok(Json(
-        st.rt
-            .store
-            .list_reviews(&s, status, kind, p.limit.unwrap_or(100).min(500))
-            .await?,
-    ))
+    let mut list = st
+        .rt
+        .store
+        .list_reviews(&s, status, kind, p.limit.unwrap_or(100).min(500))
+        .await?;
+    let mut ent_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for r in &mut list {
+        match r.kind {
+            ReviewKind::Conflict => {
+                for (id_key, out_key) in [("existing", "fact_old"), ("new", "fact_new")] {
+                    let Some(fid) = r.payload[id_key].as_str().map(str::to_string) else {
+                        continue;
+                    };
+                    if let Ok(Some(f)) = st.rt.store.get_fact(&fid).await {
+                        let ename = match ent_names.get(&f.entity_id) {
+                            Some(n) => n.clone(),
+                            None => {
+                                let n = st
+                                    .rt
+                                    .store
+                                    .resolve_entity(&f.entity_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|e| e.name)
+                                    .unwrap_or_default();
+                                ent_names.insert(f.entity_id.clone(), n.clone());
+                                n
+                            }
+                        };
+                        r.payload[out_key] = json!({
+                            "id": f.id,
+                            "entity_name": ename,
+                            "predicate": f.predicate,
+                            "object_text": f.object_text,
+                            "category": f.category,
+                            "time": f.time.label(),
+                            "valid_from": f.valid_from,
+                            "valid_to": f.valid_to,
+                            "statement": f.statement(&ename),
+                            "quote": f.evidence.first().map(|e| e.quote.as_str()).unwrap_or(""),
+                        });
+                    }
+                }
+            }
+            ReviewKind::EntityMerge => {
+                for (id_key, out_key) in [("existing", "fact_old"), ("new", "fact_new")] {
+                    let Some(eid) = r.payload[id_key].as_str().map(str::to_string) else {
+                        continue;
+                    };
+                    if let Ok(Some(e)) = st.rt.store.get_entity(&eid).await {
+                        let alias = if e.aliases.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (alias: {})", e.aliases.join(", "))
+                        };
+                        r.payload[out_key] = json!({
+                            "id": e.id,
+                            "statement": format!("{} [{}]{}", e.name, e.kind.label_id(), alias),
+                            "quote": e.description,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Json(list))
+}
+
+async fn reviews_auto(
+    State(st): State<AppState>,
+    Path(s): Path<String>,
+) -> ApiResult<memory_jobs::watch::AutoReviewReport> {
+    check(&s)?;
+    Ok(Json(memory_jobs::watch::auto_review(&st.rt, &s).await?))
 }
 
 #[derive(Deserialize)]
@@ -1029,6 +1100,7 @@ async fn maintenance(
         "distill" => memory_jobs::DISTILL,
         "voice" => memory_jobs::VOICE,
         "compact" => memory_jobs::COMPACT,
+        "review" | "auto_review" => memory_jobs::AUTO_REVIEW,
         other => {
             return Err(ApiError::BadRequest(format!(
                 "jenis tidak dikenal: {other}"

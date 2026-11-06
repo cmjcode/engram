@@ -2,7 +2,7 @@
 # engram CLI + server (UI, REST API, MCP Streamable HTTP, worker).
 #   docker run -d -p 7878:7878 -v engram-data:/data -e MEMORY_TOKEN=... ghcr.io/cmjcode/engram
 #   docker run -i --rm -v engram-data:/data ghcr.io/cmjcode/engram mcp --profile coding   # stdio
-FROM rust:1.90-bookworm AS build
+FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev \
  && apt-get clean
 WORKDIR /src

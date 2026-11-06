@@ -325,7 +325,7 @@ fn all_tools() -> Vec<Value> {
                             "type": "array",
                             "items": schema(json!({
                                 "review_id": {"type": "string"},
-                                "decision": {"type": "string", "enum": ["approve", "reject"]},
+                                "decision": {"type": "string", "enum": ["approve", "reject", "keep_both"]},
                                 "note": {"type": "string"}
                             }), &["review_id", "decision"])
                         }
