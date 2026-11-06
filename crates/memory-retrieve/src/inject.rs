@@ -114,7 +114,14 @@ fn render(p: &Parts<'_>, plan: Plan) -> String {
                 last_date = date.clone();
             }
             let proj = if p.project.is_none() { e.project.as_deref() } else { None };
-            out.push_str(&index_line(&e.id, &e.created_at.chars().take(16).collect::<String>().replace('T', " "), e.obs_type.as_deref(), proj, &e.title, e.approx_tokens()));
+            out.push_str(&index_line(
+                &e.id,
+                &e.created_at.chars().take(16).collect::<String>().replace('T', " "),
+                e.obs_type.as_deref(),
+                proj,
+                &e.title,
+                e.approx_tokens(),
+            ));
             out.push('\n');
         }
     }
@@ -167,32 +174,55 @@ impl Retriever {
         if project.is_some() && names.is_empty() {
             return Ok(InjectResult::default());
         }
-        let recent = self
-            .store
-            .list_episodes(
-                subject,
-                &EpisodeFilter { status: Some(EpisodeStatus::Active), projects: names.clone(), newest_first: true, limit: (n_obs + n_sess) * 2 + 10, ..Default::default() },
-            )
-            .await?;
-        let summaries: Vec<Episode> = recent.iter().filter(|e| e.obs_type.as_deref() == Some("session_summary")).take(n_sess.max(1)).cloned().collect();
-        let observations: Vec<Episode> = recent.iter().filter(|e| e.obs_type.as_deref() != Some("session_summary")).take(n_obs.max(1)).cloned().collect();
+        let recent_fut = self.store.list_episodes(
+            subject,
+            &EpisodeFilter {
+                status: Some(EpisodeStatus::Active),
+                projects: names.clone(),
+                newest_first: true,
+                limit: (n_obs + n_sess) * 2 + 10,
+                ..Default::default()
+            },
+        );
+        let ent_fut = async {
+            match project {
+                Some(p) => self.find_entity(subject, p).await,
+                None => Ok(None),
+            }
+        };
+        let lessons_fut = self.store.list_lessons(subject, &names, Some("active"), 10);
+        let princ_fut = async {
+            match project {
+                Some(p) => Ok(self.principles(subject, Some(p)).await?.into_iter().take(3).map(|v| v.principle).collect::<Vec<_>>()),
+                None => Ok(vec![]),
+            }
+        };
+        let (recent, proj_ent, lessons, principles) = tokio::try_join!(recent_fut, ent_fut, lessons_fut, princ_fut)?;
+
+        let summaries: Vec<Episode> =
+            recent.iter().filter(|e| e.obs_type.as_deref() == Some("session_summary")).take(n_sess.max(1)).cloned().collect();
+        let observations: Vec<Episode> =
+            recent.iter().filter(|e| e.obs_type.as_deref() != Some("session_summary")).take(n_obs.max(1)).cloned().collect();
         let mut facts: Vec<crate::FactView> = Vec::new();
-        if let Some(p) = project
-            && let Some(ent) = self.find_entity(subject, p).await?
+        if let Some(ent) = proj_ent
             && let Some(w) = self.who_is_id(subject, &ent.id).await?
         {
             facts = w.current_facts.into_iter().filter(|f| !is_event_fact(&f.category)).take(12).collect();
         }
-        let lessons = self.store.list_lessons(subject, &names, Some("active"), 10).await?;
-        let principles: Vec<Principle> = match project {
-            Some(p) => self.principles(subject, Some(p)).await?.into_iter().take(3).map(|v| v.principle).collect(),
-            None => vec![],
-        };
         let found = !summaries.is_empty() || !observations.is_empty() || !facts.is_empty() || !lessons.is_empty();
         if !found {
             return Ok(InjectResult { project: project.map(str::to_string), ..Default::default() });
         }
-        let parts = Parts { subject_name: &subject_name, project, client: opts.client.as_deref(), summaries: &summaries, observations: &observations, facts: &facts, lessons: &lessons, principles: &principles };
+        let parts = Parts {
+            subject_name: &subject_name,
+            project,
+            client: opts.client.as_deref(),
+            summaries: &summaries,
+            observations: &observations,
+            facts: &facts,
+            lessons: &lessons,
+            principles: &principles,
+        };
         let mut plan = Plan { sessions: n_sess, observations: n_obs, facts: 8, lessons: 8, principles: 3, session_excerpt: 400 };
         let mut text = render(&parts, plan);
         let mut reductions = 0u32;
@@ -232,7 +262,17 @@ impl Retriever {
         let mut out = format!("engram: riwayat berkas {path} ({} observasi; detail: get_episodes(ids=[...]))\n", eps.len());
         for e in &eps {
             let changed = if e.files_modified.iter().any(|f| path.ends_with(f.as_str()) || f.ends_with(path)) { " [diubah]" } else { "" };
-            out.push_str(&format!("{}{changed}\n", index_line(&e.id, &e.created_at.chars().take(10).collect::<String>(), e.obs_type.as_deref(), None, &e.title, e.approx_tokens())));
+            out.push_str(&format!(
+                "{}{changed}\n",
+                index_line(
+                    &e.id,
+                    &e.created_at.chars().take(10).collect::<String>(),
+                    e.obs_type.as_deref(),
+                    None,
+                    &e.title,
+                    e.approx_tokens()
+                )
+            ));
         }
         Ok(Some(crate::fit_text(&out, max_chars.clamp(300, 10_000))))
     }

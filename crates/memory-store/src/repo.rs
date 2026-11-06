@@ -318,17 +318,48 @@ impl Store {
         .await
     }
 
-    /// Full-text BM25: (id, skor).
-    pub async fn fulltext_episodes(&self, subject: &str, query: &str, limit: usize) -> Result<Vec<(String, f32)>> {
-        if normalize(query).is_empty() {
+    /// Ambil episode yang menyebut salah satu dari `entity_ids` dalam satu query (batch).
+    pub async fn episodes_mentioning_any(&self, entity_ids: &[String], limit: usize) -> Result<Vec<Episode>> {
+        if entity_ids.is_empty() {
             return Ok(vec![]);
         }
+        self.rows_as(
+            &format!("{EP} WHERE entity_ids CONTAINSANY $eids AND status != 'retelling' ORDER BY time_start ASC LIMIT {limit};"),
+            binds! {"eids" => entity_ids},
+        )
+        .await
+    }
+
+    /// Full-text BM25: (id, skor). Token query disaring dari kata penghubung umum dan
+    /// dideduplikasi agar BM25 tidak memindai seluruh tabel akibat stopword frekuensi tinggi.
+    pub async fn fulltext_episodes(&self, subject: &str, query: &str, limit: usize) -> Result<Vec<(String, f32)>> {
+        const STOP: &[&str] = &[
+            "yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "adalah", "ini", "itu",
+            "atau", "juga", "dalam", "akan", "bisa", "ada", "tidak", "sudah", "saya", "kami", "kita",
+            "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "have", "has",
+        ];
+        let all_toks = memory_core::text::tokens(query);
+        if all_toks.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let filtered: Vec<&str> = all_toks
+            .iter()
+            .map(String::as_str)
+            .filter(|w| w.chars().count() >= 2 && !STOP.contains(w) && seen.insert(*w))
+            .take(8)
+            .collect();
+        let effective_q = if filtered.is_empty() {
+            all_toks.iter().take(6).cloned().collect::<Vec<_>>().join(" ")
+        } else {
+            filtered.join(" ")
+        };
         let rows = self
             .rows(
                 &format!(
                     "SELECT id, search::score(1) AS score FROM episode WHERE text @1@ $q AND subject = $s AND status = 'active' ORDER BY score DESC LIMIT {limit};"
                 ),
-                binds! {"q" => query, "s" => subject},
+                binds! {"q" => effective_q, "s" => subject},
             )
             .await?;
         Ok(rows
@@ -373,6 +404,21 @@ impl Store {
         self.rows_as(
             &format!("{EN} WHERE subject = $s AND alias_keys CONTAINS $k AND status != 'merged';"),
             binds! {"s" => subject, "k" => key},
+        )
+        .await
+    }
+
+    /// Cari entitas yang cocok dengan salah satu dari banyak kandidat alias sekaligus (batch).
+    pub async fn entities_by_aliases(&self, subject: &str, names: &[String]) -> Result<Vec<Entity>> {
+        let mut keys: Vec<String> = names.iter().map(|n| normalize(n)).filter(|k| !k.is_empty()).collect();
+        keys.sort();
+        keys.dedup();
+        if keys.is_empty() {
+            return Ok(vec![]);
+        }
+        self.rows_as(
+            &format!("{EN} WHERE subject = $s AND alias_keys CONTAINSANY $keys AND status != 'merged';"),
+            binds! {"s" => subject, "keys" => keys},
         )
         .await
     }
@@ -423,6 +469,18 @@ impl Store {
         self.rows_as(
             "SELECT * FROM fact WHERE (entity_id = $e OR object_entity = $e) AND status != 'rejected' ORDER BY valid_from ASC, observed_at ASC;",
             binds! {"e" => entity_id},
+        )
+        .await
+    }
+
+    /// Semua fakta untuk banyak entitas sekaligus (batch) agar `recall` tidak melakukan N query berurutan.
+    pub async fn facts_for_entities(&self, entity_ids: &[String]) -> Result<Vec<Fact>> {
+        if entity_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        self.rows_as(
+            "SELECT * FROM fact WHERE (entity_id IN $eids OR object_entity IN $eids) AND status != 'rejected' ORDER BY valid_from ASC, observed_at ASC;",
+            binds! {"eids" => entity_ids},
         )
         .await
     }
@@ -479,6 +537,13 @@ impl Store {
 
     pub async fn kin_touching(&self, entity_id: &str) -> Result<Vec<Kin>> {
         self.rows_as("SELECT * FROM kin WHERE from = $e OR to = $e;", binds! {"e" => entity_id}).await
+    }
+
+    pub async fn kin_touching_any(&self, entity_ids: &[String]) -> Result<Vec<Kin>> {
+        if entity_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        self.rows_as("SELECT * FROM kin WHERE from IN $eids OR to IN $eids;", binds! {"eids" => entity_ids}).await
     }
 
     // ------------------------------------------------------------- reflective

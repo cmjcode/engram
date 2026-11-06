@@ -241,9 +241,8 @@ impl Retriever {
         }
         let tree = self.family_tree(subject).await?;
         let self_id = tree.nodes.iter().find(|n| n.is_self).map(|n| n.id.clone());
-        let relation_to_subject = self_id.as_ref().and_then(|sid| {
-            tree.edges.iter().find(|e| e.from == entity.id && &e.to == sid).map(|e| e.label.clone())
-        });
+        let relation_to_subject =
+            self_id.as_ref().and_then(|sid| tree.edges.iter().find(|e| e.from == entity.id && &e.to == sid).map(|e| e.label.clone()));
         let node_name: HashMap<&str, &str> = tree.nodes.iter().map(|n| (n.id.as_str(), n.name.as_str())).collect();
         let kin = tree
             .edges
@@ -280,7 +279,13 @@ impl Retriever {
         let mut edges: Vec<TreeEdge> = Vec::new();
         for k in &kin {
             let g = gender.get(&k.from).copied().flatten().or(k.gender);
-            edges.push(TreeEdge { from: k.from.clone(), to: k.to.clone(), relation: k.relation, label: rel_label(k, false, g), inferred: false });
+            edges.push(TreeEdge {
+                from: k.from.clone(),
+                to: k.to.clone(),
+                relation: k.relation,
+                label: rel_label(k, false, g),
+                inferred: false,
+            });
             let g2 = gender.get(&k.to).copied().flatten();
             edges.push(TreeEdge {
                 from: k.to.clone(),
@@ -296,12 +301,26 @@ impl Retriever {
                 continue;
             }
             let g = gender.get(&e.from).copied().flatten();
-            edges.push(TreeEdge { label: e.relation.label_id(g, None).to_string(), from: e.from, to: e.to, relation: e.relation, inferred: true });
+            edges.push(TreeEdge {
+                label: e.relation.label_id(g, None).to_string(),
+                from: e.from,
+                to: e.to,
+                relation: e.relation,
+                inferred: true,
+            });
         }
         Ok(FamilyTree { nodes, edges })
     }
 
-    pub async fn timeline(&self, subject: &str, entity: Option<&str>, phase: Option<&str>, from: Option<&str>, to: Option<&str>, limit: usize) -> Result<Timeline> {
+    pub async fn timeline(
+        &self,
+        subject: &str,
+        entity: Option<&str>,
+        phase: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
+        limit: usize,
+    ) -> Result<Timeline> {
         let limit = limit.clamp(1, 2000);
         let mut eps: Vec<Episode> = match entity {
             Some(name) => match self.find_entity(subject, name).await? {
@@ -346,27 +365,57 @@ impl Retriever {
             });
         }
         if let Some(name) = entity
-            && let Some(ent) = self.find_entity(subject, name).await? {
-                for f in self.store.facts_for_entity(&ent.id).await? {
-                    if f.status != FactStatus::Active {
-                        continue;
-                    }
-                    let st = f.statement(&ent.name);
-                    if let Some(d) = &f.valid_from {
-                        items.push(TimelineItem { kind: "fact_start".into(), date: Some(d.clone()), label: format!("mulai: {st}"), id: f.id.clone(), life_phase: None, time: f.time.label(), obs_type: None, project: None, approx_tokens: 0, anchor: false });
-                    }
-                    if let Some(d) = &f.valid_to {
-                        items.push(TimelineItem { kind: "fact_end".into(), date: Some(d.clone()), label: format!("berakhir: {st}"), id: f.id.clone(), life_phase: None, time: f.time.label(), obs_type: None, project: None, approx_tokens: 0, anchor: false });
-                    }
+            && let Some(ent) = self.find_entity(subject, name).await?
+        {
+            for f in self.store.facts_for_entity(&ent.id).await? {
+                if f.status != FactStatus::Active {
+                    continue;
+                }
+                let st = f.statement(&ent.name);
+                if let Some(d) = &f.valid_from {
+                    items.push(TimelineItem {
+                        kind: "fact_start".into(),
+                        date: Some(d.clone()),
+                        label: format!("mulai: {st}"),
+                        id: f.id.clone(),
+                        life_phase: None,
+                        time: f.time.label(),
+                        obs_type: None,
+                        project: None,
+                        approx_tokens: 0,
+                        anchor: false,
+                    });
+                }
+                if let Some(d) = &f.valid_to {
+                    items.push(TimelineItem {
+                        kind: "fact_end".into(),
+                        date: Some(d.clone()),
+                        label: format!("berakhir: {st}"),
+                        id: f.id.clone(),
+                        life_phase: None,
+                        time: f.time.label(),
+                        obs_type: None,
+                        project: None,
+                        approx_tokens: 0,
+                        anchor: false,
+                    });
                 }
             }
+        }
         items.sort_by(|a, b| a.date.cmp(&b.date));
         Ok(Timeline { items, phases: self.store.list_life_phases(subject).await?, undated })
     }
 
     /// Kronologi di sekitar satu episode jangkar (urutan dibuat), dalam proyek yang sama
     /// bila jangkar punya proyek. `anchor` boleh `ep:<id>`.
-    pub async fn timeline_around(&self, subject: &str, anchor: &str, before: usize, after: usize, project: Option<&str>) -> Result<Timeline> {
+    pub async fn timeline_around(
+        &self,
+        subject: &str,
+        anchor: &str,
+        before: usize,
+        after: usize,
+        project: Option<&str>,
+    ) -> Result<Timeline> {
         let id = anchor.trim().trim_start_matches("ep:");
         let Some(a) = self.store.get_episode(id).await?.filter(|e| e.subject == subject) else {
             return Err(crate::RetrieveError::NotFound(format!("episode jangkar '{anchor}' tidak ada")));
@@ -424,7 +473,8 @@ impl Retriever {
         let subj = self.store.get_subject(subject).await?;
         let name = subj.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| subject.to_string());
         let reference = as_of.map(str::to_string).unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
-        let age = subj.as_ref().and_then(|s| chrono::NaiveDate::parse_from_str(&reference, "%Y-%m-%d").ok().and_then(|d| s.anchors.age_at(d)));
+        let age =
+            subj.as_ref().and_then(|s| chrono::NaiveDate::parse_from_str(&reference, "%Y-%m-%d").ok().and_then(|d| s.anchors.age_at(d)));
         let recall = self.recall(&RecallQuery { as_of: as_of.map(str::to_string), ..RecallQuery::new(subject, question) }).await?;
         let voice = self.store.get_voice_profile(subject).await?.unwrap_or_default();
         let mut p = format!("Kamu berbicara sebagai {name}");
@@ -473,17 +523,74 @@ impl Retriever {
             Some(t) => format!("{proj} {t}"),
             None => format!("{proj} arsitektur tech stack konvensi keputusan aturan bug"),
         };
-        let recall = self
-            .recall(&RecallQuery {
-                subject: subject.to_string(),
-                query: query_str,
-                project: Some(proj.to_string()),
-                limit: Some(15),
-                ..Default::default()
-            })
-            .await?;
+        let rq = RecallQuery {
+            subject: subject.to_string(),
+            query: query_str,
+            project: Some(proj.to_string()),
+            limit: Some(15),
+            ..Default::default()
+        };
 
-        let entity = self.find_entity(subject, proj).await?;
+        // Jalankan pencarian recall, entitas proyek, daftar episode proyek, prinsip, pelajaran, dan sesi secara paralel.
+        let (recall, entity, mut ep_list, principles_raw, mut lessons, sessions) = tokio::try_join!(
+            self.recall(&rq),
+            self.find_entity(subject, proj),
+            self.store.list_episodes(
+                subject,
+                &EpisodeFilter {
+                    status: Some(EpisodeStatus::Active),
+                    project: Some(proj.to_string()),
+                    projects: project_names.clone(),
+                    limit: 25,
+                    newest_first: true,
+                    ..Default::default()
+                },
+            ),
+            self.principles(subject, task.or(Some(proj))),
+            self.store.list_lessons(subject, &project_names, Some("active"), 16),
+            self.store.list_sessions(subject, &project_names, 5),
+        )?;
+
+        if let Some(ent) = &entity {
+            for ep in self.store.episodes_mentioning(&ent.id, 20).await? {
+                if !ep_list.iter().any(|x| x.id == ep.id) {
+                    ep_list.push(ep);
+                }
+            }
+        }
+
+        let matches_proj_name = |name: &str| -> bool {
+            memory_core::project::same_project(name, proj) || project_names.iter().any(|n| memory_core::project::same_project(name, n))
+        };
+        let text_mentions_proj = |text: &str| -> bool {
+            let nt = memory_core::text::normalize(text);
+            project_names.iter().any(|n| {
+                let nn = memory_core::text::normalize(n);
+                nn.chars().count() >= 3 && nt.contains(&nn)
+            })
+        };
+
+        let recall_ep_ids: Vec<String> =
+            recall.episodes.iter().filter(|h| !ep_list.iter().any(|x| x.id == h.id)).map(|h| h.id.clone()).collect();
+        for ep in self.store.episodes_by_ids(&recall_ep_ids).await? {
+            if ep_list.iter().any(|x| x.id == ep.id) {
+                continue;
+            }
+            // Cegah episode dari proyek lain bocor ke konteks proyek ini:
+            let belongs = match ep.project.as_deref() {
+                Some(ep_proj) => matches_proj_name(ep_proj),
+                None => {
+                    entity.as_ref().is_some_and(|ent| ep.entity_ids.contains(&ent.id))
+                        || text_mentions_proj(&ep.text)
+                        || text_mentions_proj(&ep.title)
+                }
+            };
+            if belongs {
+                ep_list.push(ep);
+            }
+        }
+
+        let proj_ep_ids: HashSet<String> = ep_list.iter().map(|e| e.id.clone()).collect();
         let mut current_facts: Vec<FactView> = Vec::new();
         let mut history_facts: Vec<FactView> = Vec::new();
         if let Some(ent) = &entity
@@ -493,6 +600,14 @@ impl Retriever {
             history_facts = w.history;
         }
         for fv in &recall.facts {
+            // Hanya masukkan fakta dari recall bila entitasnya adalah proyek ini, pernyataannya menyebut proyek ini,
+            // atau bukti episodenya berasal dari proyek ini.
+            let from_proj_ep = fv.evidence.iter().any(|eid| proj_ep_ids.contains(eid));
+            let is_proj_entity =
+                entity.as_ref().is_some_and(|ent| fv.entity.eq_ignore_ascii_case(&ent.name)) || matches_proj_name(&fv.entity);
+            if !from_proj_ep && !is_proj_entity && !text_mentions_proj(&fv.statement) {
+                continue;
+            }
             if fv.current {
                 if !current_facts.iter().any(|x| x.id == fv.id) {
                     current_facts.push(fv.clone());
@@ -502,50 +617,26 @@ impl Retriever {
             }
         }
 
-        let mut ep_list = self
-            .store
-            .list_episodes(
-                subject,
-                &EpisodeFilter {
-                    status: Some(EpisodeStatus::Active),
-                    project: Some(proj.to_string()),
-                    projects: project_names.clone(),
-                    limit: 20,
-                    newest_first: true,
-                    ..Default::default()
-                },
-            )
-            .await?;
-        if let Some(ent) = &entity {
-            for ep in self.store.episodes_mentioning(&ent.id, 20).await? {
-                if !ep_list.iter().any(|x| x.id == ep.id) {
-                    ep_list.push(ep);
-                }
-            }
-        }
-        let recall_ep_ids: Vec<String> = recall
-            .episodes
-            .iter()
-            .filter(|h| !ep_list.iter().any(|x| x.id == h.id))
-            .map(|h| h.id.clone())
-            .collect();
-        for ep in self.store.episodes_by_ids(&recall_ep_ids).await? {
-            if !ep_list.iter().any(|x| x.id == ep.id) {
-                ep_list.push(ep);
-            }
-        }
-
         let mut decisions: Vec<Decision> = Vec::new();
         for ep in &ep_list {
             for d in &ep.decisions {
-                if !decisions
-                    .iter()
-                    .any(|x| x.situation == d.situation && x.action == d.action)
-                {
+                if !decisions.iter().any(|x| x.situation == d.situation && x.action == d.action) {
                     decisions.push(d.clone());
                 }
             }
         }
+
+        // Bila ada `task`, prioritaskan pelajaran (`lessons`) dan fakta yang paling relevan secara semantik dengan tugas.
+        if let Some(t) = task.map(str::trim).filter(|t| !t.is_empty()) {
+            lessons.sort_by(|a, b| {
+                let sa =
+                    (a.occurrences as f32 * 0.25) + memory_core::text::semantic_text_similarity(t, &format!("{} {}", a.title, a.detail));
+                let sb =
+                    (b.occurrences as f32 * 0.25) + memory_core::text::semantic_text_similarity(t, &format!("{} {}", b.title, b.detail));
+                sb.total_cmp(&sa)
+            });
+        }
+        lessons.truncate(12);
 
         // Keputusan & fakta: utamakan yang bukan "peristiwa" sekali-pakai, lalu batasi jumlah.
         current_facts.sort_by_key(|f| crate::is_event_fact(&f.category));
@@ -553,15 +644,36 @@ impl Retriever {
         history_facts.truncate(20);
         decisions.truncate(15);
         let episodes: Vec<EpisodeRef> = ep_list.iter().take(15).map(EpisodeRef::from).collect();
-        let principles = self.principles(subject, task.or(Some(proj))).await?;
-        let principles: Vec<PrincipleView> = principles.into_iter().take(8).collect();
-        let lessons = self.store.list_lessons(subject, &project_names, Some("active"), 12).await?;
+        let principles: Vec<PrincipleView> = principles_raw.into_iter().take(8).collect();
         let found = entity.is_some()
             || !current_facts.is_empty()
             || !decisions.is_empty()
             || !episodes.is_empty()
             || !principles.is_empty()
             || !lessons.is_empty();
+
+        // Deteksi metadata Git & berkas yang sudah dihapus/dipindah di disk (bila akar repo lokal diketahui dari sesi).
+        let repo_root = sessions
+            .iter()
+            .filter_map(|s| s.cwd.as_deref())
+            .find_map(|c| memory_core::project::detect_project(std::path::Path::new(c)))
+            .filter(|p| matches_proj_name(&p.name))
+            .map(|p| p.root);
+        let git_info = repo_root.as_deref().and_then(memory_core::project::detect_git_info);
+        let stale_files = match &repo_root {
+            Some(root) => {
+                let mut touched: Vec<String> = Vec::new();
+                for ep in ep_list.iter().take(15) {
+                    for f in ep.files_modified.iter().chain(ep.files_read.iter()) {
+                        if !touched.contains(f) {
+                            touched.push(f.clone());
+                        }
+                    }
+                }
+                memory_core::project::check_stale_files(root, &touched)
+            }
+            None => vec![],
+        };
 
         let mut ctx = String::new();
         let push = |line: &str, out: &mut String| -> bool {
@@ -578,10 +690,27 @@ impl Retriever {
             if !ent.aliases.is_empty() {
                 l.push_str(&format!(" | alias: {}", ent.aliases.join(", ")));
             }
+            if let Some(g) = &git_info
+                && (g.branch.is_some() || g.commit.is_some())
+            {
+                let br = g.branch.as_deref().unwrap_or("detached");
+                let cm = g.commit.as_deref().unwrap_or("-");
+                l.push_str(&format!(" | git: {br}@{cm}"));
+            }
             if !ent.description.is_empty() {
                 l.push_str(&format!("\n{}", truncate_chars(&ent.description, 300)));
             }
             push(&l, &mut ctx);
+        } else if let Some(g) = &git_info
+            && (g.branch.is_some() || g.commit.is_some())
+        {
+            let br = g.branch.as_deref().unwrap_or("detached");
+            let cm = g.commit.as_deref().unwrap_or("-");
+            push(&format!("Git: {br}@{cm}"), &mut ctx);
+        }
+        if !stale_files.is_empty() {
+            let listed: Vec<&str> = stale_files.iter().take(6).map(String::as_str).collect();
+            push(&format!("Catatan: berkas di memori lama yang sudah tidak ada di disk: {}", listed.join(", ")), &mut ctx);
         }
         if !lessons.is_empty() {
             push("\n## Konvensi & jebakan proyek (berulang)", &mut ctx);
@@ -630,7 +759,10 @@ impl Retriever {
         if !history_facts.is_empty() {
             push("\n## Riwayat fakta lama (sudah digantikan)", &mut ctx);
             for f in history_facts.iter().take(8) {
-                if !push(&format!("- {} ({}–{})", f.statement, f.valid_from.as_deref().unwrap_or("?"), f.valid_to.as_deref().unwrap_or("?")), &mut ctx) {
+                if !push(
+                    &format!("- {} ({}–{})", f.statement, f.valid_from.as_deref().unwrap_or("?"), f.valid_to.as_deref().unwrap_or("?")),
+                    &mut ctx,
+                ) {
                     break;
                 }
             }
@@ -667,7 +799,12 @@ impl Retriever {
             (sys, r)
         };
         if !recall.found {
-            return Ok(Answer { answer: recall.note.clone().unwrap_or_else(|| "Tidak ada catatan.".into()), found: false, citations: vec![], context: recall.context });
+            return Ok(Answer {
+                answer: recall.note.clone().unwrap_or_else(|| "Tidak ada catatan.".into()),
+                found: false,
+                citations: vec![],
+                context: recall.context,
+            });
         }
         let raw = self
             .llm
@@ -684,7 +821,12 @@ impl Retriever {
             Some(i) => raw[i + 8..].trim().to_string(),
             None => raw.trim().to_string(),
         };
-        let known: HashSet<&str> = recall.episodes.iter().map(|e| e.id.as_str()).chain(recall.facts.iter().flat_map(|f| f.evidence.iter().map(String::as_str))).collect();
+        let known: HashSet<&str> = recall
+            .episodes
+            .iter()
+            .map(|e| e.id.as_str())
+            .chain(recall.facts.iter().flat_map(|f| f.evidence.iter().map(String::as_str)))
+            .collect();
         let cites = citations(&answer).into_iter().filter(|c| known.contains(c.as_str())).collect();
         Ok(Answer { answer, found: true, citations: cites, context: truncate_chars(&recall.context, 20_000) })
     }

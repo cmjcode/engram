@@ -410,11 +410,14 @@ PY
   upsert_rule_section "$HOME/.gemini/config/GEMINI.md"
 
   if [[ $DRY_RUN -eq 0 ]]; then
-    local a_turn="$HOOK_BIN"
-    [[ -n "$ENGRAM_BIN" ]] && a_turn="$ENGRAM_BIN hook antigravity turn"
-    python3 - "$hooks_f" "$a_turn" <<'PY'
+    local a_turn="$HOOK_BIN" a_ctx="$CTX_BIN"
+    if [[ -n "$ENGRAM_BIN" ]]; then
+      a_turn="$ENGRAM_BIN hook antigravity turn"
+      a_ctx="$ENGRAM_BIN hook antigravity context"
+    fi
+    python3 - "$hooks_f" "$a_turn" "$a_ctx" <<'PY'
 import json, os, sys
-p, hook_bin = sys.argv[1], sys.argv[2]
+p, hook_bin, ctx_bin = sys.argv[1], sys.argv[2], sys.argv[3]
 os.makedirs(os.path.dirname(p), exist_ok=True)
 d = {}
 if os.path.exists(p) and os.path.getsize(p) > 0:
@@ -423,6 +426,13 @@ if os.path.exists(p) and os.path.getsize(p) > 0:
 d.pop("mnemonic-auto-remember", None)
 d["engram-auto-remember"] = {
     "enabled": True,
+    "SessionStart": [
+        {
+            "type": "command",
+            "command": ctx_bin,
+            "timeout": 5
+        }
+    ],
     "Stop": [
         {
             "type": "command",
@@ -436,7 +446,7 @@ with open(p, "w") as f:
     json.dump(d, f, indent=2)
     f.write("\n")
 PY
-    info "Hook Stop dipasang: $hooks_f"
+    info "Hook SessionStart & Stop dipasang: $hooks_f"
   fi
   info "Di Antigravity: panel Agent > ... > MCP Servers > Manage MCP Servers > Refresh."
 }
@@ -495,6 +505,7 @@ PY
 do_cursor() {
   step "Cursor (profil $(profile_for cursor))"
   local f="$HOME/.cursor/mcp.json"
+  upsert_rule_section "$HOME/.cursor/AGENTS.md" "$(profile_for cursor)"
   if [[ $UNINSTALL -eq 1 ]]; then edit_json "$f" "$NAME" ""; return; fi
   edit_json "$f" "$NAME" "$(entry_json cursor)"
   info "Di Cursor: Settings > MCP, pastikan '$NAME' aktif."

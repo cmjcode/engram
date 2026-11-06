@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use memory_core::model::*;
-use memory_core::text::{normalize, tokens, truncate_chars};
+use memory_core::text::{code_symbol_bonus, normalize, semantic_text_similarity, tokens, truncate_chars};
 use memory_llm::cosine;
 use memory_store::VectorIndex;
 
@@ -157,10 +157,10 @@ fn overlap(query_toks: &HashSet<String>, text: &str) -> f32 {
 }
 
 impl Retriever {
-    /// Entitas yang disebut di query: n-gram (1..3 kata) dicocokkan ke alias.
+    /// Entitas yang disebut di query: n-gram (1..3 kata) dicocokkan ke alias dalam satu batch query.
     pub async fn entities_in_query(&self, subject: &str, query: &str) -> Result<Vec<Entity>> {
         let toks = tokens(query);
-        let mut out: Vec<Entity> = Vec::new();
+        let mut grams: Vec<String> = Vec::new();
         let mut tried = HashSet::new();
         for n in (1..=3).rev() {
             for w in toks.windows(n) {
@@ -168,14 +168,13 @@ impl Retriever {
                 if gram.chars().count() < 3 || tried.len() > 40 || !tried.insert(gram.clone()) {
                     continue;
                 }
-                for e in self.store.entities_by_alias(subject, &gram).await? {
-                    if !out.iter().any(|x| x.id == e.id) {
-                        out.push(e);
-                    }
-                }
+                grams.push(gram);
             }
         }
-        Ok(out)
+        if grams.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(self.store.entities_by_aliases(subject, &grams).await?)
     }
 
     pub async fn recall(&self, q: &RecallQuery) -> Result<RecallResult> {
@@ -195,82 +194,133 @@ impl Retriever {
             }
         };
         let index = self.store.vector_index();
+        let want_project = q.project.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-        // 1. Kandidat episode dari tiga jalur.
-        let vhits = match &qvec {
-            Some(v) => index.search("episode", &q.subject, v, rc.candidate_k, "status = 'active'").await?,
-            None => vec![],
+        // 1. Kandidat episode & entitas dari tiga jalur secara paralel.
+        let v_fut = async {
+            match &qvec {
+                Some(v) => Ok::<_, crate::RetrieveError>(index.search("episode", &q.subject, v, rc.candidate_k, "status = 'active'").await?),
+                None => Ok(vec![]),
+            }
         };
+        let ev_fut = async {
+            match &qvec {
+                Some(v) => Ok::<_, crate::RetrieveError>(index.search("entity", &q.subject, v, 5, "status != 'merged'").await?),
+                None => Ok(vec![]),
+            }
+        };
+        let fts_fut = async { Ok::<_, crate::RetrieveError>(self.store.fulltext_episodes(&q.subject, &q.query, rc.candidate_k).await?) };
+        let ent_fut = self.entities_in_query(&q.subject, &q.query);
+        let proj_fut = async {
+            match want_project {
+                Some(proj) => {
+                    let (ents, names) = tokio::try_join!(
+                        self.store.entities_by_alias(&q.subject, proj),
+                        self.store.project_names(&q.subject, proj),
+                    )?;
+                    Ok::<_, crate::RetrieveError>((ents, names))
+                }
+                None => Ok((vec![], vec![])),
+            }
+        };
+
+        let (vhits, ehits, fts_hits, mut entities, (proj_ents, project_names)) =
+            tokio::try_join!(v_fut, ev_fut, fts_fut, ent_fut, proj_fut)?;
+
         let best_sim = vhits.first().map(|h| h.similarity).unwrap_or(0.0);
         let vlist: Vec<String> = vhits.iter().filter(|h| h.similarity >= rc.min_similarity * 0.8).map(|h| h.id.clone()).collect();
-        let flist: Vec<String> = self.store.fulltext_episodes(&q.subject, &q.query, rc.candidate_k).await?.into_iter().map(|(id, _)| id).collect();
-        let mut entities = self.entities_in_query(&q.subject, &q.query).await?;
-        let want_project = q.project.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let mut project_names: Vec<String> = Vec::new();
-        if let Some(proj) = want_project {
-            for e in self.store.entities_by_alias(&q.subject, proj).await? {
-                if !entities.iter().any(|x| x.id == e.id) {
-                    entities.push(e);
+        let flist: Vec<String> = fts_hits.into_iter().map(|(id, _)| id).collect();
+
+        let mut proj_ent_ids: HashSet<String> = HashSet::new();
+        for e in proj_ents {
+            proj_ent_ids.insert(e.id.clone());
+            if !entities.iter().any(|x| x.id == e.id) {
+                entities.push(e);
+            }
+        }
+        for h in ehits {
+            if h.similarity >= 0.6 && !entities.iter().any(|e| e.id == h.id)
+                && let Some(e) = self.store.get_entity(&h.id).await?
+            {
+                entities.push(e);
+            }
+        }
+
+        // Ekspansi graph (batch): episode yang menyebut entitas + tetangga kekerabatan (hop 2) + episode proyek.
+        let non_self_ids: Vec<String> = entities.iter().filter(|e| !e.is_self).map(|e| e.id.clone()).collect();
+        let graph_fut = self.store.episodes_mentioning_any(&non_self_ids, (non_self_ids.len() * 20).clamp(20, 100));
+        let kin_fut = async {
+            if rc.graph_hops >= 2 && !non_self_ids.is_empty() {
+                self.store.kin_touching_any(&non_self_ids).await
+            } else {
+                Ok(vec![])
+            }
+        };
+        let plist_fut = async {
+            match want_project {
+                Some(proj) => {
+                    self.store
+                        .list_episodes(
+                            &q.subject,
+                            &memory_store::EpisodeFilter {
+                                status: Some(EpisodeStatus::Active),
+                                project: Some(proj.to_string()),
+                                projects: project_names.clone(),
+                                limit: 40,
+                                newest_first: true,
+                                ..Default::default()
+                            },
+                        )
+                        .await
                 }
+                None => Ok(vec![]),
             }
-            project_names = self.store.project_names(&q.subject, proj).await?;
-        }
-        if let Some(v) = &qvec {
-            for h in index.search("entity", &q.subject, v, 5, "status != 'merged'").await? {
-                if h.similarity >= 0.6 && !entities.iter().any(|e| e.id == h.id)
-                    && let Some(e) = self.store.get_entity(&h.id).await? {
-                        entities.push(e);
-                    }
-            }
-        }
-        // Ekspansi graph: episode yang menyebut entitas + tetangga kekerabatan (hop 2).
+        };
+
+        let (graph_eps, kin_edges, proj_eps) = tokio::try_join!(graph_fut, kin_fut, plist_fut)?;
         let mut glist: Vec<String> = Vec::new();
+        for ep in graph_eps {
+            if !glist.contains(&ep.id) {
+                glist.push(ep.id);
+            }
+        }
         let mut hop2: Vec<String> = Vec::new();
-        for e in entities.iter().filter(|e| !e.is_self) {
-            for ep in self.store.episodes_mentioning(&e.id, 20).await? {
-                if !glist.contains(&ep.id) {
-                    glist.push(ep.id);
+        if !kin_edges.is_empty() {
+            let mut neighbor_ids: Vec<String> = Vec::new();
+            for k in kin_edges {
+                let other = if non_self_ids.contains(&k.from) { k.to } else { k.from };
+                if !non_self_ids.contains(&other) && !neighbor_ids.contains(&other) {
+                    neighbor_ids.push(other);
                 }
             }
-            if rc.graph_hops >= 2 {
-                for k in self.store.kin_touching(&e.id).await? {
-                    let other = if k.from == e.id { k.to } else { k.from };
-                    for ep in self.store.episodes_mentioning(&other, 5).await? {
-                        if !hop2.contains(&ep.id) && !glist.contains(&ep.id) {
-                            hop2.push(ep.id);
-                        }
-                    }
+            for ep in self.store.episodes_mentioning_any(&neighbor_ids, 20).await? {
+                if !hop2.contains(&ep.id) && !glist.contains(&ep.id) {
+                    hop2.push(ep.id);
                 }
             }
         }
         let mut plist: Vec<String> = Vec::new();
-        if let Some(proj) = want_project {
-            for ep in self
-                .store
-                .list_episodes(
-                    &q.subject,
-                    &memory_store::EpisodeFilter {
-                        status: Some(EpisodeStatus::Active),
-                        project: Some(proj.to_string()),
-                        projects: project_names.clone(),
-                        limit: 20,
-                        newest_first: true,
-                        ..Default::default()
-                    },
-                )
-                .await?
-            {
-                if !plist.contains(&ep.id) {
-                    plist.push(ep.id);
-                }
+        for ep in proj_eps {
+            if !plist.contains(&ep.id) {
+                plist.push(ep.id);
             }
         }
         let fused = rrf(&[vlist.clone(), flist.clone(), glist.clone(), hop2.clone(), plist.clone()], rc.rrf_k);
 
-        // 2. Muat & saring temporal.
+        // 2. Muat, saring temporal & rerank lintas-sinyal (RRF + simbol kode + kemiripan semantik judul/konsep + konsensus jalur).
         let ids: Vec<String> = fused.iter().take(rc.candidate_k).map(|(id, _)| id.clone()).collect();
         let eps = self.store.episodes_by_ids(&ids).await?;
         let by_id: HashMap<&str, &Episode> = eps.iter().map(|e| (e.id.as_str(), e)).collect();
+        let ep_belongs_to_project = |e: &Episode, wp: &str| -> bool {
+            let nwp = normalize(wp);
+            plist.contains(&e.id)
+                || e.project.as_deref().is_some_and(|ep| {
+                    memory_core::project::same_project(ep, wp)
+                        || project_names.iter().any(|n| memory_core::project::same_project(ep, n))
+                })
+                || e.entity_ids.iter().any(|eid| proj_ent_ids.contains(eid))
+                || (e.project.is_none() && !nwp.is_empty() && normalize(&e.text).contains(&nwp))
+        };
         let mut hits: Vec<EpisodeHit> = Vec::new();
         for (id, score) in &fused {
             let Some(e) = by_id.get(id.as_str()) else { continue };
@@ -287,16 +337,24 @@ impl Retriever {
             if glist.contains(id) || hop2.contains(id) {
                 via.push("graph".to_string());
             }
-            let proj_match = want_project.is_some_and(|wp| {
-                let nwp = normalize(wp);
-                plist.contains(id)
-                    || e.project.as_deref().is_some_and(|ep| memory_core::project::same_project(ep, wp) || project_names.iter().any(|n| memory_core::project::same_project(ep, n)))
-                    || (!nwp.is_empty() && normalize(&e.text).contains(&nwp))
-            });
+            let proj_match = want_project.is_some_and(|wp| ep_belongs_to_project(e, wp));
             if proj_match {
                 via.push("project".to_string());
             }
-            let proj_boost = if proj_match { 1.35 } else { 1.0 };
+            let proj_boost = match want_project {
+                Some(_) if proj_match => 1.35,
+                Some(_) if e.project.is_some() => 0.65,
+                _ => 1.0,
+            };
+            // Reranker lintas-sinyal: konsensus multi-jalur + simbol kode/berkas + keselarasan judul/konsep
+            let consensus_boost = 1.0 + 0.08 * via.len().saturating_sub(1) as f32;
+            let mut touched_files = e.files_modified.clone();
+            touched_files.extend(e.files_read.iter().cloned());
+            let sym_bonus = code_symbol_bonus(&q.query, &e.title, &e.text, &touched_files);
+            let meta_text = format!("{} {} {}", e.title, e.summary, e.concepts.join(" "));
+            let align_bonus = 0.25 * semantic_text_similarity(&q.query, &meta_text);
+            let rerank_mult = consensus_boost * (1.0 + sym_bonus + align_bonus);
+
             hits.push(EpisodeHit {
                 id: e.id.clone(),
                 title: e.title.clone(),
@@ -308,14 +366,14 @@ impl Retriever {
                 project: e.project.clone(),
                 obs_type: e.obs_type.clone(),
                 retell_count: e.retell_count,
-                score: *score * (1.0 + 0.05 * e.retell_count.min(10) as f32) * (0.75 + 0.5 * e.importance) * proj_boost,
+                score: *score * (1.0 + 0.05 * e.retell_count.min(10) as f32) * (0.75 + 0.5 * e.importance) * proj_boost * rerank_mult,
                 via,
             });
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit);
 
-        // 3. Fakta: dari entitas yang disebut, diri subjek, entitas di episode teratas.
+        // 3. Fakta: ambil secara batch, skor hibrida (stem/trigram + bukti episode), dan isolasi per proyek bila diminta.
         let qtoks: HashSet<String> = tokens(&q.query).into_iter().filter(|w| w.chars().count() > 2).collect();
         let mut facts: Vec<(Fact, f32)> = Vec::new();
         if q.wants("fact") {
@@ -329,32 +387,85 @@ impl Retriever {
             }
             ent_ids.sort();
             ent_ids.dedup();
+            ent_ids.truncate(30);
+
             let top_eps: HashSet<&str> = hits.iter().map(|h| h.id.as_str()).collect();
             let named: HashSet<&str> = entities.iter().map(|e| e.id.as_str()).collect();
-            for eid in ent_ids.iter().take(30) {
-                for f in self.store.facts_for_entity(eid).await? {
-                    if matches!(f.status, FactStatus::Rejected | FactStatus::Quarantined) || facts.iter().any(|(x, _)| x.id == f.id) {
-                        continue;
-                    }
-                    let text = format!("{} {} {}", f.predicate, f.object_text, f.category.replace('_', " "));
-                    let mut s = overlap(&qtoks, &text);
-                    if f.evidence.iter().any(|e| top_eps.contains(e.episode_id.as_str())) {
-                        s += 0.5;
-                    }
-                    if named.contains(f.entity_id.as_str()) || f.object_entity.as_deref().is_some_and(|o| named.contains(o)) {
-                        s += 0.3;
-                    }
-                    if s >= 0.3 {
-                        facts.push((f, s));
-                    }
+            let raw_facts = self.store.facts_for_entities(&ent_ids).await?;
+
+            // Bila difilter berdasarkan proyek (`want_project`), muat episode bukti fakta yang belum ada di `by_id`
+            // dalam satu batch query agar kita dapat memverifikasi atribusi proyek tiap fakta secara akurat.
+            let mut ev_eps_map: HashMap<String, Episode> = eps.iter().map(|e| (e.id.clone(), e.clone())).collect();
+            if want_project.is_some() {
+                let mut missing_ev_ids: Vec<String> = raw_facts
+                    .iter()
+                    .flat_map(|f| f.evidence.iter().map(|ev| ev.episode_id.clone()))
+                    .filter(|id| !ev_eps_map.contains_key(id))
+                    .collect();
+                missing_ev_ids.sort();
+                missing_ev_ids.dedup();
+                for ep in self.store.episodes_by_ids(&missing_ev_ids).await? {
+                    ev_eps_map.insert(ep.id.clone(), ep);
+                }
+            }
+
+            let fact_belongs_to_project = |f: &Fact, wp: &str| -> bool {
+                if proj_ent_ids.contains(&f.entity_id)
+                    || f.object_entity.as_deref().is_some_and(|o| proj_ent_ids.contains(o))
+                {
+                    return true;
+                }
+                let nwp = normalize(wp);
+                if !nwp.is_empty()
+                    && (normalize(&f.object_text).contains(&nwp) || normalize(&f.predicate).contains(&nwp))
+                {
+                    return true;
+                }
+                f.evidence.iter().any(|ev| {
+                    plist.contains(&ev.episode_id)
+                        || ev_eps_map
+                            .get(&ev.episode_id)
+                            .is_some_and(|ep| ep_belongs_to_project(ep, wp))
+                })
+            };
+
+            for f in raw_facts {
+                if matches!(f.status, FactStatus::Rejected | FactStatus::Quarantined) || facts.iter().any(|(x, _)| x.id == f.id) {
+                    continue;
+                }
+                if let Some(wp) = want_project
+                    && !fact_belongs_to_project(&f, wp)
+                {
+                    continue;
+                }
+                let text = format!("{} {} {}", f.predicate, f.object_text, f.category.replace('_', " "));
+                let mut s = overlap(&qtoks, &text).max(semantic_text_similarity(&q.query, &text));
+                if f.evidence.iter().any(|e| top_eps.contains(e.episode_id.as_str())) {
+                    s += 0.5;
+                }
+                if named.contains(f.entity_id.as_str()) || f.object_entity.as_deref().is_some_and(|o| named.contains(o)) {
+                    s += 0.3;
+                }
+                if s >= 0.3 {
+                    facts.push((f, s));
                 }
             }
             facts.sort_by(|a, b| b.1.total_cmp(&a.1));
             facts.truncate(limit * 2);
-            // Seluruh riwayat kategori yang sama ikut agar perubahan terlihat utuh.
-            let cats: HashSet<(String, String)> = facts.iter().map(|(f, _)| (f.entity_id.clone(), f.category.clone())).collect();
+            // Riwayat kategori yang sama ikut untuk kategori eksklusif (atau saat tidak dibatasi proyek)
+            // agar perubahan masa lalu terlihat utuh tanpa membocorkan fakta non-eksklusif proyek lain.
+            let cats: HashSet<(String, String)> = facts
+                .iter()
+                .filter(|(f, _)| f.exclusive || f.supersedes.is_some() || f.superseded_by.is_some() || want_project.is_none())
+                .map(|(f, _)| (f.entity_id.clone(), f.category.clone()))
+                .collect();
             for (eid, cat) in cats {
                 for f in self.store.facts_in_category(&eid, &cat).await? {
+                    if let Some(wp) = want_project
+                        && !fact_belongs_to_project(&f, wp)
+                    {
+                        continue;
+                    }
                     if !facts.iter().any(|(x, _)| x.id == f.id) {
                         facts.push((f, 0.1));
                     }

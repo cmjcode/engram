@@ -47,6 +47,26 @@ fn llm(req: &ChatRequest) -> memory_llm::Result<String> {
                 out["entities"].as_array_mut().unwrap().push(json!({"name": "Pakde Karno", "kind": "person", "aliases": ["Karno"]}));
                 out["kin"] = json!([{"person": "Pakde Karno", "term": "pakde", "quote": "Pakde Karno"}]);
             }
+            if text.contains("SurrealDB") {
+                out["title"] = json!("Arsitektur penyimpanan LLM-MEMORY");
+                out["entities"].as_array_mut().unwrap().push(json!({"name": "LLM-MEMORY", "kind": "project"}));
+                out["facts"].as_array_mut().unwrap().push(json!({
+                    "subject": "Budi", "predicate": "menerapkan", "object": "SurrealDB embedded",
+                    "object_is_entity": false, "category": "arsitektur", "kind": "fact", "exclusive": false,
+                    "time": {"kind": "unknown"}, "quote": "memakai SurrealDB", "confidence": 0.9
+                }));
+                out["decisions"] = json!([{"situation": "Butuh database lokal", "action": "Memakai SurrealDB embedded", "reason": "Satu binary"}]);
+            }
+            if text.contains("Kandang__unit_id") {
+                out["title"] = json!("Filter kandang di tracker");
+                out["entities"].as_array_mut().unwrap().push(json!({"name": "FRONTEND/TRACKER", "kind": "project"}));
+                out["facts"].as_array_mut().unwrap().push(json!({
+                    "subject": "Budi", "predicate": "mendukung", "object": "filter Kandang__unit_id.in",
+                    "object_is_entity": false, "category": "arsitektur", "kind": "fact", "exclusive": false,
+                    "time": {"kind": "unknown"}, "quote": "filter Kandang__unit_id.in", "confidence": 0.9
+                }));
+                out["decisions"] = json!([{"situation": "Filter kandang lambat", "action": "Memakai Kandang__unit_id.in", "reason": "Query cepat"}]);
+            }
             Ok(out.to_string())
         }
         "ask" => Ok("Dulu Partai A, sekarang Partai B [ep:ngawur] dan [ep:REAL].".into()),
@@ -166,19 +186,43 @@ async fn project_context_and_project_scoped_recall() {
     assert_eq!(out.source.project.as_deref(), Some("LLM-MEMORY"));
     p.process_source(&out.source.id, None).await.unwrap();
 
-    let pc = r.project_context("budi", "LLM-MEMORY", Some("penyimpanan vektor")).await.unwrap();
+    // Proyek lain dengan kategori fakta yang sama ("arsitektur") pada entitas diri ("Budi")
+    // tidak boleh bocor ke project_context LLM-MEMORY.
+    let out_other = p
+        .ingest(IngestDoc {
+            subject: "budi".into(),
+            kind: SourceKind::AgentConversation,
+            title: "Diingat agent: antigravity:FRONTEND/TRACKER".into(),
+            text: "Pada project FRONTEND/TRACKER kita menerapkan arsitektur filter Kandang__unit_id.in untuk performa.".into(),
+            meta: json!({"source": "antigravity:FRONTEND/TRACKER"}),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    p.process_source(&out_other.source.id, None).await.unwrap();
+
+    let pc = r.project_context("budi", "LLM-MEMORY", Some("arsitektur penyimpanan vektor")).await.unwrap();
     assert!(pc.found);
     assert_eq!(pc.project, "LLM-MEMORY");
     assert!(!pc.episodes.is_empty());
     assert!(pc.context.contains("LLM-MEMORY"));
+    assert!(pc.context.contains("SurrealDB"), "{}", pc.context);
+    assert!(!pc.context.contains("Kandang__unit_id"), "Fakta proyek lain bocor ke LLM-MEMORY:\n{}", pc.context);
+    assert!(!pc.decisions.iter().any(|d| d.action.contains("Kandang__unit_id")));
+
+    let pc_other = r.project_context("budi", "FRONTEND/TRACKER", None).await.unwrap();
+    assert!(pc_other.found);
+    assert!(pc_other.context.contains("Kandang__unit_id"), "{}", pc_other.context);
+    assert!(!pc_other.context.contains("SurrealDB embedded"), "{}", pc_other.context);
 
     let q = RecallQuery {
         project: Some("LLM-MEMORY".into()),
-        ..RecallQuery::new("budi", "penyimpanan vektor")
+        ..RecallQuery::new("budi", "arsitektur menyimpan vektor")
     };
     let res = r.recall(&q).await.unwrap();
     assert!(res.found);
     assert!(res.episodes.iter().any(|e| e.project.as_deref() == Some("LLM-MEMORY")));
+    assert!(!res.facts.iter().any(|f| f.statement.contains("Kandang__unit_id")));
 }
 
 #[tokio::test]

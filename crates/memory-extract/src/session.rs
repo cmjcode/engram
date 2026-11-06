@@ -68,6 +68,11 @@ pub struct TurnEnd {
     pub user_text: Option<String>,
     /// Alasan: stop | pre_compact | session_end | turn
     pub reason: String,
+    /// Berkas yang dibaca/diubah selama giliran (diekstrak dari transkrip client tanpa hook per-tool).
+    #[serde(default)]
+    pub files_read: Vec<String>,
+    #[serde(default)]
+    pub files_modified: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,20 +90,27 @@ pub fn clean_session_id(raw: &str) -> String {
 }
 
 /// Berkas yang disentuh suatu pemanggilan tool, dari nama tool & inputnya.
+/// Mendukung konvensi nama tool Claude Code, Antigravity, Cursor, Windsurf, dan Codex.
 pub fn files_of_tool(tool_name: &str, input: &Value, root: Option<&std::path::Path>) -> (Vec<String>, Vec<String>) {
     let path_of = |keys: &[&str]| -> Vec<String> {
-        keys.iter()
-            .filter_map(|k| input[k].as_str())
-            .filter(|p| !p.trim().is_empty())
-            .map(|p| memory_core::project::relative_to_root(p.trim(), root))
-            .collect()
+        let mut out = Vec::new();
+        for k in keys {
+            if let Some(p) = input[k].as_str().map(str::trim).filter(|p| !p.is_empty()) {
+                let rel = memory_core::project::relative_to_root(p, root);
+                if !out.contains(&rel) {
+                    out.push(rel);
+                }
+            }
+        }
+        out
     };
     let name = tool_name.rsplit("__").next().unwrap_or(tool_name);
+    const FILE_KEYS: &[&str] = &["file_path", "notebook_path", "path", "Path", "TargetFile", "AbsolutePath", "file"];
     match name {
-        "Read" | "NotebookRead" => (path_of(&["file_path", "notebook_path", "path"]), vec![]),
-        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => (vec![], path_of(&["file_path", "notebook_path", "path"])),
-        "Glob" | "Grep" | "LS" => (vec![], vec![]),
-        _ => (path_of(&["file_path"]), vec![]),
+        "Read" | "NotebookRead" | "read_file" | "view_file" | "view_file_outline" | "view_code_item" => (path_of(FILE_KEYS), vec![]),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "edit_file" | "write_file" | "replace_file_content" | "multi_replace_file_content" | "create_file" | "apply_patch" => (vec![], path_of(FILE_KEYS)),
+        "Glob" | "Grep" | "LS" | "grep_search" | "find_by_name" | "list_dir" => (vec![], vec![]),
+        _ => (path_of(&["file_path", "Path"]), vec![]),
     }
 }
 
@@ -106,21 +118,26 @@ pub fn files_of_tool(tool_name: &str, input: &Value, root: Option<&std::path::Pa
 fn describe_input(tool_name: &str, input: &Value) -> String {
     let name = tool_name.rsplit("__").next().unwrap_or(tool_name);
     let s = |k: &str| input[k].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    let first_of = |keys: &[&str]| keys.iter().find_map(|k| s(k)).unwrap_or_default();
     let text = match name {
-        "Bash" => s("command").unwrap_or_default(),
-        "Read" | "NotebookRead" => s("file_path").or_else(|| s("notebook_path")).unwrap_or_default(),
-        "Edit" | "MultiEdit" => {
-            let f = s("file_path").unwrap_or_default();
-            match (s("old_string"), s("new_string")) {
-                (Some(o), Some(n)) => format!("{f}: '{}' -> '{}'", truncate_chars(&o, 160), truncate_chars(&n, 240)),
+        "Bash" | "run_command" | "exec_command" | "shell" => first_of(&["command", "CommandLine", "cmd"]),
+        "Read" | "NotebookRead" | "read_file" | "view_file" => first_of(&["file_path", "notebook_path", "path", "Path", "AbsolutePath"]),
+        "Edit" | "MultiEdit" | "edit_file" | "replace_file_content" => {
+            let f = first_of(&["file_path", "Path", "TargetFile", "path"]);
+            match (first_of(&["old_string", "Target", "TargetContent"]), first_of(&["new_string", "Replacement", "ReplacementContent"])) {
+                (o, n) if !o.is_empty() || !n.is_empty() => format!("{f}: '{}' -> '{}'", truncate_chars(&o, 160), truncate_chars(&n, 240)),
                 _ => f,
             }
         }
-        "Write" => format!("{} ({} karakter)", s("file_path").unwrap_or_default(), input["content"].as_str().map(|c| c.chars().count()).unwrap_or(0)),
-        "Grep" => format!("{} di {}", s("pattern").unwrap_or_default(), s("path").unwrap_or_else(|| ".".into())),
-        "Glob" => s("pattern").unwrap_or_default(),
-        "WebFetch" | "WebSearch" => s("url").or_else(|| s("query")).unwrap_or_default(),
-        "Agent" | "Task" => s("description").or_else(|| s("prompt")).unwrap_or_default(),
+        "Write" | "write_file" | "create_file" => {
+            let f = first_of(&["file_path", "Path", "TargetFile", "path"]);
+            let chars = input["content"].as_str().or_else(|| input["Content"].as_str()).map(|c| c.chars().count()).unwrap_or(0);
+            format!("{f} ({chars} karakter)")
+        }
+        "Grep" | "grep_search" => format!("{} di {}", first_of(&["pattern", "Query", "query"]), first_of(&["path", "SearchPath", "SearchDirectory"])),
+        "Glob" | "find_by_name" => first_of(&["pattern", "Pattern"]),
+        "WebFetch" | "WebSearch" | "search_web" => first_of(&["url", "query", "Query"]),
+        "Agent" | "Task" | "invoke_subagent" => first_of(&["description", "prompt", "Prompt", "Role"]),
         _ => match input {
             Value::Object(m) if !m.is_empty() => {
                 let parts: Vec<String> = m.iter().take(4).map(|(k, v)| format!("{k}={}", truncate_chars(&v.to_string().replace('\n', " "), 120))).collect();
@@ -330,13 +347,33 @@ impl Pipeline {
                 SpoolLine::Assistant { .. } => {}
             }
         }
+        let root = s.cwd.as_deref().map(std::path::Path::new).and_then(memory_core::project::detect_project).map(|p| p.root);
+        let git_info = s.cwd.as_deref().map(std::path::Path::new).and_then(memory_core::project::detect_git_info);
+        let git_tag = match &git_info {
+            Some(g) if g.branch.is_some() || g.commit.is_some() => {
+                format!(" | git: {}@{}", g.branch.as_deref().unwrap_or("detached"), g.commit.as_deref().unwrap_or("-"))
+            }
+            _ => String::new(),
+        };
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-        let mut doc = format!("[{} | proyek: {} | sesi: {} | prompt {} | {}]\n", s.client, s.project.as_deref().unwrap_or("-"), s.id, prompt_n, now);
+        let mut doc = format!("[{} | proyek: {}{} | sesi: {} | prompt {} | {}]\n", s.client, s.project.as_deref().unwrap_or("-"), git_tag, s.id, prompt_n, now);
         if !user.trim().is_empty() {
             doc.push_str(&format!("Pengguna: {}\n", truncate_chars(user.trim(), 4000)));
         }
         let mut files_read: Vec<String> = Vec::new();
         let mut files_modified: Vec<String> = Vec::new();
+        for f in &end.files_read {
+            let rel = memory_core::project::relative_to_root(f.trim(), root.as_deref());
+            if !rel.is_empty() && !files_read.contains(&rel) {
+                files_read.push(rel);
+            }
+        }
+        for f in &end.files_modified {
+            let rel = memory_core::project::relative_to_root(f.trim(), root.as_deref());
+            if !rel.is_empty() && !files_modified.contains(&rel) {
+                files_modified.push(rel);
+            }
+        }
         if !tools.is_empty() {
             doc.push_str(&format!("\nTool ({} pemanggilan):\n", tools.len()));
             // Bagi anggaran karakter rata per tool, minimal cukup untuk satu baris bermakna.
@@ -363,6 +400,13 @@ impl Pipeline {
                 }
                 doc.push('\n');
             }
+        } else if !files_modified.is_empty() || !files_read.is_empty() {
+            if !files_modified.is_empty() {
+                doc.push_str(&format!("\nBerkas diubah: {}\n", files_modified.join(", ")));
+            }
+            if !files_read.is_empty() {
+                doc.push_str(&format!("Berkas dibaca: {}\n", files_read.join(", ")));
+            }
         }
         if !assistant.trim().is_empty() {
             doc.push_str(&format!("\nAsisten: {}\n", truncate_chars(assistant.trim(), 6000)));
@@ -374,6 +418,8 @@ impl Pipeline {
             "client": s.client,
             "cwd": s.cwd,
             "project": s.project,
+            "git_branch": git_info.as_ref().and_then(|g| g.branch.as_deref()),
+            "git_commit": git_info.as_ref().and_then(|g| g.commit.as_deref()),
             "tool_uses": tools.len(),
             "files_read": files_read,
             "files_modified": files_modified,

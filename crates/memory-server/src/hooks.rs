@@ -141,6 +141,10 @@ pub struct HookIn {
     #[serde(default)]
     pub file_path: Option<String>,
     #[serde(default)]
+    pub files_read: Vec<String>,
+    #[serde(default)]
+    pub files_modified: Vec<String>,
+    #[serde(default)]
     pub max_chars: Option<usize>,
     /// Jumlah event yang masih tertahan di spool offline hook (dilaporkan hook).
     #[serde(default)]
@@ -208,7 +212,17 @@ async fn hook_event(State(st): State<AppState>, Path((client, event)): Path<(Str
                 "turn" => "turn".to_string(),
                 _ => b.reason.clone().unwrap_or_else(|| "stop".into()),
             };
-            let end = TurnEnd { session_id: sid()?, client: client.clone(), project: project.clone(), cwd: b.cwd.clone(), assistant_text: b.assistant_text.clone(), user_text: b.user_text.clone(), reason };
+            let end = TurnEnd {
+                session_id: sid()?,
+                client: client.clone(),
+                project: project.clone(),
+                cwd: b.cwd.clone(),
+                assistant_text: b.assistant_text.clone(),
+                user_text: b.user_text.clone(),
+                reason,
+                files_read: b.files_read.clone(),
+                files_modified: b.files_modified.clone(),
+            };
             if event == "turn" {
                 // Client tanpa hook per tool: prompt + jawaban dicatat sebagai satu giliran.
                 p.session_init(&subject, SessionInit { session_id: end.session_id.clone(), client, project, cwd: b.cwd.clone(), worktree: b.worktree.clone(), prompt: b.user_text.clone().unwrap_or_default() }).await?;

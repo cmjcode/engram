@@ -291,6 +291,136 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
+/// Stemmer ringan dwibahasa (Indonesia + Inggris) untuk pencocokan fakta & pelajaran
+/// tanpa bergantung pada kamus berat: mengupas imbuhan umum (`me-`/`pe-`/`ber-`/`di-`/`ter-`,
+/// `-kan`/`-an`/`-nya`/`-ing`/`-tion`/`-ed`) selama akar kata tersisa >= 4 karakter.
+pub fn stem_word(w: &str) -> String {
+    let mut s = w.trim().to_lowercase();
+    if s.chars().count() <= 4 {
+        return s;
+    }
+    // 1. Kupas partikel & kata ganti milik (-lah, -kah, -nya).
+    for part in ["lah", "kah", "nya"] {
+        if let Some(rest) = s.strip_suffix(part)
+            && rest.chars().count() >= 4
+        {
+            s = rest.to_string();
+            break;
+        }
+    }
+    // 2. Kupas awalan lebih dulu agar kata dasar berakhiran "-an" (seperti "simpan") tidak terpotong menjadi "simp".
+    if s.chars().count() > 5 {
+        for (pre, rep) in [
+            ("meny", "s"),
+            ("peny", "s"),
+            ("penge", ""),
+            ("meng", ""),
+            ("peng", ""),
+            ("mem", ""),
+            ("pem", ""),
+            ("men", ""),
+            ("pen", ""),
+            ("ber", ""),
+            ("ter", ""),
+            ("per", ""),
+            ("me", ""),
+            ("pe", ""),
+            ("di", ""),
+            ("ke", ""),
+        ] {
+            if let Some(rest) = s.strip_prefix(pre) {
+                let candidate = format!("{rep}{rest}");
+                if candidate.chars().count() >= 4 {
+                    s = candidate;
+                    break;
+                }
+            }
+        }
+    }
+    // 3. Kupas akhiran derivasional (-kan, -ing, -tion, -ions, -ed, -es) bila sisa >= 4 karakter,
+    //    dan "-an" hanya bila sisa >= 5 karakter (supaya kata dasar 6 huruf seperti "simpan" tetap utuh).
+    for (suf, min_rest) in [("kan", 4usize), ("tion", 4), ("ions", 4), ("ing", 4), ("ed", 4), ("es", 4), ("an", 5)] {
+        if let Some(rest) = s.strip_suffix(suf)
+            && rest.chars().count() >= min_rest
+        {
+            s = rest.to_string();
+            break;
+        }
+    }
+    s
+}
+
+/// Kemiripan teks hibrida (0..1) untuk pencarian fakta, pelajaran, dan reranking:
+/// menggabungkan kecocokan kata persis, kecocokan akar kata (`stem_word`),
+/// kecocokan prefix/substring simbol kode, dan Jaccard karakter 3-gram.
+pub fn semantic_text_similarity(query: &str, text: &str) -> f32 {
+    let q_toks: Vec<String> = tokens(query).into_iter().filter(|w| w.chars().count() > 2).collect();
+    if q_toks.is_empty() {
+        return 0.0;
+    }
+    let t_toks: Vec<String> = tokens(text).into_iter().filter(|w| w.chars().count() > 2).collect();
+    if t_toks.is_empty() {
+        return 0.0;
+    }
+    let t_set: std::collections::HashSet<&str> = t_toks.iter().map(String::as_str).collect();
+    let t_stems: std::collections::HashSet<String> = t_toks.iter().map(|w| stem_word(w)).collect();
+
+    let mut matched = 0.0f32;
+    for q in &q_toks {
+        if t_set.contains(q.as_str()) {
+            matched += 1.0;
+        } else {
+            let qs = stem_word(q);
+            if t_stems.contains(&qs) {
+                matched += 0.85;
+            } else if q.chars().count() >= 4
+                && t_toks.iter().any(|t| {
+                    t.chars().count() >= 4 && (t.starts_with(q.as_str()) || q.starts_with(t.as_str()) || t.contains(q.as_str()))
+                })
+            {
+                matched += 0.65;
+            }
+        }
+    }
+    let token_score = (matched / q_toks.len() as f32).clamp(0.0, 1.0);
+
+    // Bonus frasa berurutan atau simbol teknis persis
+    let nq = normalize(query);
+    let nt = normalize(text);
+    let phrase_bonus = if nq.chars().count() >= 5 && nt.contains(&nq) { 0.2 } else { 0.0 };
+
+    (token_score + phrase_bonus).clamp(0.0, 1.0)
+}
+
+/// Bonus kecocokan simbol kode / nama berkas / identifier teknis antara query dan kandidat.
+/// Sangat membantu coding agent ketika mencari nama fungsi, struct, path berkas, atau crate.
+pub fn code_symbol_bonus(query: &str, title: &str, text: &str, files: &[String]) -> f32 {
+    let mut bonus = 0.0f32;
+    let t_low = text.to_lowercase();
+    let title_low = title.to_lowercase();
+    for raw in query.split_whitespace() {
+        let clean = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '_' && c != '-' && c != '.' && c != ':');
+        if clean.len() < 3 {
+            continue;
+        }
+        let cl = clean.to_lowercase();
+        let is_sym = is_technical_token(clean) || clean.contains("::");
+        if is_sym {
+            if files.iter().any(|f| {
+                let fl = f.to_lowercase();
+                fl == cl || fl.ends_with(&format!("/{cl}")) || cl.ends_with(&fl)
+            }) {
+                bonus += 0.35;
+            } else if title_low.contains(&cl) {
+                bonus += 0.25;
+            } else if t_low.contains(&cl) {
+                bonus += 0.15;
+            }
+        }
+    }
+    bonus.min(0.6)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +493,13 @@ mod tests {
         ));
         // Human names are NOT blocked by technical filter:
         assert!(!are_distinct_technical_names("Pakde Karno", "Soekarno"));
+    }
+
+    #[test]
+    fn stem_and_semantic_similarity() {
+        assert_eq!(stem_word("menyimpan"), "simpan");
+        assert_eq!(stem_word("penyimpanan"), "simpan");
+        assert!(semantic_text_similarity("menyimpan konfigurasi", "penyimpanan konfigurasi lokal") >= 0.8);
+        assert!(code_symbol_bonus("cek bug di spawn_blocking dan watch.rs", "Optimasi", "memakai tokio::task::spawn_blocking", &["crates/memory-jobs/src/watch.rs".into()]) >= 0.4);
     }
 }

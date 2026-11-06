@@ -114,17 +114,48 @@ fn strip_images(v: Value, depth: usize) -> Value {
     }
 }
 
-/// Teks terakhir asisten & pengguna dari transkrip JSONL Claude Code.
-fn claude_transcript(path: &str) -> (Option<String>, Option<String>) {
-    let Ok(s) = std::fs::read_to_string(path) else { return (None, None) };
-    let mut user: Option<String> = None;
-    let mut assistant: Option<String> = None;
+/// Hasil ekstraksi satu giliran dari berkas transkrip agent.
+#[derive(Debug, Default)]
+struct TranscriptTurn {
+    user: Option<String>,
+    assistant: Option<String>,
+    files_read: Vec<String>,
+    files_modified: Vec<String>,
+}
+
+fn collect_tool_files(tool_name: &str, input: &Value, files_read: &mut Vec<String>, files_modified: &mut Vec<String>) {
+    let (fr, fm) = memory_extract::session::files_of_tool(tool_name, input, None);
+    for f in fr {
+        if !files_read.contains(&f) {
+            files_read.push(f);
+        }
+    }
+    for f in fm {
+        if !files_modified.contains(&f) {
+            files_modified.push(f);
+        }
+    }
+}
+
+/// Teks terakhir asisten, pengguna, dan berkas yang disentuh dari transkrip JSONL Claude Code.
+fn claude_transcript(path: &str) -> TranscriptTurn {
+    let Ok(s) = std::fs::read_to_string(path) else { return TranscriptTurn::default() };
+    let mut out = TranscriptTurn::default();
     for line in s.lines().rev() {
         if line.trim().is_empty() {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let content = &v["message"]["content"];
+        if let Value::Array(parts) = content {
+            for p in parts {
+                if p["type"] == "tool_use"
+                    && let Some(name) = p["name"].as_str()
+                {
+                    collect_tool_files(name, &p["input"], &mut out.files_read, &mut out.files_modified);
+                }
+            }
+        }
         let text = match content {
             Value::String(t) => t.trim().to_string(),
             Value::Array(parts) => {
@@ -139,37 +170,51 @@ fn claude_transcript(path: &str) -> (Option<String>, Option<String>) {
             continue;
         }
         match v["type"].as_str() {
-            Some("assistant") if assistant.is_none() => assistant = Some(text),
-            Some("user") if user.is_none() => user = Some(text),
+            Some("assistant") if out.assistant.is_none() => out.assistant = Some(text),
+            Some("user") if out.user.is_none() => out.user = Some(text),
             _ => {}
         }
-        if user.is_some() && assistant.is_some() {
+        if out.user.is_some() && out.assistant.is_some() {
             break;
         }
     }
-    (user, assistant)
+    out
 }
 
-/// Transkrip Antigravity: baris `USER_INPUT` / `PLANNER_RESPONSE`.
-fn antigravity_transcript(path: &str) -> (Option<String>, Option<String>) {
+/// Transkrip Antigravity: baris `USER_INPUT` / `PLANNER_RESPONSE` beserta `tool_calls`.
+fn antigravity_transcript(path: &str) -> TranscriptTurn {
     let p = Path::new(path);
     let full = p.with_file_name("transcript_full.jsonl");
     let target = if full.exists() { full } else { p.to_path_buf() };
-    let Ok(s) = std::fs::read_to_string(target) else { return (None, None) };
-    let (mut user, mut assistant) = (None, None);
+    let Ok(s) = std::fs::read_to_string(target) else { return TranscriptTurn::default() };
+    let mut out = TranscriptTurn::default();
     for line in s.lines().rev() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let content = v["content"].as_str().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+        if v["type"].as_str() == Some("PLANNER_RESPONSE")
+            && let Some(calls) = v["tool_calls"].as_array()
+        {
+            for tc in calls {
+                if let Some(name) = tc["name"].as_str().or_else(|| tc["tool_name"].as_str()) {
+                    let args = tc.get("arguments").or_else(|| tc.get("args")).or_else(|| tc.get("input")).unwrap_or(&Value::Null);
+                    let parsed_args = match args {
+                        Value::String(raw) => serde_json::from_str::<Value>(raw).unwrap_or(Value::Null),
+                        other => other.clone(),
+                    };
+                    collect_tool_files(name, &parsed_args, &mut out.files_read, &mut out.files_modified);
+                }
+            }
+        }
         match v["type"].as_str() {
-            Some("PLANNER_RESPONSE") if assistant.is_none() => assistant = content,
-            Some("USER_INPUT") if user.is_none() => user = content.map(|c| clean_user_text(&c)),
+            Some("PLANNER_RESPONSE") if out.assistant.is_none() && content.is_some() => out.assistant = content,
+            Some("USER_INPUT") if out.user.is_none() => out.user = content.map(|c| clean_user_text(&c)),
             _ => {}
         }
-        if user.is_some() && assistant.is_some() {
+        if out.user.is_some() && out.assistant.is_some() {
             break;
         }
     }
-    (user, assistant)
+    out
 }
 
 fn clean_user_text(raw: &str) -> String {
@@ -303,19 +348,25 @@ pub async fn run(config: &Path, client: &str, event: &str) -> anyhow::Result<()>
             ("observation", Duration::from_millis(2000))
         }
         "summarize" | "stop" | "pre-compact" | "session-end" | "turn" => {
-            let (user, assistant) = match client.as_str() {
-                "antigravity" => {
-                    let (u, a) = str_of(&payload, &["transcriptPath", "transcript_path"]).map(|p| antigravity_transcript(&p)).unwrap_or((None, None));
-                    (str_of(&payload, &["lastUserInput"]).map(|x| clean_user_text(&x)).or(u), a)
-                }
-                "gemini-cli" | "gemini" => (str_of(&payload, &["prompt"]).map(|x| clean_user_text(&x)), str_of(&payload, &["prompt_response", "response"])),
-                _ => {
-                    let (u, a) = str_of(&payload, &["transcript_path"]).map(|p| claude_transcript(&p)).unwrap_or((None, None));
-                    (u, str_of(&payload, &["last_assistant_message"]).or(a))
-                }
+            let mut turn = match client.as_str() {
+                "antigravity" => str_of(&payload, &["transcriptPath", "transcript_path"]).map(|p| antigravity_transcript(&p)).unwrap_or_default(),
+                "gemini-cli" | "gemini" => TranscriptTurn {
+                    user: str_of(&payload, &["prompt"]).map(|x| clean_user_text(&x)),
+                    assistant: str_of(&payload, &["prompt_response", "response"]),
+                    ..Default::default()
+                },
+                _ => str_of(&payload, &["transcript_path", "transcriptPath"]).map(|p| claude_transcript(&p)).unwrap_or_default(),
             };
-            body["assistant_text"] = json!(assistant.map(|a| a.chars().take(12_000).collect::<String>()));
-            body["user_text"] = json!(user.map(|u| u.chars().take(6_000).collect::<String>()));
+            if let Some(u) = str_of(&payload, &["lastUserInput", "prompt"]).map(|x| clean_user_text(&x)) {
+                turn.user = Some(u);
+            }
+            if let Some(a) = str_of(&payload, &["last_assistant_message", "response", "prompt_response"]) {
+                turn.assistant = Some(a);
+            }
+            body["assistant_text"] = json!(turn.assistant.map(|a| a.chars().take(12_000).collect::<String>()));
+            body["user_text"] = json!(turn.user.map(|u| u.chars().take(6_000).collect::<String>()));
+            body["files_read"] = json!(turn.files_read);
+            body["files_modified"] = json!(turn.files_modified);
             body["reason"] = json!(match event.as_str() {
                 "pre-compact" => "pre_compact",
                 "session-end" => "session_end",
@@ -326,15 +377,33 @@ pub async fn run(config: &Path, client: &str, event: &str) -> anyhow::Result<()>
                 "session-end" => "session-end",
                 "turn" => "turn",
                 // Client tanpa hook per tool mengirim giliran utuh.
-                _ if client == "antigravity" || client.starts_with("gemini") => "turn",
+                _ if client == "antigravity" || client.starts_with("gemini") || client == "cursor" || client == "windsurf" => "turn",
                 _ => "summarize",
             };
             (ev, Duration::from_millis(3000))
         }
         "file-context" | "pre-tool" => {
-            let tool = str_of(&payload, &["tool_name"]).unwrap_or_default();
-            let fp = str_of(&payload["tool_input"], &["file_path", "notebook_path", "path"]);
-            let Some(fp) = fp.filter(|_| matches!(tool.as_str(), "Read" | "Edit" | "MultiEdit" | "Write" | "NotebookEdit")) else {
+            let tool = str_of(&payload, &["tool_name", "toolName"]).unwrap_or_default();
+            let short = tool.rsplit("__").next().unwrap_or(&tool);
+            let fp = str_of(&payload["tool_input"], &["file_path", "notebook_path", "path", "Path", "TargetFile", "AbsolutePath"]);
+            let Some(fp) = fp.filter(|_| {
+                matches!(
+                    short,
+                    "Read"
+                        | "Edit"
+                        | "MultiEdit"
+                        | "Write"
+                        | "NotebookEdit"
+                        | "read_file"
+                        | "view_file"
+                        | "edit_file"
+                        | "write_file"
+                        | "replace_file_content"
+                        | "multi_replace_file_content"
+                        | "create_file"
+                        | "apply_patch"
+                )
+            }) else {
                 emit(fallback_out());
                 return Ok(());
             };
@@ -415,15 +484,42 @@ mod tests {
             &p,
             [
                 json!({"type": "user", "message": {"content": "perbaiki bug login"}}).to_string(),
-                json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}}).to_string(),
+                json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "src/auth.rs"}}]}}).to_string(),
                 json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": "isi"}]}}).to_string(),
+                json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": "src/auth.rs"}}]}}).to_string(),
                 json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Selesai: bug ada di token expiry."}]}}).to_string(),
             ]
             .join("\n"),
         )
         .unwrap();
-        let (u, a) = claude_transcript(p.to_str().unwrap());
-        assert_eq!(u.as_deref(), Some("perbaiki bug login"));
-        assert!(a.unwrap().contains("token expiry"));
+        let t = claude_transcript(p.to_str().unwrap());
+        assert_eq!(t.user.as_deref(), Some("perbaiki bug login"));
+        assert!(t.assistant.unwrap().contains("token expiry"));
+        assert_eq!(t.files_read, vec!["src/auth.rs".to_string()]);
+        assert_eq!(t.files_modified, vec!["src/auth.rs".to_string()]);
+    }
+
+    #[test]
+    fn parses_antigravity_transcript_with_tool_calls() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("transcript.jsonl");
+        std::fs::write(
+            &p,
+            [
+                json!({"type": "USER_INPUT", "content": "<USER_REQUEST>optimasi recall</USER_REQUEST>"}).to_string(),
+                json!({"type": "PLANNER_RESPONSE", "content": "", "tool_calls": [
+                    {"name": "read_file", "arguments": {"Path": "/repo/crates/memory-retrieve/src/recall.rs"}},
+                    {"name": "edit_file", "arguments": {"Path": "/repo/crates/memory-retrieve/src/recall.rs"}}
+                ]}).to_string(),
+                json!({"type": "PLANNER_RESPONSE", "content": "Recall sudah dioptimasi dengan batch query."}).to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let t = antigravity_transcript(p.to_str().unwrap());
+        assert_eq!(t.user.as_deref(), Some("optimasi recall"));
+        assert!(t.assistant.unwrap().contains("batch query"));
+        assert_eq!(t.files_read, vec!["/repo/crates/memory-retrieve/src/recall.rs".to_string()]);
+        assert_eq!(t.files_modified, vec!["/repo/crates/memory-retrieve/src/recall.rs".to_string()]);
     }
 }

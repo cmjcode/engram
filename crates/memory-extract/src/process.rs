@@ -337,8 +337,8 @@ impl Pipeline {
                 quotes: quotes.clone(),
                 obs_type: Some(obs_type),
                 concepts: o.concepts.clone(),
-                files_read: o.files_read.clone(),
-                files_modified: o.files_modified.clone(),
+                files_read: if o.files_read.is_empty() { meta_files("files_read") } else { o.files_read.clone() },
+                files_modified: if o.files_modified.is_empty() { meta_files("files_modified") } else { o.files_modified.clone() },
                 lessons: o.lessons.iter().filter(|l| l.quote.trim().is_empty() || quote_supported(&l.quote, &text)).cloned().collect(),
                 ..Default::default()
             };
