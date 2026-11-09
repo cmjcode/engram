@@ -3,7 +3,7 @@
   "name": "io.github.cmjcode/engram",
   "title": "engram",
   "description": "Bitemporal, evidence-backed, local-first long-term memory for coding agents: project context, recall, remember.",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "websiteUrl": "https://github.com/cmjcode/engram",
   "repository": {
     "url": "https://github.com/cmjcode/engram",
@@ -13,7 +13,7 @@
     {
       "registryType": "oci",
       "registryBaseUrl": "https://ghcr.io",
-      "identifier": "ghcr.io/cmjcode/engram:0.1.6",
+      "identifier": "ghcr.io/cmjcode/engram:0.2.0",
       "transport": {
         "type": "stdio"
       },
