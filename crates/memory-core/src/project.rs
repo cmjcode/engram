@@ -42,9 +42,86 @@ fn gitdir_of(file: &Path) -> Option<PathBuf> {
     Some(if p.is_relative() { file.parent()?.join(p) } else { p })
 }
 
-/// Deteksi proyek dari `cwd`. `None` bila `cwd` adalah home, root, atau folder konfigurasi agent.
+/// Folder sementara OS (`/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR`): bukan proyek.
+fn temp_root_of(p: &Path) -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders", "/var/tmp", "/private/var/tmp"].iter().map(PathBuf::from).collect();
+    if let Some(t) = std::env::var_os("TMPDIR").map(PathBuf::from).filter(|t| t.is_absolute() && t.components().count() > 2) {
+        roots.push(t);
+    }
+    roots.into_iter().find(|r| p.starts_with(r))
+}
+
+/// Nama folder versi Claude Code: setiap karakter non-alfanumerik menjadi `-`.
+fn claude_encode(name: &str) -> String {
+    name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// Uraikan nama folder proyek Claude Code (`-Users-budi-Documents-PROJECT-LLM-MEMORY`) kembali
+/// menjadi path yang ada di disk. Tanda `-` ambigu (pemisah path atau bagian nama), jadi
+/// setiap langkah mencocokkan isi folder yang benar-benar ada, utamakan nama terpanjang.
+pub fn decode_claude_project_dir(encoded: &str) -> Option<PathBuf> {
+    fn walk(dir: &Path, rest: &str, depth: usize) -> Option<PathBuf> {
+        if rest.is_empty() {
+            return Some(dir.to_path_buf());
+        }
+        if depth > 24 {
+            return None;
+        }
+        let mut names: Vec<String> = std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+        for n in names {
+            let enc = claude_encode(&n);
+            if enc.is_empty() {
+                continue;
+            }
+            let next = if rest == enc {
+                Some("")
+            } else {
+                rest.strip_prefix(&enc).and_then(|r| r.strip_prefix('-'))
+            };
+            if let Some(r) = next
+                && let Some(found) = walk(&dir.join(&n), r, depth + 1)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let rest = encoded.strip_prefix('-')?;
+    if rest.is_empty() {
+        return None;
+    }
+    walk(Path::new("/"), rest, 0)
+}
+
+/// Path di dalam scratchpad Claude Code (`<tmp>/claude-<uid>/<proyek-terenkode>/<sesi>/...`):
+/// kembalikan folder proyek asli yang dienkode di path itu.
+fn claude_scratch_origin(p: &Path, temp_root: &Path) -> Option<PathBuf> {
+    let rel = p.strip_prefix(temp_root).ok()?;
+    let mut comps = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string());
+    let mut first = comps.next()?;
+    // `/var/folders/xx/yyyy/T/claude-501/...`: lewati segmen acak sampai `claude-*`.
+    for _ in 0..4 {
+        if first.starts_with("claude") {
+            break;
+        }
+        first = comps.next()?;
+    }
+    if !first.starts_with("claude") {
+        return None;
+    }
+    let encoded = comps.next()?;
+    decode_claude_project_dir(&encoded).filter(|d| temp_root_of(d).is_none())
+}
+
+/// Deteksi proyek dari `cwd`. `None` bila `cwd` adalah home, root, folder konfigurasi agent,
+/// atau folder sementara OS. Scratchpad Claude Code dipetakan ke proyek asal sesinya.
 pub fn detect_project(cwd: &Path) -> Option<ProjectId> {
     let cwd = std::path::absolute(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    if let Some(tr) = temp_root_of(&cwd) {
+        let origin = claude_scratch_origin(&cwd, &tr)?;
+        return detect_project(&origin);
+    }
     let mut dir: Option<&Path> = Some(cwd.as_path());
     while let Some(d) = dir {
         if is_ignored_dir(d) {
@@ -425,9 +502,15 @@ pub fn remote_for_project<'a>(name: &str, cwds: impl IntoIterator<Item = &'a str
 mod tests {
     use super::*;
 
+    /// Direktori uji di luar folder temp OS (yang sengaja tidak dianggap proyek) dan di luar repo git.
+    fn proj_tempdir() -> tempfile::TempDir {
+        let base = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        tempfile::Builder::new().prefix(".engram-test-").tempdir_in(base).unwrap()
+    }
+
     #[test]
     fn plain_folder_and_git_root() {
-        let t = tempfile::tempdir().unwrap();
+        let t = proj_tempdir();
         let repo = t.path().join("api-master-sensor");
         std::fs::create_dir_all(repo.join("src").join("deep")).unwrap();
         // Tanpa .git: pakai basename cwd.
@@ -454,7 +537,7 @@ mod tests {
 
     #[test]
     fn worktree_maps_to_parent_repo() {
-        let t = tempfile::tempdir().unwrap();
+        let t = proj_tempdir();
         let repo = t.path().join("engram");
         std::fs::create_dir_all(repo.join(".git").join("worktrees").join("fitur-x")).unwrap();
         let wt = t.path().join("engram-fitur-x");
@@ -463,6 +546,27 @@ mod tests {
         let p = detect_project(&wt).unwrap();
         assert_eq!(p.name, "engram");
         assert_eq!(p.worktree.as_deref(), Some("engram-fitur-x"));
+    }
+
+    #[test]
+    fn temp_dirs_and_claude_scratchpads() {
+        // Folder temp OS bukan proyek (dulu tercatat sebagai proyek "T").
+        assert!(detect_project(Path::new("/private/var/folders/lz/b92rvr6129s/T")).is_none());
+        assert!(detect_project(Path::new("/tmp/acak")).is_none());
+
+        // Scratchpad Claude: nama proyek terenkode diuraikan kembali ke folder asli di disk.
+        let t = proj_tempdir();
+        let repo = t.path().join("LLM-MEMORY").join("inference_docker");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(t.path().join("LLM")).unwrap(); // tetangga yang menyesatkan
+        let abs = std::path::absolute(&repo).unwrap();
+        let enc = claude_encode(&abs.to_string_lossy());
+        assert_eq!(decode_claude_project_dir(&enc).as_deref(), Some(abs.as_path()));
+        let scratch = PathBuf::from(format!("/private/tmp/claude-503/{enc}/55964e9e-5f11/scratchpad/glands/v4"));
+        let p = detect_project(&scratch).expect("scratchpad dipetakan ke repo asal");
+        assert_eq!(p.name, "inference_docker");
+        assert!(p.from_git);
+        assert!(detect_project(Path::new("/private/tmp/claude-503/-tidak-ada-di-disk/s/scratchpad")).is_none());
     }
 
     #[test]
@@ -505,7 +609,7 @@ mod tests {
         assert_eq!(repo_web_url("github.com/org/repo").as_deref(), Some("https://github.com/org/repo"));
         assert_eq!(repo_web_url("engram"), None);
 
-        let t = tempfile::tempdir().unwrap();
+        let t = proj_tempdir();
         let repo = t.path().join("svc");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::create_dir_all(repo.join("src")).unwrap();

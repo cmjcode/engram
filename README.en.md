@@ -122,9 +122,28 @@ blocks, credentials in URLs) are replaced by `<redacted type='…'/>` before the
 
 ```sh
 engram import-claude-memory --all --apply   # Claude Code auto-memory (~/.claude/projects/*/memory/*.md) -> episodes, no LLM
-engram repo export <repo> [--project X]     # write <repo>/.engram/ (lessons, decisions, facts) to commit and share
-engram repo import <repo>                   # merge a teammate's bundle into this vault (never deletes)
+engram repo init [--hooks]                  # share project memory through this repo (.engram/), then commit the folder
+engram repo status                          # members, last import/export, installed git hooks
+engram repo export [--dry-run]              # write this device's project memory to .engram/members/<member>/
+engram repo import                          # merge teammates' memory into this vault (never deletes)
 ```
+
+### Team memory through the git repository
+
+Everyone with access to a repository shares its project memory: conventions and pitfalls, decisions and
+architecture facts. No server, account or extra cost; access follows repository access.
+
+- **Storage stays embedded SurrealDB** in each member's vault, so `recall` speed is unchanged. The
+  `.engram/` folder is only a transport of distilled text (no embeddings, no transcripts), typically tens
+  of KB per project.
+- **No merge conflicts**: each member, per device, only writes `.engram/members/<name>-<hash>/`, one JSON
+  file per record.
+- **Automatic**: when an agent session starts, engram merges `.engram/` changes (for example after
+  `git pull`) and writes the latest memory; `engram repo hooks` adds `post-merge`, `post-checkout` and
+  `pre-commit` git hooks. engram never runs `git commit` itself.
+- **Privacy**: only memory that belongs to that project; text containing secrets or `<private>` blocks
+  is skipped, and phrases listed under `exclude` in `.engram/config.toml` are never exported. Preview with
+  `engram repo export --dry-run`.
 
 ## Benchmark
 

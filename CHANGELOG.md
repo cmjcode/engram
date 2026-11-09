@@ -17,6 +17,31 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
   `.git/config` of the session folder), notes with Obsidian-style `[[Project]]` links plus backlinks,
   and group tags. The Projects page filters and groups by tag; `project_context` now reports the
   repository, tags and related projects to agents. API: `GET/PUT /api/subjects/{s}/projects/meta`.
+- `engram projects remap <plan.json> [--apply]`: move episodes, sessions, sources and lessons of old
+  data to the right project and add group tags; dry run by default, `null` clears a project.
+
+- Team memory through the git repository: everyone with access to a repo shares its project lessons,
+  decisions and facts via `<repo>/.engram/`. Bundle format v2 writes one canonical JSON file per record
+  under `members/<name>-<hash>/` per device, so git merges never conflict; re-exporting unchanged memory
+  writes nothing. Storage and search stay in embedded SurrealDB; the bundle carries distilled text only.
+- Imports are non-destructive: shared decisions become decision episodes, shared facts go through normal
+  reconciliation, and records withdrawn by their author arrive as tombstones (episode quarantined, fact
+  closed with `valid_to`). Imported memory is never re-exported.
+- Automation: SessionStart/SessionEnd queue `repo_import`/`repo_export` jobs, `engram repo hooks`
+  installs `post-merge`, `post-checkout` and `pre-commit` git hooks (`engram hook git repo-sync|repo-export`),
+  and the scheduler checks known repos (`[repo_share]` in `memory.toml`). engram never commits.
+- CLI `engram repo init [--hooks] | status | export [--dry-run] | import | hooks [--remove]`, routed
+  through the running server when there is one. UI panel "Memori tim lewat repo git" on the project
+  page; API `GET/POST /api/subjects/{s}/projects/share`.
+- `ingest_distilled` accepts known structure (`obs_type`, decisions, entities, facts, concepts) in
+  `meta.extraction`.
+
+### Fixed
+- Project attribution per git repository: a watched folder that holds many repos (e.g. `FOX/`,
+  `VOLTUNES/`) is now summarised per repo, each under its repo name with the folder label as group tag,
+  instead of one memory labelled with the folder name.
+- Claude Code scratchpad folders (`/tmp/claude-*/<encoded project>/...`) map back to the session's real
+  project, and OS temp folders (`/var/folders/.../T`) are no longer recorded as projects.
 
 ### Changed
 - `build.sh` no longer contains credentials; it reads them from the environment, `~/.config/engram/notarize.env`

@@ -1088,6 +1088,12 @@ a.tag-chip:hover { background: rgba(13, 148, 136, 0.22); }
 .tag-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
 .tag-filter button.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .group-head { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; font-size: 15px; }
+.proj-share { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.proj-share-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.proj-share-head code { overflow-wrap: anywhere; color: var(--muted); }
+.proj-share-members { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.proj-share-members li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.proj-share .bad { color: var(--bad); }
 .proj-meta { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
 .proj-meta-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .proj-meta-repo { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; overflow-wrap: anywhere; }

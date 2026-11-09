@@ -180,6 +180,79 @@ komputer lain digabungkan per record:
 Kata sandi disimpan di `<vault>/sync.key` (atau env `ENGRAM_SYNC_PASSPHRASE`). Lupa kata sandi
 berarti salinan di Drive tidak bisa dibuka; data lokal tetap aman.
 
+## Memori tim lewat repositori git
+
+Siapa pun yang punya akses ke sebuah repo dan memakai engram otomatis berbagi memori proyek itu:
+konvensi & jebakan, keputusan, dan fakta arsitektur. Hak akses mengikuti akses repo; tidak ada
+server atau akun tambahan.
+
+**Mengaktifkan (sekali per repo, oleh satu orang):**
+
+```sh
+cd /path/ke/repo
+engram repo export --dry-run   # lihat dulu apa yang akan dibagikan
+engram repo init --hooks       # tulis .engram/, ekspor memori proyek, pasang git hook lokal
+git add .engram && git commit -m "engram: memori proyek bersama"
+git push
+```
+
+Di UI: buka halaman proyek, panel **Memori tim lewat repo git**, tombol *Aktifkan*.
+
+**Anggota lain** cukup `git pull`. Saat sesi agent berikutnya dimulai di repo itu, engram
+menggabungkan memori rekan ke vault-nya dan, karena `.engram/config.toml` sudah ada di repo, ikut
+menulis memori proyeknya sendiri. Commit perubahan `.engram/` seperti berkas lain. Git hook bersifat
+lokal (tidak ikut di-clone); tiap anggota yang mau memasangnya menjalankan `engram repo hooks`.
+
+**Isi folder:**
+
+```text
+.engram/
+  config.toml           apa yang dibagikan (share, max_records, exclude); adanya berkas ini = repo aktif
+  manifest.json         format, versi, nama proyek
+  README.md             ringkasan untuk manusia (dibuat ulang)
+  members/<nama>-<hash>/
+    member.json         nama dari git config user.name, nama perangkat, hash isi (email tidak ditulis)
+    lessons/<id>.json   satu berkas per record
+    decisions/<id>.json
+    facts/<id>.json
+```
+
+**Cara kerjanya:**
+
+- Database tetap SurrealDB embedded di vault masing-masing; `.engram/` hanya teks terdistilasi
+  tanpa embedding dan tanpa transkrip. Embedding record rekan dihitung lokal saat digabung.
+- Tiap perangkat hanya menulis folder `members/` miliknya, sehingga `git merge` tidak konflik.
+  Ekspor tanpa perubahan tidak menulis apa pun (diff kosong).
+- Impor tidak menghapus. Keputusan rekan menjadi episode bertipe keputusan, faktanya masuk ke
+  fakta proyek lewat rekonsiliasi biasa, dan pelajaran yang sama dengan milik sendiri dihitung
+  sebagai penguatan. Memori hasil impor tidak diekspor ulang.
+- Record yang dicabut penulisnya ditulis sebagai tombstone (`"status": "withdrawn"`); penerima
+  mengkarantina episodenya dan menutup faktanya dengan `valid_to` (riwayat tetap ada).
+- Pemicu otomatis: awal dan akhir sesi agent, git hook `post-merge`/`post-checkout` (gabung) dan
+  `pre-commit` (tulis lalu `git add .engram`), serta pemeriksaan berkala. Semuanya hanya
+  mengantre job; engram tidak pernah `git commit`.
+- Bila aplikasi atau `engram serve` sedang berjalan, perintah `engram repo ...` dikirim lewat
+  server sehingga tidak berebut kunci database.
+
+**Privasi.** Hanya memori yang tercatat untuk proyek itu yang diekspor, bukan fakta pribadi. Teks
+yang memuat rahasia atau blok `<private>` dilewati utuh, path absolut repo dan home dipendekkan, dan
+record yang memuat frasa di `exclude` pada `.engram/config.toml` tidak diekspor. Hapus jenis dari
+`share` untuk berhenti membagikannya.
+
+**Pengaturan lokal** (`memory.toml`):
+
+```toml
+[repo_share]
+enabled = true          # false = tanpa impor/ekspor otomatis (perintah manual tetap jalan)
+auto_import = true      # gabungkan memori rekan saat sesi dimulai, setelah pull, dan berkala
+auto_export = true      # tulis memori perangkat ini untuk repo yang sudah aktif
+interval_minutes = 15   # pemeriksaan berkala repo yang dikenal (0 = hanya saat sesi/hook)
+```
+
+Status lokal (repo yang dikenal, record yang sudah digabung) ada di `<vault>/repo_share.json`.
+`engram repo status` menampilkan anggota, waktu impor/ekspor terakhir, dan hook terpasang;
+`engram repo hooks --remove` mencabut hook tanpa menyentuh isi hook milik Anda.
+
 ## Kedaulatan data
 
 - `engram export` membuat JSONL + Markdown yang bisa dibaca tanpa software ini.
@@ -255,5 +328,5 @@ untuk melihat blok yang akan disuntik; `ENGRAM_HOOK_DEBUG=1` membuat hook mencet
 **Import & berbagi.**
 - `engram import-claude-memory` (tanpa `--apply` hanya menampilkan) mengimpor auto-memory Claude Code
   langsung sebagai episode, tanpa LLM, karena isinya sudah terdistilasi.
-- `engram repo export <repo>` menulis `<repo>/.engram/` (manifest, `lessons.jsonl`, `decisions.jsonl`,
-  `facts.jsonl`, README); `engram repo import <repo>` menggabungkannya ke vault lain berdasarkan kunci stabil.
+- Memori proyek bisa dibagikan ke tim lewat repo git: lihat
+  [Memori tim lewat repositori git](#memori-tim-lewat-repositori-git).

@@ -163,6 +163,9 @@ impl Pipeline {
         let rel = Vault::source_rel_path(&hash, "md");
         self.vault.write_rel(&rel, text.as_bytes())?;
         let mut meta = if doc.meta.is_object() { doc.meta.clone() } else { json!({}) };
+        // Struktur yang sudah diketahui pengirim (keputusan, fakta, jenis observasi; mis. dari
+        // bundel repo rekan tim) diteruskan apa adanya ke commit episode, tidak disimpan di meta.
+        let known: ExtractionOut = meta.as_object_mut().and_then(|m| m.remove("extraction")).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         meta["distilled"] = json!(true);
         let now = now_rfc3339();
         let source = Source {
@@ -188,7 +191,7 @@ impl Pipeline {
         self.store.put_source(&source).await?;
         let ctx = SourceCtx::from(&source);
         let seg = Segment { start: 0, end: 0, text: text.clone(), topic: doc.title.clone(), about_subject: true, speaker: None, significance: Some(0.8), date: None };
-        let ext = ExtractionOut { title: doc.title.clone(), summary: if doc.summary.is_empty() { memory_core::text::truncate_chars(&text, 300) } else { doc.summary.clone() }, ..Default::default() };
+        let ext = ExtractionOut { title: doc.title.clone(), summary: if doc.summary.is_empty() { memory_core::text::truncate_chars(&text, 300) } else { doc.summary.clone() }, ..known };
         let ep_id = crate::det_id(&[&source.id, "ep", "0", "0"]);
         let lock = self.subject_lock(&subject.id).await;
         let _g = lock.lock().await;

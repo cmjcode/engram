@@ -22,6 +22,7 @@ pub struct MemoryConfig {
     pub backup: BackupConfig,
     pub privacy: PrivacyConfig,
     pub inject: InjectConfig,
+    pub repo_share: RepoShareConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,6 +350,27 @@ pub struct InjectConfig {
 impl Default for InjectConfig {
     fn default() -> Self {
         Self { enabled: true, max_chars: 9500, observations: 30, sessions: 3, include_all_clients: true }
+    }
+}
+
+/// Berbagi memori proyek lewat repositori git (`<repo>/.engram/`): siapa pun yang punya
+/// akses ke repo ikut berbagi pelajaran, keputusan, dan fakta proyek.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepoShareConfig {
+    /// Saklar utama; `false` = tidak ada impor/ekspor otomatis (perintah manual tetap jalan).
+    pub enabled: bool,
+    /// Gabungkan bundel rekan tim saat sesi agent dimulai, setelah `git pull`, dan berkala.
+    pub auto_import: bool,
+    /// Tulis bundel perangkat ini untuk repo yang sudah diaktifkan (`engram repo init`).
+    pub auto_export: bool,
+    /// Interval cek berkala per repo yang dikenal (menit, 0 = hanya saat sesi/hook git).
+    pub interval_minutes: u64,
+}
+
+impl Default for RepoShareConfig {
+    fn default() -> Self {
+        Self { enabled: true, auto_import: true, auto_export: true, interval_minutes: 15 }
     }
 }
 

@@ -177,6 +177,8 @@ pub struct WatchedFolder {
     /// ID `Source` terakhir yang di-ingest ke memori dari folder ini.
     pub last_source_id: Option<String>,
     pub last_error: Option<String>,
+    /// Ringkasan konteks terakhir per repo git di dalam folder (kunci: path relatif repo).
+    pub repo_summaries: BTreeMap<String, String>,
 }
 
 impl Default for WatchedFolder {
@@ -196,6 +198,7 @@ impl Default for WatchedFolder {
             last_summary: None,
             last_source_id: None,
             last_error: None,
+            repo_summaries: BTreeMap::new(),
         }
     }
 }
@@ -248,6 +251,9 @@ pub struct FolderScanOutcome {
     pub source_id: Option<String>,
     pub job_id: Option<String>,
     pub error: Option<String>,
+    /// Proyek (repo) yang memorinya diperbarui pada pemindaian ini.
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 /// Status keseluruhan pemantau folder penting untuk UI & CLI.
@@ -463,16 +469,62 @@ pub fn scan_folder_tree(root: &Path, min_age_secs: u64) -> Result<TreeSnapshot> 
     let mut snap = TreeSnapshot::default();
     let now = SystemTime::now();
     walk_dir(root, root, min_age_secs, now, &mut snap)?;
+    snap.tree_hash = tree_hash_of(&snap.files);
+    Ok(snap)
+}
 
+fn tree_hash_of(files: &BTreeMap<String, WatchedFile>) -> String {
     let mut hasher = blake3::Hasher::new();
-    for (rel, f) in &snap.files {
+    for (rel, f) in files {
         hasher.update(rel.as_bytes());
         hasher.update(b"\0");
         hasher.update(f.hash.as_bytes());
         hasher.update(b"\n");
     }
-    snap.tree_hash = hasher.finalize().to_hex().to_string();
-    Ok(snap)
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Repo git di dalam `root` (path relatif, `""` bila `root` sendiri repo), dicari sampai
+/// kedalaman terbatas tanpa masuk ke folder yang diabaikan pemindai.
+pub fn find_repo_roots(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, cur: &Path, depth: usize, out: &mut Vec<String>) {
+        if cur.join(".git").exists()
+            && let Ok(rel) = cur.strip_prefix(root)
+        {
+            out.push(rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"));
+        }
+        if depth >= 6 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(cur) else { return };
+        let mut dirs: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| !is_ignored_dir(&e.file_name().to_string_lossy()))
+            .map(|e| e.path())
+            .collect();
+        dirs.sort();
+        for d in dirs {
+            walk(root, &d, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, 0, &mut out);
+    out
+}
+
+/// Repo terdalam yang memuat berkas `rel` (`""` = di luar repo mana pun / akar folder).
+fn unit_of<'a>(rel: &str, roots: &'a [String]) -> &'a str {
+    roots
+        .iter()
+        .filter(|r| !r.is_empty() && (rel == r.as_str() || rel.starts_with(&format!("{r}/"))))
+        .max_by_key(|r| r.len())
+        .map(String::as_str)
+        .unwrap_or("")
+}
+
+fn strip_unit<'a>(rel: &'a str, unit: &str) -> &'a str {
+    if unit.is_empty() { rel } else { rel.strip_prefix(unit).map(|r| r.trim_start_matches('/')).unwrap_or(rel) }
 }
 
 fn walk_dir(
@@ -901,61 +953,174 @@ async fn scan_one_locked(
     outcome.removed = diff.removed.len();
 
     let subject = rt.pipeline.ensure_subject(&folder.subject, None).await?;
-    let context_text = match run_agy_context(&subject.name, &folder, &snap, &diff).await {
-        Ok(t) => t,
-        Err(e) => {
-            folder.last_error = Some(e.to_string());
-            update_folder(&rt.vault, &folder)?;
-            outcome.error = Some(e.to_string());
-            return Ok(outcome);
-        }
+
+    // Satu unit memori per repo git di dalam folder; berkas di luar repo mana pun menjadi unit
+    // akar (`""`) bernama label folder. Folder yang memuat banyak repo (mis. FOX/, VOLTUNES/)
+    // dengan begitu terpecah per repo, dan label folder dicatat sebagai tag grup repo-repo itu.
+    let folder_path = folder.path.clone();
+    let mut roots = tokio::task::spawn_blocking(move || find_repo_roots(&folder_path))
+        .await
+        .map_err(|e| JobError::Invalid(format!("scan task gagal: {e}")))?;
+    if roots.is_empty() || !roots.iter().any(String::is_empty) {
+        roots.push(String::new());
+    }
+    let root_project = memory_core::project::detect_project(&folder.path)
+        .filter(|p| p.from_git)
+        .map(|p| p.name)
+        .unwrap_or_else(|| folder.label.clone());
+    let multi_repo = roots.iter().any(|r| !r.is_empty());
+
+    let mut units: BTreeMap<String, (TreeSnapshot, TreeDiff)> = BTreeMap::new();
+    for (rel, f) in &snap.files {
+        let u = unit_of(rel, &roots);
+        units.entry(u.to_string()).or_default().0.files.insert(strip_unit(rel, u).to_string(), f.clone());
+    }
+    let mut push_diff = |rel: &String, pick: fn(&mut TreeDiff) -> &mut Vec<String>| {
+        let u = unit_of(rel, &roots).to_string();
+        let entry = units.entry(u.clone()).or_default();
+        pick(&mut entry.1).push(strip_unit(rel, &u).to_string());
     };
+    for r in &diff.added {
+        push_diff(r, |d| &mut d.added);
+    }
+    for r in &diff.modified {
+        push_diff(r, |d| &mut d.modified);
+    }
+    for r in &diff.removed {
+        push_diff(r, |d| &mut d.removed);
+    }
+    for (u, (sub_snap, sub_diff)) in units.iter_mut() {
+        sub_snap.tree_hash = tree_hash_of(&sub_snap.files);
+        let seen_before = if u.is_empty() { folder.last_summary.is_some() } else { folder.repo_summaries.contains_key(u) };
+        // Repo yang belum pernah diringkas sendiri dibaca utuh.
+        sub_diff.initial = diff.initial || (multi_repo && !seen_before && !sub_snap.files.is_empty());
+    }
 
     let now_iso = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
-    let title = if diff.initial {
-        format!("Folder penting: {} (konteks menyeluruh)", folder.label)
-    } else {
-        format!("Folder penting: {} (pembaruan {})", folder.label, stamp)
-    };
+    let mut failed_units: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for (u, (sub_snap, sub_diff)) in &units {
+        // Unit tanpa berkas (mis. repo yang sudah dihapus) tidak punya apa pun untuk diringkas.
+        if !sub_diff.has_changes() || sub_snap.files.is_empty() {
+            continue;
+        }
+        let project = if u.is_empty() {
+            root_project.clone()
+        } else {
+            u.rsplit('/').next().unwrap_or(u).to_string()
+        };
+        let unit_folder = WatchedFolder {
+            path: folder.path.join(u),
+            label: if u.is_empty() { folder.label.clone() } else { project.clone() },
+            last_summary: if u.is_empty() { folder.last_summary.clone() } else { folder.repo_summaries.get(u).cloned() },
+            ..folder.clone()
+        };
+        let context_text = match run_agy_context(&subject.name, &unit_folder, sub_snap, sub_diff).await {
+            Ok(t) => t,
+            Err(e) => {
+                failed_units.push(u.clone());
+                errors.push(if u.is_empty() { e.to_string() } else { format!("{u}: {e}") });
+                continue;
+            }
+        };
+        let title = match (u.is_empty(), sub_diff.initial) {
+            (true, true) => format!("Folder penting: {} (konteks menyeluruh)", folder.label),
+            (true, false) => format!("Folder penting: {} (pembaruan {})", folder.label, stamp),
+            (false, true) => format!("Repo {project} di folder penting {} (konteks menyeluruh)", folder.label),
+            (false, false) => format!("Repo {project} di folder penting {} (pembaruan {})", folder.label, stamp),
+        };
+        let ingest_res = rt
+            .pipeline
+            .ingest(IngestDoc {
+                subject: folder.subject.clone(),
+                kind: SourceKind::Document,
+                title,
+                text: context_text.clone(),
+                original_name: Some(project.clone()),
+                occurred_from: Some(now_iso.clone()),
+                project: Some(project.clone()),
+                meta: json!({
+                    "via": "watched_folder",
+                    "extractor": "agy_cli",
+                    "folder_id": folder.id,
+                    "folder_label": folder.label,
+                    "folder_path": folder.path,
+                    "repo_path": u,
+                    "scan_kind": if sub_diff.initial { "initial" } else { "update" },
+                    "added": sub_diff.added,
+                    "modified": sub_diff.modified,
+                    "removed": sub_diff.removed,
+                    "tree_hash": sub_snap.tree_hash,
+                }),
+                ..Default::default()
+            })
+            .await?;
+        if u.is_empty() {
+            folder.last_summary = Some(truncate_chars(&context_text, 4000));
+        } else {
+            folder.repo_summaries.insert(u.clone(), truncate_chars(&context_text, 4000));
+            tag_project_group(rt, &folder.subject, &project, &folder.label).await;
+        }
+        outcome.projects.push(project);
+        outcome.source_id.get_or_insert_with(|| ingest_res.source.id.clone());
+        if outcome.job_id.is_none() {
+            outcome.job_id = ingest_res.job_id.clone();
+        }
+        folder.last_source_id = Some(ingest_res.source.id);
+    }
 
-    let ingest_res = rt
-        .pipeline
-        .ingest(IngestDoc {
-            subject: folder.subject.clone(),
-            kind: SourceKind::Document,
-            title,
-            text: context_text.clone(),
-            original_name: Some(folder.label.clone()),
-            occurred_from: Some(now_iso),
-            project: Some(folder.label.clone()),
-            meta: json!({
-                "via": "watched_folder",
-                "extractor": "agy_cli",
-                "folder_id": folder.id,
-                "folder_label": folder.label,
-                "folder_path": folder.path,
-                "scan_kind": if diff.initial { "initial" } else { "update" },
-                "added": diff.added,
-                "modified": diff.modified,
-                "removed": diff.removed,
-                "tree_hash": snap.tree_hash,
-            }),
-            ..Default::default()
-        })
-        .await?;
-
-    folder.last_change_at = Some(now_rfc3339());
-    folder.last_tree_hash = Some(snap.tree_hash);
-    folder.files = snap.files;
-    folder.last_summary = Some(truncate_chars(&context_text, 4000));
-    folder.last_source_id = Some(ingest_res.source.id.clone());
-    folder.last_error = None;
+    // Unit yang gagal mempertahankan keadaan berkas lamanya agar dicoba lagi di putaran berikut.
+    let mut files = snap.files.clone();
+    if !failed_units.is_empty() {
+        files.retain(|rel, _| !failed_units.iter().any(|u| unit_of(rel, &roots) == u));
+        for (rel, f) in &folder.files {
+            if failed_units.iter().any(|u| unit_of(rel, &roots) == u) {
+                files.insert(rel.clone(), f.clone());
+            }
+        }
+    }
+    if !outcome.projects.is_empty() {
+        folder.last_change_at = Some(now_rfc3339());
+    }
+    folder.last_tree_hash = Some(if failed_units.is_empty() { snap.tree_hash } else { tree_hash_of(&files) });
+    folder.files = files;
+    folder.last_error = (!errors.is_empty()).then(|| errors.join("; "));
     update_folder(&rt.vault, &folder)?;
-
-    outcome.source_id = Some(ingest_res.source.id);
-    outcome.job_id = ingest_res.job_id;
+    outcome.error = folder.last_error.clone();
     Ok(outcome)
+}
+
+/// Catat label folder penting sebagai tag grup di metadata proyek repo (tanpa menimpa isian lain).
+async fn tag_project_group(rt: &Runtime, subject: &str, project: &str, group: &str) {
+    let Some(tag) = memory_core::project::normalize_tag(group) else { return };
+    if memory_core::project::same_project(project, group) {
+        return;
+    }
+    let prev = match rt.store.get_project_meta(subject, project).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(project, error = %e, "gagal membaca metadata proyek");
+            return;
+        }
+    };
+    if prev.as_ref().is_some_and(|m| m.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag))) {
+        return;
+    }
+    let mut tags = prev.as_ref().map(|m| m.tags.clone()).unwrap_or_default();
+    tags.push(tag);
+    let name = prev.as_ref().map(|m| m.project.clone()).unwrap_or_else(|| project.to_string());
+    let m = memory_core::model::ProjectMeta::build(
+        subject,
+        &name,
+        prev.as_ref().and_then(|m| m.repo.as_deref()),
+        prev.as_ref().map(|m| m.notes.as_str()).unwrap_or(""),
+        &tags,
+        prev.as_ref(),
+    );
+    if let Err(e) = rt.store.put_project_meta(&m).await {
+        tracing::warn!(project, error = %e, "gagal menyimpan tag grup proyek");
+    }
 }
 
 /// Pindai semua folder penting yang aktif (opsional disaring per subjek).
@@ -1654,6 +1819,70 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert!(remove_folder(&rt.vault, &f.id).unwrap());
         assert!(list_folders(&rt.vault, Some("budi")).is_empty());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn watch_folder_with_many_repos_is_split_per_repo() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env_guard = ENV_LOCK.lock().await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let vault_dir = tmp.path().join("vault");
+        let group = tmp.path().join("VOLTUNES");
+        for (repo, file) in [("BACKEND/api-trans-panen", "main.go"), ("BACKEND/api-master-kandang", "main.go"), ("FRONTEND/chick-mobile-app", "pubspec.yaml")] {
+            std::fs::create_dir_all(group.join(repo).join(".git")).unwrap();
+            std::fs::write(group.join(repo).join(".git/config"), "[core]").unwrap();
+            std::fs::write(group.join(repo).join(file), format!("// {repo}")).unwrap();
+        }
+        std::fs::create_dir_all(group.join("AI")).unwrap();
+        std::fs::write(group.join("AI/catatan.md"), "Catatan riset lintas repo.").unwrap();
+
+        // agy tiruan menulis folder kerjanya, sehingga tiap unit terbukti dipanggil di repo-nya sendiri.
+        let fake_agy = tmp.path().join("fake-agy");
+        std::fs::write(&fake_agy, "#!/bin/sh\necho \"Budi mengerjakan $(basename \"$PWD\") dengan Go dan Flutter sebagai bagian ekosistem.\"\n").unwrap();
+        std::fs::set_permissions(&fake_agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: hanya di unit test ini (dijaga ENV_LOCK).
+        unsafe {
+            std::env::set_var("ENGRAM_AGY_BIN", &fake_agy);
+        }
+
+        let mut cfg = MemoryConfig::for_tests(64);
+        cfg.vault.path = vault_dir.clone();
+        let store = Store::memory(64, &cfg.index).await.unwrap();
+        let vault = Vault::new(&vault_dir);
+        vault.init().unwrap();
+        let rt = Runtime::from_parts(cfg, store, Arc::new(ScriptedLlm::new(|_| Ok("{}".into()))), Arc::new(HashEmbedder::new(64)), vault);
+
+        let f = add_folder(&rt.vault, "budi", &group, Some("VOLTUNES")).unwrap();
+        let out = scan_one(&rt, &f.id, false, 0).await.unwrap();
+        assert!(out.error.is_none(), "{out:?}");
+        let mut projects = out.projects.clone();
+        projects.sort();
+        assert_eq!(projects, vec!["VOLTUNES", "api-master-kandang", "api-trans-panen", "chick-mobile-app"]);
+
+        let sources = rt.store.list_sources("budi", None, 20, 0).await.unwrap();
+        let panen = sources.iter().find(|s| s.project.as_deref() == Some("api-trans-panen")).expect("sumber per repo");
+        assert!(panen.title.contains("Repo api-trans-panen"), "{}", panen.title);
+        let meta = rt.store.get_project_meta("budi", "api-trans-panen").await.unwrap().expect("tag grup tercatat");
+        assert_eq!(meta.tags, vec!["VOLTUNES".to_string()]);
+        assert!(rt.store.get_project_meta("budi", "VOLTUNES").await.unwrap().is_none(), "unit akar tidak memberi tag ke dirinya sendiri");
+
+        // Perubahan di satu repo hanya memperbarui repo itu.
+        std::fs::write(group.join("BACKEND/api-trans-panen/panen.go"), "// harga kontrak").unwrap();
+        let out2 = scan_one(&rt, &f.id, false, 0).await.unwrap();
+        assert_eq!(out2.projects, vec!["api-trans-panen".to_string()]);
+        assert_eq!(out2.added, 1);
+
+        // agy gagal: keadaan berkas repo itu tidak maju, jadi dicoba lagi pada putaran berikutnya.
+        std::fs::write(group.join("BACKEND/api-master-kandang/stok.go"), "// stok").unwrap();
+        std::fs::write(&fake_agy, "#!/bin/sh\necho gagal >&2\nexit 1\n").unwrap();
+        let out3 = scan_one(&rt, &f.id, false, 0).await.unwrap();
+        assert!(out3.error.as_deref().is_some_and(|e| e.contains("api-master-kandang")), "{out3:?}");
+        std::fs::write(&fake_agy, "#!/bin/sh\necho \"Budi menambah modul stok di api-master-kandang.\"\n").unwrap();
+        let out4 = scan_one(&rt, &f.id, false, 0).await.unwrap();
+        assert_eq!(out4.projects, vec!["api-master-kandang".to_string()]);
+        assert!(out4.error.is_none());
     }
 
     #[tokio::test]

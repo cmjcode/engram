@@ -613,6 +613,55 @@ async function projectMetaPanel(box, name) {
   show();
 }
 
+// Panel memori tim lewat repo git (.engram/): status anggota, impor/ekspor, hook git.
+async function projectSharePanel(box, name) {
+  let d;
+  try { d = await api(`/api/subjects/${S()}/projects/share?project=${encodeURIComponent(name)}`); }
+  catch (e) { box.innerHTML = `<div class="card small muted">Status memori tim tidak termuat: ${esc(e.message)}</div>`; return; }
+  const act = async (action, extra = {}) => {
+    try {
+      const res = await api(`/api/subjects/${S()}/projects/share`, { method: "POST", json: { project: name, action, ...extra } });
+      const r = res.result || {};
+      const ex = r.export || r;
+      if (action === "init" || action === "export") toast(ex.unchanged ? "Memori proyek tidak berubah" : "Ditulis ke .engram/. Commit folder itu agar rekan tim menerimanya");
+      else if (action === "import") toast(r.members && r.members.length ? `Digabung dari ${r.members.length} anggota` : "Tidak ada memori baru dari rekan tim");
+      else toast(action === "hooks" ? "Hook git terpasang" : "Hook git dicabut");
+      await projectSharePanel(box, name);
+    } catch (err) { toast(err.message); }
+  };
+  if (!d.found) {
+    box.innerHTML = `<div class="card proj-share">
+      <div class="proj-share-head">${icon("users")} <b>Memori tim lewat repo git</b></div>
+      <p class="small muted">Siapa pun yang punya akses ke repo proyek ini bisa berbagi konvensi, keputusan, dan fakta proyek lewat folder <code>.engram/</code>. Folder repo belum diketahui; mulai satu sesi agent di repo itu, atau isi path-nya.</p>
+      <form class="row" id="share-root"><input type="text" id="share-path" placeholder="/path/ke/repo" autocomplete="off" spellcheck="false"><button class="primary" type="submit">${icon("check")} Aktifkan</button></form>
+    </div>`;
+    $("#share-root", box).onsubmit = (e) => { e.preventDefault(); const root = $("#share-path", box).value.trim(); if (root) act("init", { root }); };
+    return;
+  }
+  const s = d.status;
+  const counts = (c) => `${c.lessons || 0} pelajaran · ${c.decisions || 0} keputusan · ${c.facts || 0} fakta`;
+  const state = s.active
+    ? `<span class="badge now">aktif</span> Memori proyek perangkat ini ditulis ke <code>.engram/</code>; rekan tim menerimanya setelah di-commit dan di-pull.`
+    : s.bundle
+      ? `<span class="badge warn">menerima</span> Repo berisi memori tim yang otomatis digabung. Aktifkan agar perangkat ini ikut menulis.`
+      : `<span class="badge">belum aktif</span> Aktifkan untuk mulai berbagi memori proyek dengan siapa pun yang punya akses ke repo ini.`;
+  box.innerHTML = `<div class="card proj-share">
+    <div class="proj-share-head">${icon("users")} <b>Memori tim lewat repo git</b> <code class="small" title="${esc(s.root)}">${esc(s.root)}</code></div>
+    <div class="small">${state}</div>
+    ${s.members.length ? `<ul class="proj-share-members">${s.members.map((m) => `<li><b>${esc(m.name)}</b> <span class="muted">${esc(m.device || "")}${m.own ? " · perangkat ini" : ""}</span><span class="small muted">${counts(m.counts || {})}</span></li>`).join("")}</ul>` : ""}
+    <div class="small muted">Impor terakhir: ${s.last_import_at ? esc(ago(s.last_import_at)) : "belum"} · ekspor terakhir: ${s.last_export_at ? esc(ago(s.last_export_at)) : "belum"} · ${s.imported} record rekan tergabung · hook git: ${s.hooks.length ? esc(s.hooks.join(", ")) : "tidak ada"}</div>
+    ${s.pending_import ? `<div class="small">${icon("refresh")} Ada perubahan <code>.engram/</code> yang belum digabung.</div>` : ""}
+    ${s.last_error ? `<div class="small bad">${icon("alert")} ${esc(s.last_error)}</div>` : ""}
+    ${!s.enabled ? `<div class="small muted">${icon("info")} Otomatisasi dimatikan di memory.toml (<code>[repo_share] enabled = false</code>); tombol di bawah tetap bekerja.</div>` : ""}
+    <div class="row">
+      ${s.active ? `<button type="button" data-act="export">${icon("upload")} Tulis sekarang</button>` : `<button class="primary" type="button" data-act="init">${icon("check")} Aktifkan</button>`}
+      ${s.bundle ? `<button type="button" data-act="import">${icon("download")} Gabungkan sekarang</button>` : ""}
+      ${s.hooks.length ? `<button type="button" data-act="unhooks">${icon("git")} Cabut hook git</button>` : `<button type="button" data-act="hooks" title="post-merge & post-checkout menggabungkan setelah pull; pre-commit menulis bundel sebelum commit">${icon("git")} Pasang hook git</button>`}
+    </div>
+  </div>`;
+  box.querySelectorAll("[data-act]").forEach((b) => { b.onclick = () => { b.disabled = true; act(b.dataset.act); }; });
+}
+
 // Halaman satu proyek: Konteks, Keputusan, Konvensi, Berkas, Sesi, Fakta.
 async function viewProject(el, name) {
   const q = `?project=${encodeURIComponent(name)}`;
@@ -620,6 +669,7 @@ async function viewProject(el, name) {
   const cur = sessionStorage.getItem("proj-tab") || "konteks";
   el.innerHTML = `<p class="small"><a href="#proyek">Proyek</a> / <b>${esc(name)}</b></p><h1>${esc(name)}</h1>
     <div id="proj-meta"></div>
+    <div id="proj-share"></div>
     <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === cur ? "active" : ""}">${esc(l)}</button>`).join("")}</div><div id="tab-body"><div class="empty">Memuat...</div></div>`;
   const body = $("#tab-body", el);
   const render = async (tab) => {
@@ -659,6 +709,7 @@ async function viewProject(el, name) {
   el.querySelectorAll("[data-tab]").forEach((b) => { b.onclick = () => render(b.dataset.tab); });
   if (!state.projects.length) await loadProjects();
   await projectMetaPanel($("#proj-meta", el), name);
+  projectSharePanel($("#proj-share", el), name);
   render(cur);
 }
 

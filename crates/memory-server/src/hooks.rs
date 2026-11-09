@@ -149,6 +149,42 @@ pub struct HookIn {
     /// Jumlah event yang masih tertahan di spool offline hook (dilaporkan hook).
     #[serde(default)]
     pub spool_pending: Option<u64>,
+    /// Opsi event `repo-cli` (`action`, `dry_run`, `hooks`, `remove`, `force`).
+    #[serde(default)]
+    pub options: Value,
+}
+
+/// Event memori repo bersama: git hook (`repo-sync` setelah pull/checkout, `repo-export`
+/// sebelum commit) dan perintah `engram repo ...` saat server sedang berjalan (`repo-cli`),
+/// sehingga CLI tidak berebut kunci database dengan server.
+async fn repo_event(st: &AppState, subject: &str, event: &str, b: &HookIn) -> ApiResult<Value> {
+    use memory_jobs::repo_bundle as rb;
+    let cwd = b.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()).ok_or_else(|| ApiError::BadRequest("cwd wajib diisi".into()))?;
+    let path = std::path::Path::new(cwd);
+    if !path.is_absolute() {
+        return Err(ApiError::BadRequest("cwd harus path absolut".into()));
+    }
+    let project = b.project.as_deref();
+    let rt = &st.rt;
+    let opt = |k: &str| b.options[k].as_bool().unwrap_or(false);
+    let out = match event {
+        "repo-sync" => rb::on_repo_event(rt, subject, path, project).await?,
+        "repo-export" => rb::export_for_commit(rt, subject, path, project).await?,
+        _ => match b.options["action"].as_str().unwrap_or("") {
+            "init" => json!(rb::init_repo(rt, subject, path, project, opt("hooks")).await?),
+            "export" => json!(rb::export_with(rt, subject, path, project, opt("dry_run")).await?),
+            "import" => json!(rb::import_repo(rt, subject, path, project).await?),
+            "status" => json!(rb::status(rt, subject, path, project).await?),
+            "hooks" => json!(rb::git_hooks(&rb_root(path), opt("remove"))?),
+            other => return Err(ApiError::BadRequest(format!("aksi repo tidak dikenal: {other}"))),
+        },
+    };
+    Ok(Json(json!({"ok": true, "result": out})))
+}
+
+/// Akar repo git dari `path` (cadangan: `path` itu sendiri).
+fn rb_root(path: &std::path::Path) -> std::path::PathBuf {
+    memory_core::project::detect_project(path).filter(|p| p.from_git).map(|p| p.root).unwrap_or_else(|| path.to_path_buf())
 }
 
 fn clean_client(c: &str) -> String {
@@ -176,7 +212,20 @@ async fn hook_event(State(st): State<AppState>, Path((client, event)): Path<(Str
     }
     let sid = || b.session_id.clone().filter(|s| !s.trim().is_empty()).ok_or_else(|| ApiError::BadRequest("session_id wajib diisi".into()));
     let p = &st.rt.pipeline;
+    // Memori proyek bersama lewat repo git: cek `.engram/` di latar (hanya mengantre job,
+    // tidak memperlambat konteks awal sesi).
+    if matches!(event.as_str(), "context" | "session-end")
+        && let Some(cwd) = b.cwd.clone().filter(|c| !c.trim().is_empty())
+    {
+        let (rt, subject, project) = (st.rt.clone(), subject.clone(), project.clone());
+        tokio::spawn(async move {
+            if let Err(e) = memory_jobs::repo_bundle::on_repo_event(&rt, &subject, std::path::Path::new(&cwd), project.as_deref()).await {
+                tracing::debug!(error = %e, "cek memori repo bersama dilewati");
+            }
+        });
+    }
     let out = match event.as_str() {
+        "repo-sync" | "repo-export" | "repo-cli" => return repo_event(&st, &subject, &event, &b).await,
         "context" => {
             if !st.rt.cfg.inject.enabled {
                 return Ok(Json(json!({"ok": true, "text": "", "found": false, "disabled": true})));

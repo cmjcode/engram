@@ -299,6 +299,30 @@ fn emit(v: Value) {
     println!("{v}");
 }
 
+/// Jalankan aksi `engram repo ...` lewat server yang sedang berjalan (server memegang kunci
+/// database). `None` bila server tidak bisa dihubungi atau belum mengenal aksi ini; CLI lalu
+/// membuka vault langsung.
+pub async fn repo_via_server(config: &Path, subject: Option<&str>, cwd: &Path, project: Option<&str>, options: Value) -> Option<Result<Value, String>> {
+    let c = connection(config);
+    let http = reqwest::Client::builder().connect_timeout(Duration::from_millis(400)).build().ok()?;
+    let body = json!({"subject": subject, "cwd": cwd, "project": project, "options": options});
+    let mut req = http.post(format!("{}/api/hooks/cli/repo-cli", c.base)).timeout(Duration::from_secs(180)).json(&body);
+    if let Some(t) = &c.token {
+        req = req.bearer_auth(t);
+    }
+    let r = req.send().await.ok()?;
+    let status = r.status();
+    if status.is_success() {
+        return Some(r.json::<Value>().await.map(|v| v["result"].clone()).map_err(|e| e.to_string()));
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return None;
+    }
+    let text = r.text().await.unwrap_or_default();
+    let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["error"].as_str().map(str::to_string)).unwrap_or(text);
+    Some(Err(format!("server engram: {msg}")))
+}
+
 /// Jalankan hook. Selalu `Ok(())`: galat apa pun hanya dicatat ke stderr.
 pub async fn run(config: &Path, client: &str, event: &str) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
@@ -419,6 +443,10 @@ pub async fn run(config: &Path, client: &str, event: &str) -> anyhow::Result<()>
             body["max_chars"] = json!(2500);
             ("file-context", Duration::from_millis(1500))
         }
+        // Git hook memori repo bersama: post-merge/post-checkout (antre impor) dan pre-commit
+        // (tulis bundel sebelum commit). Tanpa server dilewati; diulang saat sesi/berkala.
+        "repo-sync" => ("repo-sync", Duration::from_millis(1500)),
+        "repo-export" => ("repo-export", Duration::from_secs(15)),
         other => {
             eprintln!("engram hook: event tidak dikenal: {other}");
             emit(fallback_out());
@@ -449,7 +477,7 @@ pub async fn run(config: &Path, client: &str, event: &str) -> anyhow::Result<()>
             drain_spool(&http, &c).await;
         }
         (Err(retry), _) => {
-            if *retry && !matches!(server_event, "context" | "file-context") {
+            if *retry && !matches!(server_event, "context" | "file-context" | "repo-sync" | "repo-export") {
                 spool_write(&c, &client, server_event, &body);
             }
             emit(fallback_out());

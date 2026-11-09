@@ -33,6 +33,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects/{s}/projects", get(projects_overview))
         .route("/api/subjects/{s}/projects/files", get(project_files))
         .route("/api/subjects/{s}/projects/meta", get(project_meta_get).put(project_meta_put))
+        .route("/api/subjects/{s}/projects/share", get(project_share_get).post(project_share_post))
         .route("/api/sessions/{id}", get(session_detail))
         .route("/api/subjects/{s}/stream", get(stream_items))
         .route("/api/subjects/{s}/entities", get(entities))
@@ -1037,6 +1038,60 @@ async fn project_meta_put(State(st): State<AppState>, Path(s): Path<String>, Jso
     }
     st.rt.store.put_project_meta(&m).await?;
     Ok(Json(json!({"meta": m})))
+}
+
+#[derive(Deserialize)]
+struct ProjectShareIn {
+    project: String,
+    /// `init` | `export` | `import` | `hooks` | `unhooks`
+    action: String,
+    /// Akar repo bila belum dikenal dari sesi kerja (path absolut).
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn share_root(st: &AppState, s: &str, project: &str, root: Option<&str>) -> Result<Option<PathBuf>, ApiError> {
+    if let Some(r) = root.map(str::trim).filter(|r| !r.is_empty()) {
+        let p = PathBuf::from(r);
+        if !p.is_absolute() || !p.is_dir() {
+            return Err(ApiError::BadRequest("folder repo harus path absolut yang ada".into()));
+        }
+        return Ok(Some(p));
+    }
+    Ok(memory_jobs::repo_bundle::root_for_project(&st.rt, s, project).await?)
+}
+
+/// Status berbagi memori proyek lewat repo git (`.engram/`). `found: false` bila akar repo
+/// proyek belum diketahui (belum ada sesi kerja di repo itu).
+async fn project_share_get(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<ProjectQ>) -> ApiResult<Value> {
+    check(&s)?;
+    let name = q.project.as_deref().map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| ApiError::BadRequest("project wajib diisi".into()))?;
+    let Some(root) = share_root(&st, &s, name, None).await? else {
+        return Ok(Json(json!({"found": false, "enabled": st.rt.cfg.repo_share.enabled})));
+    };
+    let status = memory_jobs::repo_bundle::status(&st.rt, &s, &root, Some(name)).await?;
+    Ok(Json(json!({"found": true, "status": status})))
+}
+
+async fn project_share_post(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<ProjectShareIn>) -> ApiResult<Value> {
+    use memory_jobs::repo_bundle as rb;
+    check(&s)?;
+    let name = b.project.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("project wajib diisi".into()));
+    }
+    let root = share_root(&st, &s, name, b.root.as_deref()).await?.ok_or_else(|| ApiError::BadRequest("folder repo proyek ini belum diketahui; isi path repo".into()))?;
+    let result = match b.action.as_str() {
+        "init" => json!(rb::init_repo(&st.rt, &s, &root, Some(name), false).await?),
+        "export" => json!(rb::export_with(&st.rt, &s, &root, Some(name), b.dry_run).await?),
+        "import" => json!(rb::import_repo(&st.rt, &s, &root, Some(name)).await?),
+        "hooks" | "unhooks" => json!(rb::git_hooks(&root, b.action == "unhooks")?),
+        other => return Err(ApiError::BadRequest(format!("aksi tidak dikenal: {other}"))),
+    };
+    let status = rb::status(&st.rt, &s, &root, Some(name)).await?;
+    Ok(Json(json!({"result": result, "status": status})))
 }
 
 /// Peta berkas -> observasi yang menyentuhnya, untuk tab Berkas halaman proyek.

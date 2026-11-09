@@ -181,9 +181,30 @@ Perintah terkait:
 
 ```sh
 engram import-claude-memory --all --apply   # auto-memory Claude Code (~/.claude/projects/*/memory/*.md) -> episode, tanpa LLM
-engram repo export <repo> [--project X]     # tulis <repo>/.engram/ (pelajaran, keputusan, fakta) untuk di-commit & dibagikan
-engram repo import <repo>                   # gabungkan bundel rekan tim ke vault ini (tidak menghapus)
+engram repo init [--hooks]                  # aktifkan memori tim lewat repo ini (.engram/), lalu commit foldernya
+engram repo status                          # anggota, impor/ekspor terakhir, git hook terpasang
+engram repo export [--dry-run]              # tulis memori proyek perangkat ini ke .engram/members/<anggota>/
+engram repo import                          # gabungkan memori rekan tim ke vault ini (tidak menghapus)
 ```
+
+### Memori tim lewat repositori git
+
+Siapa pun yang punya akses ke repo otomatis berbagi memori proyeknya: konvensi & jebakan, keputusan,
+dan fakta arsitektur. Tidak perlu server, akun, atau biaya tambahan; hak akses mengikuti akses repo.
+
+- **Penyimpanan tetap SurrealDB embedded** di vault tiap anggota, jadi kecepatan `recall` tidak berubah.
+  Folder `.engram/` di repo hanya jalur kirim-terima berisi teks terdistilasi (tanpa embedding,
+  tanpa transkrip), biasanya puluhan KB per proyek.
+- **Tanpa konflik merge**: tiap anggota per perangkat hanya menulis `.engram/members/<nama>-<hash>/`,
+  satu berkas JSON per record.
+- **Otomatis**: saat sesi agent dimulai engram menggabungkan perubahan `.engram/` (misalnya setelah
+  `git pull`) dan menulis memori terbaru; `engram repo hooks` menambah git hook `post-merge`,
+  `post-checkout`, dan `pre-commit`. engram tidak pernah melakukan `git commit` sendiri.
+- **Privasi**: hanya memori milik proyek itu; teks yang memuat rahasia atau blok `<private>`
+  dilewati, dan frasa di `exclude` pada `.engram/config.toml` tidak diekspor. Cek dulu dengan
+  `engram repo export --dry-run`.
+
+Panduan lengkap ada di [docs/PANDUAN.md](docs/PANDUAN.md#memori-tim-lewat-repositori-git).
 
 Tampilan **Sesi & pelajaran** di UI memperlihatkan sesi, observasi, dan konvensi/koreksi/jebakan per proyek.
 Pelajaran yang berulang di ≥ 2 proyek diangkat `engram distill` menjadi kandidat prinsip kerja (menunggu konfirmasi di Review).

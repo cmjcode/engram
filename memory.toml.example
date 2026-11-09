@@ -82,6 +82,12 @@ observations = 30           # baris indeks observasi terbaru
 sessions = 3                # ringkasan sesi terakhir
 include_all_clients = true
 
+[repo_share]                 # memori tim lewat repo git (<repo>/.engram/); aktifkan per repo: `engram repo init`
+enabled = true              # false = tanpa impor/ekspor otomatis (perintah manual tetap jalan)
+auto_import = true          # gabungkan memori rekan saat sesi agent dimulai, setelah git pull, dan berkala
+auto_export = true          # tulis memori proyek perangkat ini ke .engram/members/<anggota>/ di repo yang aktif
+interval_minutes = 15       # pemeriksaan berkala repo yang dikenal (0 = hanya saat sesi/hook git)
+
 [schedule]
 consolidate_hours = 24
 distill_hours = 24

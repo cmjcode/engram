@@ -740,7 +740,7 @@ pub fn host_name() -> String {
 }
 
 /// Sidik komputer yang stabil (di-hash; ID mesin asli tidak disimpan).
-fn machine_id() -> String {
+pub(crate) fn machine_id() -> String {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ID.get_or_init(|| {
         let raw = machine_raw().unwrap_or_else(host_name);

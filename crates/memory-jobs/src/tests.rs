@@ -313,3 +313,64 @@ fn merge_unions_id_lists_and_converges() {
     // null sama dengan field tidak ada.
     assert!(same(&json!({"id": "s", "error": null}), &json!({"id": "s"})));
 }
+
+#[tokio::test]
+async fn remap_projects_dry_run_then_apply() {
+    use crate::remap::{RemapPlan, remap_projects};
+    let d = tempfile::tempdir().unwrap();
+    let r = rt(d.path()).await;
+    let out = r
+        .pipeline
+        .ingest(IngestDoc {
+            subject: "budi".into(),
+            kind: SourceKind::AgentConversation,
+            title: "Diingat agent: antigravity:T".into(),
+            text: "Budi menambah filter unit pada laporan panen di api-trans-panen.".into(),
+            project: Some("T".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    r.pipeline.process_source(&out.source.id, None).await.unwrap();
+    let eps = r.store.list_episodes("budi", &memory_store::EpisodeFilter { limit: 10, ..Default::default() }).await.unwrap();
+    assert!(!eps.is_empty());
+    assert!(eps.iter().all(|e| e.project.as_deref() == Some("T")));
+
+    let mut plan = RemapPlan { subject: "budi".into(), ..Default::default() };
+    for e in &eps {
+        plan.episodes.insert(e.id.clone(), Some("api-trans-panen".into()));
+    }
+    plan.sources.insert(out.source.id.clone(), Some("api-trans-panen".into()));
+    plan.episodes.insert("01tidakada".into(), Some("x".into()));
+    plan.tags.insert("api-trans-panen".into(), vec!["#VOLTUNES".into()]);
+
+    let dry = remap_projects(&r, &plan, false).await.unwrap();
+    assert_eq!(dry.changes.len(), eps.len() + 1);
+    assert_eq!(dry.missing, vec!["episode:01tidakada".to_string()]);
+    let still = r.store.get_episode(&eps[0].id).await.unwrap().unwrap();
+    assert_eq!(still.project.as_deref(), Some("T"), "uji coba tidak menulis");
+    assert!(r.store.get_project_meta("budi", "api-trans-panen").await.unwrap().is_none());
+
+    let done = remap_projects(&r, &plan, true).await.unwrap();
+    assert!(done.applied);
+    let moved = r.store.get_episode(&eps[0].id).await.unwrap().unwrap();
+    assert_eq!(moved.project.as_deref(), Some("api-trans-panen"));
+    let src = r.store.get_source(&out.source.id).await.unwrap().unwrap();
+    assert_eq!(src.project.as_deref(), Some("api-trans-panen"));
+    assert_eq!(r.store.get_project_meta("budi", "api-trans-panen").await.unwrap().unwrap().tags, vec!["VOLTUNES".to_string()]);
+
+    // Idempoten: menjalankan ulang tidak mengubah apa pun.
+    let again = remap_projects(&r, &plan, true).await.unwrap();
+    assert!(again.changes.is_empty() && again.tagged.is_empty());
+
+    // Subjek lain tidak tersentuh, nama proyek kosong ditolak.
+    let other = RemapPlan { subject: "lain".into(), episodes: [(eps[0].id.clone(), Some("Z".to_string()))].into(), ..Default::default() };
+    assert_eq!(remap_projects(&r, &other, true).await.unwrap().missing.len(), 1);
+    let bad = RemapPlan { subject: "budi".into(), episodes: [(eps[0].id.clone(), Some(" ".to_string()))].into(), ..Default::default() };
+    assert!(remap_projects(&r, &bad, false).await.is_err());
+
+    // `null` mengosongkan proyek (sumber di folder temp tanpa proyek).
+    let clear = RemapPlan { subject: "budi".into(), sources: [(out.source.id.clone(), None)].into(), ..Default::default() };
+    assert_eq!(remap_projects(&r, &clear, true).await.unwrap().changes.len(), 1);
+    assert_eq!(r.store.get_source(&out.source.id).await.unwrap().unwrap().project, None);
+}

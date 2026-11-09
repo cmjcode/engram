@@ -3,6 +3,7 @@
 //! scheduler pekerjaan berkala (konsolidasi, distilasi, profil suara, ekspor).
 
 pub mod archive;
+pub mod remap;
 pub mod repo_bundle;
 pub mod storage;
 pub mod sync;
@@ -159,6 +160,7 @@ impl Runtime {
             COMPACT => json!(self.pipeline.compact(&s("subject")?).await?),
             EXPORT => json!(archive::export(self, None).await?.display().to_string()),
             AUTO_REVIEW => json!(watch::auto_review(self, &s("subject")?).await?),
+            repo_bundle::REPO_IMPORT | repo_bundle::REPO_EXPORT => repo_bundle::run_job(self, &job.kind, &job.payload).await?,
             REVIEW => {
                 let d = match job.payload["decision"].as_str() {
                     Some("approve") => Decision::Approve,
@@ -406,6 +408,7 @@ impl Runtime {
         let retry_every = Duration::from_secs(self.cfg.schedule.retry_failed_minutes * 60);
         let mut last_retry: Option<std::time::Instant> = None;
         let mut last_sync: Option<std::time::Instant> = None;
+        let mut last_repo_share: Option<std::time::Instant> = None;
         loop {
             if let Err(e) = self.schedule_due().await {
                 tracing::error!(error = %e, "scheduler error");
@@ -430,6 +433,7 @@ impl Runtime {
                 }
             }
             self.sync_if_due(&mut last_sync).await;
+            self.repo_share_if_due(&mut last_repo_share).await;
             // Tiap menit: pengaturan sync bisa diubah dari UI kapan saja.
             let tick = if retry_every.is_zero() {
                 Duration::from_secs(60)
@@ -463,6 +467,20 @@ impl Runtime {
                 }
             }
             Err(e) => tracing::warn!(error = %e, "sinkronisasi gagal"),
+        }
+    }
+
+    /// Periksa berkala repo yang berbagi memori lewat `.engram/` (impor bila berubah, ekspor).
+    async fn repo_share_if_due(&self, last: &mut Option<std::time::Instant>) {
+        let minutes = self.cfg.repo_share.interval_minutes;
+        if !self.cfg.repo_share.enabled || minutes == 0 || last.is_some_and(|t| t.elapsed() < Duration::from_secs(minutes * 60)) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+        match repo_bundle::schedule_due(self).await {
+            Ok(n) if n > 0 => tracing::info!(jobs = n, "memori repo bersama diantrekan"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "pemeriksaan memori repo bersama gagal"),
         }
     }
 
