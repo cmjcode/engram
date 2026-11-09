@@ -32,6 +32,10 @@ const ICONS = {
   database: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/>',
   server: '<rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/>',
+  git: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 8v8M18 10a6 6 0 0 1-6 6H8"/>',
+  tag: '<path d="M3 12V4h8l9 9-8 8z"/><circle cx="7.5" cy="8.5" r="1.5"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
 };
 const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -399,35 +403,214 @@ function wireInstallHooks(el) {
   };
 }
 
-// Beranda mode kerja: proyek aktif, bukan statistik biografi.
+// --- Metadata proyek: repositori git, tautan [[...]] bergaya Obsidian, tag grup.
+const projHref = (name) => `#proyek/${encodeURIComponent(name)}`;
+const projKey = (n) => String(n || "").trim().toLowerCase().replace(/\\/g, "/").replace(/ /g, "");
+const sameProj = (a, b) => { const ka = projKey(a), kb = projKey(b); return !!ka && !!kb && (ka === kb || ka.endsWith("/" + kb) || kb.endsWith("/" + ka)); };
+const knownProject = (name) => state.projects.some((p) => sameProj(p.project, name));
+const tagChip = (t) => `<a class="tag-chip" data-tag="${esc(t)}" href="#proyek" title="Tampilkan proyek bertag #${esc(t)}">#${esc(t)}</a>`;
+const wikiLink = (target, label) => `<a class="wikilink${knownProject(target) ? "" : " missing"}" href="${projHref(target)}" title="${knownProject(target) ? "Buka proyek" : "Belum ada memori untuk proyek ini"}">${esc(label || target)}</a>`;
+// Teks catatan: [[Nama]], [[Nama|label]], [[Nama#bagian]] jadi tautan proyek. Teks mentah
+// dipotong per tautan; teks biasa di-escape sekali, target/label mentah di-escape oleh wikiLink.
+function renderNotes(text) {
+  const raw = String(text ?? "");
+  const re = /\[\[([^\[\]\n]+?)\]\]/g;
+  let out = "", last = 0, m;
+  while ((m = re.exec(raw))) {
+    const [left, label] = m[1].split("|");
+    const target = left.split("#")[0].trim();
+    out += esc(raw.slice(last, m.index)) + (target ? wikiLink(target, (label || left).trim()) : esc(m[0]));
+    last = re.lastIndex;
+  }
+  return out + esc(raw.slice(last));
+}
+function bindTagChips(root) {
+  root.querySelectorAll("[data-tag]").forEach((a) => {
+    a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); localStorage.setItem("proj-tag", a.dataset.tag); if (location.hash === "#proyek") route(); else location.hash = "#proyek"; };
+  });
+}
+async function openRepo(name, url) {
+  try { await api("/api/open", { method: "POST", json: { target: "project-repo", subject: state.subject, project: name } }); }
+  catch (e) { if (url) window.open(url, "_blank", "noopener"); else toast(e.message); }
+}
+
+// Beranda mode kerja: proyek aktif, dikelompokkan per tag bila ada.
 async function viewProjects(el) {
   const [r, health] = await Promise.all([api(`/api/subjects/${S()}/projects`), healthPanel()]);
   state.projects = r.projects;
-  const cards = r.projects.map((p) => {
+  const projCard = (p) => {
     const types = Object.entries(p.by_type || {}).filter(([k]) => k !== "cerita").sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${typeBadge(k)}<span class="small">${n}</span>`).join(" ");
     const ls = p.last_session, sm = p.last_summary;
+    const links = (p.links || []).length + (p.backlinks || []).length;
     return `<div class="card proj" data-proj="${esc(p.project)}" role="button" tabindex="0">
       <div class="proj-head"><h3>${esc(p.project)}</h3><span class="small muted">${esc(ago(p.last_activity))}</span></div>
-      <div class="small">${p.last_week} observasi 7 hari · ${p.episodes} total · ${p.lessons} pelajaran · ${p.sessions} sesi</div>
+      ${p.repo_name ? `<div class="small muted proj-repo">${icon("git")} ${esc(p.repo_name)}</div>` : ""}
+      ${(p.tags || []).length ? `<div class="tag-list">${p.tags.map(tagChip).join("")}</div>` : ""}
+      <div class="small">${p.last_week} observasi 7 hari · ${p.episodes} total · ${p.lessons} pelajaran · ${p.sessions} sesi${links ? ` · ${links} tautan` : ""}</div>
       <div class="proj-types">${types}</div>
       ${sm?.next_steps ? `<div class="next"><b>Langkah berikut:</b> ${esc(sm.next_steps)}</div>` : sm ? `<div class="next muted small">${esc(sm.title)}</div>` : ""}
       ${ls ? `<div class="small muted">Sesi terakhir: ${esc(ls.client)} · ${esc(ago(ls.at))} · ${esc(ls.status)}${ls.first_prompt ? " · " + esc(ls.first_prompt.slice(0, 80)) : ""}</div>` : ""}
     </div>`;
-  }).join("");
+  };
+  // Tag unik (tanpa membedakan huruf besar-kecil) beserta jumlah proyeknya.
+  const tags = [];
+  for (const p of r.projects) for (const t of p.tags || []) {
+    const hit = tags.find((x) => x.key === t.toLowerCase());
+    if (hit) hit.n++; else tags.push({ key: t.toLowerCase(), label: t, n: 1 });
+  }
+  tags.sort((a, b) => a.key.localeCompare(b.key));
+  const untagged = r.projects.filter((p) => !(p.tags || []).length);
+  let sel = localStorage.getItem("proj-tag") || "";
+  if (sel && sel !== "__none" && !tags.some((t) => t.key === sel.toLowerCase())) sel = "";
+  const hasTag = (p, k) => (p.tags || []).some((t) => t.toLowerCase() === k);
+  const grid = (list) => `<div class="grid proj-grid">${list.map(projCard).join("")}</div>`;
+  let body;
+  if (!r.projects.length) {
+    body = `<div class="card empty-state"><p><b>Belum ada memori proyek.</b></p><ol class="small">
+      <li>Pasang hook: <code>scripts/install-mcp.sh --client claude</code> (atau gemini/antigravity).</li>
+      <li>Buka sesi baru di agent dan kerjakan sesuatu; tiap giliran direkam otomatis.</li>
+      <li>Atau impor memori yang sudah ada: <code>engram import-claude-memory --all --apply</code>, <code>engram repo import &lt;repo&gt;</code>.</li></ol></div>`;
+  } else if (sel === "__none") {
+    body = untagged.length ? grid(untagged) : '<p class="muted">Semua proyek sudah bertag.</p>';
+  } else if (sel) {
+    body = grid(r.projects.filter((p) => hasTag(p, sel.toLowerCase())));
+  } else if (tags.length) {
+    body = tags.map((t) => `<h3 class="group-head">${icon("tag")} ${esc(t.label)} <span class="small muted">${t.n} proyek</span></h3>${grid(r.projects.filter((p) => hasTag(p, t.key)))}`).join("")
+      + (untagged.length ? `<h3 class="group-head">Tanpa tag <span class="small muted">${untagged.length} proyek</span></h3>${grid(untagged)}` : "");
+  } else {
+    body = grid(r.projects);
+  }
+  const filterBar = tags.length ? `<div class="tag-filter" role="toolbar" aria-label="Saring proyek per tag">
+      <button type="button" data-filter="" class="${sel ? "" : "active"}">Semua</button>
+      ${tags.map((t) => `<button type="button" data-filter="${esc(t.label)}" class="${sel.toLowerCase() === t.key ? "active" : ""}">#${esc(t.label)} <span class="small muted">${t.n}</span></button>`).join("")}
+      ${untagged.length ? `<button type="button" data-filter="__none" class="${sel === "__none" ? "active" : ""}">Tanpa tag <span class="small muted">${untagged.length}</span></button>` : ""}
+    </div>` : (r.projects.length ? `<p class="small muted">Kelompokkan proyek dengan menambah tag di halaman proyek (tombol Edit info proyek).</p>` : "");
   el.innerHTML = `<h1>Proyek</h1>
     <h2>Integrasi</h2>${health}
     <h2>Proyek aktif</h2>
-    ${cards ? `<div class="grid proj-grid">${cards}</div>` : `<div class="card empty-state"><p><b>Belum ada memori proyek.</b></p><ol class="small">
-      <li>Pasang hook: <code>scripts/install-mcp.sh --client claude</code> (atau gemini/antigravity).</li>
-      <li>Buka sesi baru di agent dan kerjakan sesuatu; tiap giliran direkam otomatis.</li>
-      <li>Atau impor memori yang sudah ada: <code>engram import-claude-memory --all --apply</code>, <code>engram repo import &lt;repo&gt;</code>.</li></ol></div>`}
+    ${filterBar}
+    ${body}
     ${r.episodes_without_project ? `<p class="small muted">${r.episodes_without_project} memori tanpa proyek (cerita personal atau sumber lama) ada di <a href="#timeline">Timeline</a>.</p>` : ""}`;
   wireInstallHooks(el);
+  el.querySelectorAll("[data-filter]").forEach((b) => { b.onclick = () => { localStorage.setItem("proj-tag", b.dataset.filter); route(); }; });
+  bindTagChips(el);
   el.querySelectorAll("[data-proj]").forEach((c) => {
-    const go = () => { location.hash = `#proyek/${encodeURIComponent(c.dataset.proj)}`; };
+    const go = () => { location.hash = projHref(c.dataset.proj); };
     c.onclick = go;
     c.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
   });
+}
+
+// Panel info proyek di atas tab: repositori, tag, catatan dengan [[tautan]], backlink.
+async function projectMetaPanel(box, name) {
+  let d;
+  try { d = await api(`/api/subjects/${S()}/projects/meta?project=${encodeURIComponent(name)}`); }
+  catch (e) { box.innerHTML = `<div class="card small muted">Info proyek tidak termuat: ${esc(e.message)}</div>`; return; }
+  const m = d.meta || { repo: null, notes: "", tags: [], links: [] };
+  const repo = m.repo || d.repo_detected;
+  const show = () => {
+    const links = m.links || [];
+    box.innerHTML = `<div class="card proj-meta">
+      <div class="proj-meta-head">
+        <div class="proj-meta-repo">${icon("git")} ${repo
+          ? `${d.repo_url ? `<a href="${esc(d.repo_url)}" id="repo-link" title="${esc(repo)}">${esc(d.repo_name || repo)}</a>` : `<code>${esc(repo)}</code>`}${!m.repo ? ' <span class="small muted">(terdeteksi dari .git/config)</span>' : ""}`
+          : '<span class="muted small">Repositori git belum diisi</span>'}</div>
+        <button type="button" id="meta-edit">${icon("edit")} Edit info proyek</button>
+      </div>
+      <div class="tag-list">${m.tags.length ? `${icon("tag")} ${m.tags.map(tagChip).join("")}` : '<span class="small muted">Belum ada tag grup.</span>'}</div>
+      ${m.notes ? `<div class="proj-notes">${renderNotes(m.notes)}</div>` : ""}
+      ${links.length || d.backlinks.length ? `<div class="proj-links small">
+        ${links.length ? `<div>${icon("link")} <b>Menautkan ke</b> ${links.map((l) => wikiLink(l)).join(" ")}</div>` : ""}
+        ${d.backlinks.length ? `<div>${icon("link")} <b>Ditautkan dari</b> ${d.backlinks.map((l) => wikiLink(l)).join(" ")}</div>` : ""}
+      </div>` : ""}
+    </div>`;
+    bindTagChips(box);
+    const rl = $("#repo-link", box);
+    if (rl) rl.onclick = (e) => { e.preventDefault(); openRepo(name, d.repo_url); };
+    $("#meta-edit", box).onclick = edit;
+  };
+  const edit = () => {
+    let tags = [...m.tags];
+    const names = [...new Set([...state.projects.map((p) => p.project), ...(d.all_projects || [])])].filter((n) => !sameProj(n, name)).sort((a, b) => a.localeCompare(b));
+    box.innerHTML = `<form class="card proj-meta" id="meta-form">
+      <label class="field">Repositori git
+        <input type="text" id="mf-repo" value="${esc(m.repo || "")}" placeholder="${esc(d.repo_detected || "mis. git@github.com:org/repo.git atau github.com/org/repo")}" autocomplete="off" spellcheck="false">
+        ${d.repo_detected && !m.repo ? `<span class="small muted">Kosongkan untuk memakai remote terdeteksi: ${esc(d.repo_detected)}</span>` : ""}
+      </label>
+      <label class="field">Tag grup <span class="small muted">(Enter atau koma untuk menambah)</span>
+        <div class="tag-editor"><span id="mf-tags"></span><input type="text" id="mf-tag" list="mf-tag-list" placeholder="mis. OPERON" autocomplete="off"></div>
+        <datalist id="mf-tag-list">${(d.all_tags || []).map((t) => `<option value="${esc(t)}">`).join("")}</datalist>
+      </label>
+      <label class="field">Catatan <span class="small muted">(ketik <code>[[</code> untuk menautkan proyek lain)</span>
+        <div class="wl-wrap"><textarea id="mf-notes" placeholder="Contoh: Frontend untuk [[api-master-sensor]], memakai skema dari [[TABULAR]].">${esc(m.notes || "")}</textarea><div class="wl-suggest" id="mf-suggest" hidden></div></div>
+      </label>
+      <div class="row"><button class="primary" type="submit">${icon("check")} Simpan</button><button type="button" id="mf-cancel">Batal</button></div>
+    </form>`;
+    const tagBox = $("#mf-tags", box), tagIn = $("#mf-tag", box);
+    const drawTags = () => {
+      tagBox.innerHTML = tags.map((t, i) => `<span class="tag-chip">#${esc(t)}<button type="button" class="tag-x" data-i="${i}" aria-label="Hapus tag ${esc(t)}">${icon("x")}</button></span>`).join("");
+      tagBox.querySelectorAll("[data-i]").forEach((b) => { b.onclick = () => { tags.splice(+b.dataset.i, 1); drawTags(); }; });
+    };
+    const addTag = () => {
+      for (const raw of tagIn.value.split(/[,\s]+/)) {
+        const t = raw.replace(/^#+/, "").trim();
+        if (t && !tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+      }
+      tagIn.value = ""; drawTags();
+    };
+    tagIn.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addTag(); }
+      else if (e.key === "Backspace" && !tagIn.value && tags.length) { tags.pop(); drawTags(); }
+    };
+    tagIn.onchange = () => { if (tagIn.value.trim()) addTag(); };
+    drawTags();
+    // Saran [[tautan]]: teks setelah `[[` terakhir sebelum kursor.
+    const ta = $("#mf-notes", box), sug = $("#mf-suggest", box);
+    const pending = () => { const m2 = ta.value.slice(0, ta.selectionStart).match(/\[\[([^\[\]\n|#]*)$/); return m2 ? m2[1] : null; };
+    const pick = (n) => {
+      const pos = ta.selectionStart, before = ta.value.slice(0, pos), after = ta.value.slice(pos);
+      const start = before.lastIndexOf("[[") + 2;
+      const rest = after.startsWith("]]") ? after.slice(2) : after;
+      ta.value = before.slice(0, start) + n + "]]" + rest;
+      const c = start + n.length + 2;
+      ta.setSelectionRange(c, c); ta.focus(); sug.hidden = true;
+    };
+    const suggest = () => {
+      const q = pending();
+      if (q === null) { sug.hidden = true; return; }
+      const hits = names.filter((n) => n.toLowerCase().includes(q.trim().toLowerCase())).slice(0, 8);
+      if (!hits.length) { sug.hidden = true; return; }
+      sug.innerHTML = hits.map((n, i) => `<button type="button" class="${i === 0 ? "active" : ""}" data-n="${esc(n)}">${esc(n)}</button>`).join("");
+      sug.querySelectorAll("[data-n]").forEach((b) => { b.onmousedown = (e) => { e.preventDefault(); pick(b.dataset.n); }; });
+      sug.hidden = false;
+    };
+    ta.oninput = suggest;
+    ta.onclick = suggest;
+    ta.onblur = () => { sug.hidden = true; };
+    ta.onkeydown = (e) => {
+      if (sug.hidden) return;
+      const items = [...sug.querySelectorAll("button")];
+      const cur = items.findIndex((b) => b.classList.contains("active"));
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const nx = (cur + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
+        items.forEach((b, i) => b.classList.toggle("active", i === nx));
+      } else if ((e.key === "Enter" || e.key === "Tab") && cur >= 0) { e.preventDefault(); pick(items[cur].dataset.n); }
+      else if (e.key === "Escape") { e.stopPropagation(); sug.hidden = true; }
+    };
+    $("#mf-cancel", box).onclick = show;
+    $("#meta-form", box).onsubmit = async (e) => {
+      e.preventDefault();
+      if (tagIn.value.trim()) addTag();
+      try {
+        const res = await api(`/api/subjects/${S()}/projects/meta`, { method: "PUT", json: { project: name, repo: $("#mf-repo", box).value.trim() || null, notes: ta.value, tags } });
+        toast(res.meta ? "Info proyek disimpan" : "Info proyek dikosongkan");
+        await projectMetaPanel(box, name);
+      } catch (err) { toast(err.message); }
+    };
+    $("#mf-repo", box).focus();
+  };
+  show();
 }
 
 // Halaman satu proyek: Konteks, Keputusan, Konvensi, Berkas, Sesi, Fakta.
@@ -436,6 +619,7 @@ async function viewProject(el, name) {
   const tabs = [["konteks", "Konteks untuk agent"], ["keputusan", "Keputusan"], ["konvensi", "Konvensi & jebakan"], ["berkas", "Berkas"], ["sesi", "Sesi & observasi"], ["fakta", "Fakta"]];
   const cur = sessionStorage.getItem("proj-tab") || "konteks";
   el.innerHTML = `<p class="small"><a href="#proyek">Proyek</a> / <b>${esc(name)}</b></p><h1>${esc(name)}</h1>
+    <div id="proj-meta"></div>
     <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === cur ? "active" : ""}">${esc(l)}</button>`).join("")}</div><div id="tab-body"><div class="empty">Memuat...</div></div>`;
   const body = $("#tab-body", el);
   const render = async (tab) => {
@@ -473,6 +657,8 @@ async function viewProject(el, name) {
     body.querySelectorAll("[data-session]").forEach((tr) => { tr.onclick = () => showSession(tr.dataset.session); });
   };
   el.querySelectorAll("[data-tab]").forEach((b) => { b.onclick = () => render(b.dataset.tab); });
+  if (!state.projects.length) await loadProjects();
+  await projectMetaPanel($("#proj-meta", el), name);
   render(cur);
 }
 

@@ -47,6 +47,7 @@ pub const TABLES: &[&str] = &[
     "job",
     "session",
     "lesson",
+    "project_meta",
 ];
 
 /// Tabel yang punya field `embedding`.

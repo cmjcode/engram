@@ -21,7 +21,7 @@ pub use model::*;
 pub use time::{LifeAnchors, RawTime, ResolvedTime, TimeRef};
 
 /// Versi skema penyimpanan dan format ekspor. Dinaikkan setiap ada migrasi.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {

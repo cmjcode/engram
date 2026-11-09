@@ -8,7 +8,7 @@ use memory_extract::ingest::IngestDoc;
 use memory_extract::{Pipeline, Vault};
 use memory_llm::mock::{ScriptedLlm, last_user};
 use memory_llm::{ChatRequest, HashEmbedder};
-use memory_core::model::SourceKind;
+use memory_core::model::{ProjectMeta, SourceKind};
 use memory_store::Store;
 use serde_json::{Value, json};
 
@@ -201,8 +201,19 @@ async fn project_context_and_project_scoped_recall() {
         .unwrap();
     p.process_source(&out_other.source.id, None).await.unwrap();
 
+    // Metadata proyek: repo + tag di LLM-MEMORY, tautan [[LLM-MEMORY]] dari FRONTEND/TRACKER (backlink).
+    let store = &r.store;
+    store
+        .put_project_meta(&ProjectMeta::build("budi", "LLM-MEMORY", Some("git@github.com:budi/engram.git"), "Dipakai oleh [[api-lain]].", &["#memori".into()], None))
+        .await
+        .unwrap();
+    store.put_project_meta(&ProjectMeta::build("budi", "FRONTEND/TRACKER", None, "Butuh [[LLM-MEMORY]]", &[], None)).await.unwrap();
+
     let pc = r.project_context("budi", "LLM-MEMORY", Some("arsitektur penyimpanan vektor")).await.unwrap();
     assert!(pc.found);
+    assert_eq!(pc.repo.as_deref(), Some("git@github.com:budi/engram.git"));
+    assert_eq!(pc.related, vec!["api-lain".to_string(), "FRONTEND/TRACKER".to_string()]);
+    assert!(pc.context.contains("Repositori: budi/engram") && pc.context.contains("#memori") && pc.context.contains("[[FRONTEND/TRACKER]]"), "{}", pc.context);
     assert_eq!(pc.project, "LLM-MEMORY");
     assert!(!pc.episodes.is_empty());
     assert!(pc.context.contains("LLM-MEMORY"));

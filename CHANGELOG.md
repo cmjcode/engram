@@ -13,6 +13,10 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
 - `ci.yml`: fmt, clippy, tests, shellcheck and `server.json` validation on every push and PR.
 - `scripts/install-mcp.sh` runs on Linux as well as macOS (token persisted via `~/.config/environment.d`).
 - UI: "start all services" button; parallel backend health check.
+- Project metadata (schema v3, `project_meta` table): git repository (typed or auto-detected from
+  `.git/config` of the session folder), notes with Obsidian-style `[[Project]]` links plus backlinks,
+  and group tags. The Projects page filters and groups by tag; `project_context` now reports the
+  repository, tags and related projects to agents. API: `GET/PUT /api/subjects/{s}/projects/meta`.
 
 ### Changed
 - `build.sh` no longer contains credentials; it reads them from the environment, `~/.config/engram/notarize.env`

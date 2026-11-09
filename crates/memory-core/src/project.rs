@@ -230,6 +230,197 @@ pub fn check_stale_files(root: &Path, files: &[String]) -> Vec<String> {
     stale
 }
 
+/// ID record metadata proyek yang deterministik dari (subjek, kunci proyek), sehingga
+/// perangkat yang tersinkron menulis ke record yang sama, bukan duplikat.
+pub fn project_meta_id(subject: &str, project: &str) -> String {
+    // FNV-1a 64-bit dua kali dengan basis berbeda: cukup untuk kunci, bukan kriptografi.
+    fn fnv(bytes: &[u8], basis: u64) -> u64 {
+        bytes.iter().fold(basis, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+    }
+    let input = format!("{}\u{0}{}", subject.trim(), project_key(project));
+    format!("pm{:016x}{:016x}", fnv(input.as_bytes(), 0xcbf2_9ce4_8422_2325), fnv(input.as_bytes(), 0x6c62_272e_07bb_0142))
+}
+
+/// Target tautan bergaya Obsidian di `text`: `[[Nama]]`, `[[Nama|label]]`, `[[Nama#bagian]]`.
+/// Urutan kemunculan dipertahankan, duplikat (kunci proyek sama) dibuang.
+pub fn parse_wikilinks(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else { break };
+        let inner = &after[..end];
+        rest = &after[end + 2..];
+        if inner.contains('\n') || inner.contains("[[") {
+            continue;
+        }
+        let target = inner.split(['|', '#']).next().unwrap_or("").trim();
+        if target.is_empty() || target.chars().count() > 120 {
+            continue;
+        }
+        if !out.iter().any(|o| project_key(o) == project_key(target)) {
+            out.push(target.to_string());
+        }
+    }
+    out
+}
+
+/// Normalisasi satu tag: tanpa `#` di depan, spasi menjadi `-`, hanya huruf/angka dan `-_/.`.
+pub fn normalize_tag(tag: &str) -> Option<String> {
+    let t: String = tag
+        .trim()
+        .trim_start_matches('#')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
+        .collect();
+    let t = t.trim_matches(|c| c == '/' || c == '.').to_string();
+    (!t.is_empty() && t.chars().count() <= 60).then_some(t)
+}
+
+/// Normalisasi daftar tag (juga menerima satu string berisi koma/spasi); duplikat
+/// dibandingkan tanpa membedakan huruf besar-kecil.
+pub fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in tags {
+        for part in raw.split([',', ' ', '\n', '\t']) {
+            if let Some(t) = normalize_tag(part)
+                && !out.iter().any(|o| o.eq_ignore_ascii_case(&t))
+            {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// Folder `.git` (atau common dir untuk worktree) dari repo yang memuat `cwd`.
+fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
+    let cwd = std::path::absolute(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut dir: Option<&Path> = Some(cwd.as_path());
+    while let Some(d) = dir {
+        if is_ignored_dir(d) {
+            return None;
+        }
+        let git = d.join(".git");
+        if git.is_dir() {
+            return Some(git);
+        }
+        if git.is_file() {
+            let gd = gitdir_of(&git)?;
+            let common = std::fs::read_to_string(gd.join("commondir"))
+                .ok()
+                .map(|s| {
+                    let p = PathBuf::from(s.trim());
+                    if p.is_relative() { gd.join(p) } else { p }
+                })
+                .unwrap_or(gd);
+            return Some(common);
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// URL remote git (`origin` bila ada, selain itu remote pertama) dibaca langsung dari
+/// `.git/config` tanpa proses eksternal. Kredensial di URL (`user:token@`) dibuang.
+pub fn detect_git_remote(cwd: &Path) -> Option<String> {
+    let cfg = std::fs::read_to_string(git_common_dir(cwd)?.join("config")).ok()?;
+    let mut current: Option<String> = None;
+    let mut first: Option<String> = None;
+    for line in cfg.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            current = l
+                .strip_prefix("[remote")
+                .and_then(|r| r.trim().strip_prefix('"'))
+                .and_then(|r| r.split('"').next())
+                .map(str::to_string);
+            continue;
+        }
+        let Some(name) = &current else { continue };
+        if let Some((k, v)) = l.split_once('=')
+            && k.trim() == "url"
+        {
+            let url = strip_url_credentials(v.trim());
+            if url.is_empty() {
+                continue;
+            }
+            if name == "origin" {
+                return Some(url);
+            }
+            first.get_or_insert(url);
+        }
+    }
+    first
+}
+
+fn strip_url_credentials(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://")
+        && let Some((auth, host)) = rest.split_once('@')
+        && !auth.contains('/')
+    {
+        return format!("{scheme}://{host}");
+    }
+    url.to_string()
+}
+
+/// Nama repositori ringkas dari URL remote: `git@github.com:org/repo.git` dan
+/// `https://github.com/org/repo` menjadi `org/repo`.
+pub fn repo_short_name(url: &str) -> String {
+    let u = url.trim().trim_end_matches('/');
+    let u = u.strip_suffix(".git").unwrap_or(u);
+    let path = if let Some((_, rest)) = u.split_once("://") {
+        rest.split_once('/').map(|(_, p)| p).unwrap_or(rest)
+    } else if let Some((_, p)) = u.split_once(':').filter(|(h, _)| h.contains('@') || h.contains('.')) {
+        p
+    } else {
+        u
+    };
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match segs.len() {
+        0 => u.to_string(),
+        1 => segs[0].to_string(),
+        n => format!("{}/{}", segs[n - 2], segs[n - 1]),
+    }
+}
+
+/// URL halaman web repositori (https) dari URL remote, bila bisa diturunkan.
+pub fn repo_web_url(url: &str) -> Option<String> {
+    let u = url.trim().trim_end_matches('/');
+    let u = u.strip_suffix(".git").unwrap_or(u);
+    if let Some(rest) = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")) {
+        return Some(format!("https://{rest}"));
+    }
+    if let Some(rest) = u.strip_prefix("ssh://") {
+        let rest = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
+        let (host, path) = rest.split_once('/')?;
+        let host = host.split(':').next().unwrap_or(host);
+        return Some(format!("https://{host}/{path}"));
+    }
+    if let Some((left, path)) = u.split_once(':')
+        && !left.contains('/')
+    {
+        let host = left.split_once('@').map(|(_, h)| h).unwrap_or(left);
+        if host.contains('.') && !path.starts_with('/') {
+            return Some(format!("https://{host}/{path}"));
+        }
+    }
+    // Bentuk `github.com/org/repo` tanpa skema.
+    let first = u.split('/').next().unwrap_or("");
+    (first.contains('.') && u.matches('/').count() >= 2 && !u.contains(' ')).then(|| format!("https://{u}"))
+}
+
+/// Remote git proyek `name` dari daftar folder kerja sesi (`cwd`): folder pertama yang
+/// terdeteksi sebagai repo bernama sama dan punya remote.
+pub fn remote_for_project<'a>(name: &str, cwds: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    cwds.into_iter()
+        .filter_map(|c| detect_project(Path::new(c)).filter(|p| p.from_git && same_project(&p.name, name)).map(|p| p.root))
+        .find_map(|root| detect_git_remote(&root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +480,40 @@ mod tests {
         assert!(!same_project("api-a", "api-b"));
         let v = project_variants(["BACKEND/Api-X", "engram"]);
         assert!(v.contains(&"BACKEND/Api-X".to_string()) && v.contains(&"backend/api-x".to_string()) && v.contains(&"Api-X".to_string()) && v.contains(&"engram".to_string()));
+    }
+
+    #[test]
+    fn wikilinks_tags_and_meta_id() {
+        let l = parse_wikilinks("Pakai [[api-master-sensor]] dan [[TABULAR|tabel]], lihat [[api-master-sensor#auth]] serta [[ ]] [[rusak");
+        assert_eq!(l, vec!["api-master-sensor".to_string(), "TABULAR".to_string()]);
+        let t = normalize_tags(&["#OPERON, backend/api".into(), "operon".into(), "data warehouse".into(), "##".into()]);
+        assert_eq!(t, vec!["OPERON".to_string(), "backend/api".to_string(), "data".to_string(), "warehouse".to_string()]);
+        assert_eq!(normalize_tag("  #Data Warehouse "), Some("Data-Warehouse".into()));
+        let a = project_meta_id("budi", "LLM-MEMORY");
+        assert_eq!(a, project_meta_id("budi", "llm-memory"));
+        assert_ne!(a, project_meta_id("budi", "LLM-MEMORY-2"));
+        assert!(crate::ids::is_valid_id(&a));
+    }
+
+    #[test]
+    fn repo_names_and_remote_detection() {
+        assert_eq!(repo_short_name("git@github.com:org/repo.git"), "org/repo");
+        assert_eq!(repo_short_name("https://github.com/org/sub/repo/"), "sub/repo");
+        assert_eq!(repo_short_name("engram"), "engram");
+        assert_eq!(repo_web_url("git@github.com:org/repo.git").as_deref(), Some("https://github.com/org/repo"));
+        assert_eq!(repo_web_url("ssh://git@gitlab.com:2222/org/repo.git").as_deref(), Some("https://gitlab.com/org/repo"));
+        assert_eq!(repo_web_url("github.com/org/repo").as_deref(), Some("https://github.com/org/repo"));
+        assert_eq!(repo_web_url("engram"), None);
+
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("svc");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join(".git/config"),
+            "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = https://github.com/up/svc.git\n[remote \"origin\"]\n\turl = https://user:tok@github.com/me/svc.git\n",
+        )
+        .unwrap();
+        assert_eq!(detect_git_remote(&repo.join("src")).as_deref(), Some("https://github.com/me/svc.git"));
     }
 }

@@ -145,6 +145,15 @@ pub struct ProjectContext {
     /// Konvensi, koreksi, dan jebakan proyek yang berulang.
     #[serde(default)]
     pub lessons: Vec<Lesson>,
+    /// Metadata pengguna: repositori, catatan dengan tautan `[[...]]`, tag grup.
+    #[serde(default)]
+    pub meta: Option<ProjectMeta>,
+    /// Remote/nama repositori git (isian pengguna, atau terdeteksi dari `.git/config`).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Proyek terkait: tautan `[[...]]` dari catatan proyek ini lalu backlink dari proyek lain.
+    #[serde(default)]
+    pub related: Vec<String>,
     /// Ringkasan konteks siap pakai untuk AI coding agent.
     pub context: String,
 }
@@ -555,13 +564,15 @@ impl Retriever {
         let sessions_fut = async {
             Ok::<_, crate::RetrieveError>(self.store.list_sessions(subject, &project_names, 5).await?)
         };
-        let (recall, entity, mut ep_list, principles_raw, mut lessons, sessions) = tokio::try_join!(
+        let metas_fut = async { Ok::<_, crate::RetrieveError>(self.store.list_project_meta(subject).await?) };
+        let (recall, entity, mut ep_list, principles_raw, mut lessons, sessions, metas) = tokio::try_join!(
             self.recall(&rq),
             self.find_entity(subject, proj),
             ep_fut,
             self.principles(subject, task.or(Some(proj))),
             lessons_fut,
             sessions_fut,
+            metas_fut,
         )?;
 
         if let Some(ent) = &entity {
@@ -658,7 +669,19 @@ impl Retriever {
         decisions.truncate(15);
         let episodes: Vec<EpisodeRef> = ep_list.iter().take(15).map(EpisodeRef::from).collect();
         let principles: Vec<PrincipleView> = principles_raw.into_iter().take(8).collect();
-        let found = entity.is_some()
+        let meta = metas
+            .iter()
+            .find(|m| memory_core::project::project_key(&m.project) == memory_core::project::project_key(proj))
+            .or_else(|| metas.iter().find(|m| matches_proj_name(&m.project)))
+            .cloned();
+        let mut related: Vec<String> = meta.as_ref().map(|m| m.links.clone()).unwrap_or_default();
+        for b in memory_store::Store::project_backlinks(&metas, meta.as_ref().map(|m| m.project.as_str()).unwrap_or(proj)) {
+            if !related.iter().any(|r| memory_core::project::same_project(r, &b)) {
+                related.push(b);
+            }
+        }
+        let found = meta.is_some()
+            || entity.is_some()
             || !current_facts.is_empty()
             || !decisions.is_empty()
             || !episodes.is_empty()
@@ -673,6 +696,10 @@ impl Retriever {
             .filter(|p| matches_proj_name(&p.name))
             .map(|p| p.root);
         let git_info = repo_root.as_deref().and_then(memory_core::project::detect_git_info);
+        let repo = meta
+            .as_ref()
+            .and_then(|m| m.repo.clone())
+            .or_else(|| repo_root.as_deref().and_then(memory_core::project::detect_git_remote));
         let stale_files = match &repo_root {
             Some(root) => {
                 let mut touched: Vec<String> = Vec::new();
@@ -720,6 +747,20 @@ impl Retriever {
             let br = g.branch.as_deref().unwrap_or("detached");
             let cm = g.commit.as_deref().unwrap_or("-");
             push(&format!("Git: {br}@{cm}"), &mut ctx);
+        }
+        if let Some(r) = &repo {
+            let short = memory_core::project::repo_short_name(r);
+            let l = if short == *r { format!("Repositori: {r}") } else { format!("Repositori: {short} ({r})") };
+            push(&l, &mut ctx);
+        }
+        if let Some(m) = meta.as_ref().filter(|m| !m.tags.is_empty()) {
+            push(&format!("Grup/tag: {}", m.tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ")), &mut ctx);
+        }
+        if !related.is_empty() {
+            push(&format!("Proyek terkait: {}", related.iter().map(|r| format!("[[{r}]]")).collect::<Vec<_>>().join(", ")), &mut ctx);
+        }
+        if let Some(m) = meta.as_ref().filter(|m| !m.notes.trim().is_empty()) {
+            push(&format!("Catatan proyek dari pengguna: {}", truncate_chars(m.notes.trim(), 600)), &mut ctx);
         }
         if !stale_files.is_empty() {
             let listed: Vec<&str> = stale_files.iter().take(6).map(String::as_str).collect();
@@ -794,6 +835,9 @@ impl Retriever {
             principles,
             episodes,
             lessons,
+            meta,
+            repo,
+            related,
             context: ctx,
         })
     }

@@ -1023,6 +1023,58 @@ pub struct Lesson {
     pub updated_at: String,
 }
 
+/// Metadata proyek yang diisi pengguna: repositori git, catatan bergaya Obsidian
+/// (tautan `[[Proyek Lain]]`), dan tag untuk mengelompokkan proyek.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectMeta {
+    /// Deterministik dari (subjek, kunci proyek): lihat [`crate::project::project_meta_id`].
+    pub id: String,
+    pub subject: String,
+    /// Nama proyek sebagaimana ditampilkan.
+    pub project: String,
+    /// [`crate::project::project_key`] dari `project`.
+    #[serde(default)]
+    pub project_key: String,
+    /// URL remote atau nama repositori git (mis. `github.com/org/repo`).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Catatan bebas; `[[Nama]]`, `[[Nama|label]]`, dan `[[Nama#bagian]]` menjadi tautan proyek.
+    #[serde(default)]
+    pub notes: String,
+    /// Target tautan `[[...]]` hasil parse `notes` (untuk backlink).
+    #[serde(default)]
+    pub links: Vec<String>,
+    /// Tag grup proyek (tanpa `#`), mis. `OPERON`, `backend/api`.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+impl ProjectMeta {
+    /// Bentuk metadata baru/terbarui dengan normalisasi tag dan parse tautan dari catatan.
+    pub fn build(subject: &str, project: &str, repo: Option<&str>, notes: &str, tags: &[String], prev: Option<&ProjectMeta>) -> Self {
+        let now = crate::ids::now_rfc3339();
+        let project = project.trim().to_string();
+        let key = crate::project::project_key(&project);
+        let links = crate::project::parse_wikilinks(notes).into_iter().filter(|l| !crate::project::same_project(l, &project)).collect();
+        Self {
+            id: crate::project::project_meta_id(subject, &project),
+            subject: subject.to_string(),
+            project,
+            project_key: key,
+            repo: repo.map(str::trim).filter(|r| !r.is_empty()).map(str::to_string),
+            notes: notes.trim_end().to_string(),
+            links,
+            tags: crate::project::normalize_tags(tags),
+            created_at: prev.map(|p| p.created_at.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| now.clone()),
+            updated_at: now,
+        }
+    }
+}
+
 fn default_occurrences() -> u32 {
     1
 }

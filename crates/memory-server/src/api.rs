@@ -32,6 +32,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects/{s}/sessions", get(sessions))
         .route("/api/subjects/{s}/projects", get(projects_overview))
         .route("/api/subjects/{s}/projects/files", get(project_files))
+        .route("/api/subjects/{s}/projects/meta", get(project_meta_get).put(project_meta_put))
         .route("/api/sessions/{id}", get(session_detail))
         .route("/api/subjects/{s}/stream", get(stream_items))
         .route("/api/subjects/{s}/entities", get(entities))
@@ -937,10 +938,105 @@ async fn projects_overview(State(st): State<AppState>, Path(s): Path<String>) ->
         let v = map.entry(k).or_insert_with(|| json!({"episodes": 0, "last_week": 0, "by_type": {}, "last_activity": "", "sessions": 0, "lessons": 0}));
         v["lessons"] = json!(v["lessons"].as_u64().unwrap_or(0) + 1);
     }
-    let mut out: Vec<Value> = map.into_iter().map(|(k, mut v)| { v["project"] = json!(names.get(&k).cloned().unwrap_or(k)); v }).collect();
+    // Metadata pengguna (repo, tag, tautan); proyek yang hanya punya metadata tetap tampil.
+    let metas = st.rt.store.list_project_meta(&s).await?;
+    for m in &metas {
+        let k = key(&m.project);
+        names.entry(k.clone()).or_insert_with(|| m.project.clone());
+        map.entry(k).or_insert_with(|| json!({"episodes": 0, "last_week": 0, "by_type": {}, "last_activity": m.updated_at, "sessions": 0, "lessons": 0}));
+    }
+    let mut out: Vec<Value> = map
+        .into_iter()
+        .map(|(k, mut v)| {
+            let name = names.get(&k).cloned().unwrap_or(k);
+            let meta = metas.iter().find(|m| memory_core::project::project_key(&m.project) == memory_core::project::project_key(&name));
+            let repo = meta.and_then(|m| m.repo.clone()).or_else(|| {
+                memory_core::project::remote_for_project(&name, sessions.iter().filter(|se| se.project.as_deref().is_some_and(|p| key(p) == key(&name))).filter_map(|se| se.cwd.as_deref()))
+            });
+            v["tags"] = json!(meta.map(|m| m.tags.clone()).unwrap_or_default());
+            v["links"] = json!(meta.map(|m| m.links.clone()).unwrap_or_default());
+            v["backlinks"] = json!(memory_store::Store::project_backlinks(&metas, &name));
+            v["repo"] = json!(repo);
+            v["repo_name"] = json!(repo.as_deref().map(memory_core::project::repo_short_name));
+            v["repo_url"] = json!(repo.as_deref().and_then(memory_core::project::repo_web_url));
+            v["project"] = json!(name);
+            v
+        })
+        .collect();
     out.sort_by(|a, b| b["last_activity"].as_str().unwrap_or("").cmp(a["last_activity"].as_str().unwrap_or("")));
     let no_project = eps.iter().filter(|e| e.project.is_none()).count();
     Ok(Json(json!({"projects": out, "episodes_without_project": no_project})))
+}
+
+#[derive(Deserialize)]
+struct ProjectMetaIn {
+    project: String,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    notes: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+/// Metadata satu proyek beserta backlink, remote git terdeteksi, dan daftar tag yang ada
+/// (untuk saran). `meta` bernilai `null` bila belum pernah diisi.
+async fn project_meta_get(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<ProjectQ>) -> ApiResult<Value> {
+    check(&s)?;
+    let name = q.project.as_deref().map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| ApiError::BadRequest("project wajib diisi".into()))?;
+    let all = st.rt.store.list_project_meta(&s).await?;
+    let meta = st.rt.store.get_project_meta(&s, name).await?;
+    let names = st.rt.store.project_names(&s, name).await?;
+    let sessions = st.rt.store.list_sessions(&s, &names, 50).await?;
+    let detected = memory_core::project::remote_for_project(name, sessions.iter().filter_map(|se| se.cwd.as_deref()));
+    let repo = meta.as_ref().and_then(|m| m.repo.clone()).or_else(|| detected.clone());
+    let mut tags: Vec<String> = Vec::new();
+    for t in all.iter().flat_map(|m| m.tags.iter()) {
+        if !tags.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+            tags.push(t.clone());
+        }
+    }
+    tags.sort_by_key(|t| t.to_lowercase());
+    Ok(Json(json!({
+        "project": name,
+        "meta": meta,
+        "backlinks": memory_store::Store::project_backlinks(&all, name),
+        "repo_detected": detected,
+        "repo_name": repo.as_deref().map(memory_core::project::repo_short_name),
+        "repo_url": repo.as_deref().and_then(memory_core::project::repo_web_url),
+        "all_tags": tags,
+        "all_projects": all.iter().map(|m| m.project.clone()).collect::<Vec<_>>(),
+    })))
+}
+
+/// Simpan metadata proyek. Semua kolom kosong = metadata dihapus.
+async fn project_meta_put(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<ProjectMetaIn>) -> ApiResult<Value> {
+    check(&s)?;
+    let name = b.project.trim();
+    if name.is_empty() || name.chars().count() > 200 {
+        return Err(ApiError::BadRequest("nama proyek wajib diisi (maks. 200 karakter)".into()));
+    }
+    if b.notes.chars().count() > 50_000 {
+        return Err(ApiError::BadRequest("catatan terlalu panjang (maks. 50.000 karakter)".into()));
+    }
+    if b.repo.as_deref().is_some_and(|r| r.chars().count() > 500) {
+        return Err(ApiError::BadRequest("repositori terlalu panjang".into()));
+    }
+    if b.tags.len() > 50 {
+        return Err(ApiError::BadRequest("tag terlalu banyak (maks. 50)".into()));
+    }
+    let prev = st.rt.store.get_project_meta(&s, name).await?;
+    // Pertahankan nama kanonik yang sudah tersimpan (mis. `BACKEND/api-x` saat dibuka sebagai `api-x`).
+    let canonical = prev.as_ref().map(|p| p.project.clone()).unwrap_or_else(|| name.to_string());
+    let m = ProjectMeta::build(&s, &canonical, b.repo.as_deref(), &b.notes, &b.tags, prev.as_ref());
+    if m.repo.is_none() && m.notes.trim().is_empty() && m.tags.is_empty() {
+        if let Some(p) = &prev {
+            st.rt.store.delete_project_meta(&p.id).await?;
+        }
+        return Ok(Json(json!({"meta": null, "deleted": prev.is_some()})));
+    }
+    st.rt.store.put_project_meta(&m).await?;
+    Ok(Json(json!({"meta": m})))
 }
 
 /// Peta berkas -> observasi yang menyentuhnya, untuk tab Berkas halaman proyek.
@@ -1593,6 +1689,11 @@ async fn restart(State(st): State<AppState>) -> ApiResult<Value> {
 #[derive(Deserialize)]
 struct OpenIn {
     target: String,
+    /// Untuk `project-repo`: subjek & proyek yang halaman repositorinya dibuka.
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 /// Hanya target yang dikenal; UI tidak bisa membuka path atau URL sembarang.
@@ -1618,6 +1719,27 @@ async fn open_target(State(st): State<AppState>, Json(b): Json<OpenIn>) -> ApiRe
             .display()
             .to_string(),
         "repo" => repo.to_string(),
+        // URL diturunkan server dari metadata tersimpan / `.git/config`, bukan dari UI.
+        "project-repo" => {
+            let (Some(s), Some(p)) = (b.subject.as_deref(), b.project.as_deref().map(str::trim).filter(|p| !p.is_empty())) else {
+                return Err(ApiError::BadRequest("subject dan project wajib diisi".into()));
+            };
+            check(s)?;
+            let stored = st.rt.store.get_project_meta(s, p).await?.and_then(|m| m.repo);
+            let remote = match stored {
+                Some(r) => Some(r),
+                None => {
+                    let names = st.rt.store.project_names(s, p).await?;
+                    let sessions = st.rt.store.list_sessions(s, &names, 50).await?;
+                    memory_core::project::remote_for_project(p, sessions.iter().filter_map(|se| se.cwd.as_deref()))
+                }
+            };
+            remote
+                .as_deref()
+                .and_then(memory_core::project::repo_web_url)
+                .filter(|u| u.starts_with("https://"))
+                .ok_or_else(|| ApiError::BadRequest("repositori proyek belum diketahui atau bukan URL web".into()))?
+        }
         "releases" => format!("{repo}/releases"),
         "issues" => format!("{repo}/issues"),
         t => return Err(ApiError::BadRequest(format!("target tidak dikenal: {t}"))),

@@ -88,6 +88,13 @@ DEFINE INDEX IF NOT EXISTS lesson_subject ON lesson FIELDS subject, status;
 DEFINE INDEX IF NOT EXISTS lesson_key ON lesson FIELDS subject, project, title_key;
 "#;
 
+/// v3: metadata proyek (repositori git, catatan dengan tautan `[[...]]`, tag grup).
+const V3: &str = r#"
+DEFINE TABLE IF NOT EXISTS project_meta SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS project_meta_subject ON project_meta FIELDS subject, project_key;
+DEFINE INDEX IF NOT EXISTS project_meta_tags ON project_meta FIELDS tags;
+"#;
+
 /// Isi `episode.project` yang kosong dari sumbernya (data lama sebelum v2).
 async fn backfill_episode_project(store: &Store) -> Result<u64> {
     let rows = store
@@ -148,6 +155,9 @@ pub(crate) async fn run(store: &Store) -> Result<()> {
                 tracing::info!(episodes = n, "atribusi proyek episode lama dilengkapi dari sumbernya");
             }
         }
+    }
+    if current < 3 {
+        store.execute(V3, binds! {}).await?;
     }
     if current < memory_core::SCHEMA_VERSION {
         store

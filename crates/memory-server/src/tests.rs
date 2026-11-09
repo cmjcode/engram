@@ -576,3 +576,49 @@ async fn watched_folders_api() {
         .unwrap();
     assert!(list_after["folders"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn project_meta_api_links_tags_and_overview() {
+    let (base, _st, _d) = spawn(None).await;
+    let c = reqwest::Client::new();
+    let put = |body: Value| {
+        let c = c.clone();
+        let url = format!("{base}/api/subjects/budi/projects/meta");
+        async move {
+            let r = c.put(&url).json(&body).send().await.unwrap();
+            assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+            r.json::<Value>().await.unwrap()
+        }
+    };
+    let saved = put(json!({"project": "BACKEND/api-x", "repo": "git@github.com:org/api-x.git", "notes": "Konsumen [[LLM-MEMORY]] dan [[TABULAR|tabel]]", "tags": ["#backend", "OPERON, backend"]})).await;
+    assert_eq!(saved["meta"]["tags"], json!(["backend", "OPERON"]));
+    assert_eq!(saved["meta"]["links"], json!(["LLM-MEMORY", "TABULAR"]));
+    put(json!({"project": "LLM-MEMORY", "notes": "", "tags": ["operon"]})).await;
+
+    let get = |p: &str| {
+        let c = c.clone();
+        let url = format!("{base}/api/subjects/budi/projects/meta?project={}", p.replace('/', "%2F"));
+        async move { c.get(&url).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let m = get("LLM-MEMORY").await;
+    assert_eq!(m["backlinks"], json!(["BACKEND/api-x"]));
+    assert_eq!(m["all_tags"], json!(["backend", "OPERON"]));
+    // Nama pendek menemukan metadata berawalan folder; URL web diturunkan dari remote SSH.
+    let m = get("api-x").await;
+    assert_eq!(m["meta"]["project"], "BACKEND/api-x");
+    assert_eq!(m["repo_name"], "org/api-x");
+    assert_eq!(m["repo_url"], "https://github.com/org/api-x");
+
+    // Beranda proyek memuat proyek yang hanya punya metadata, beserta tag dan backlink.
+    let ov: Value = c.get(format!("{base}/api/subjects/budi/projects")).send().await.unwrap().json().await.unwrap();
+    let find = |n: &str| ov["projects"].as_array().unwrap().iter().find(|p| p["project"] == n).cloned().unwrap_or_else(|| panic!("{n} tidak ada: {ov}"));
+    assert_eq!(find("BACKEND/api-x")["tags"], json!(["backend", "OPERON"]));
+    assert_eq!(find("LLM-MEMORY")["backlinks"], json!(["BACKEND/api-x"]));
+
+    // Semua kolom kosong menghapus metadata; validasi nama kosong.
+    let cleared = put(json!({"project": "LLM-MEMORY", "notes": "  ", "tags": []})).await;
+    assert_eq!(cleared["deleted"], true);
+    assert!(get("LLM-MEMORY").await["meta"].is_null());
+    let bad = c.put(format!("{base}/api/subjects/budi/projects/meta")).json(&json!({"project": " "})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+}

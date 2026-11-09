@@ -300,3 +300,28 @@ mod repo_tests {
         assert_eq!(dump[0]["id"], json!("f1"));
     }
 }
+
+#[tokio::test]
+async fn project_meta_roundtrip_and_backlinks() {
+    use memory_core::model::ProjectMeta;
+    let store = mem().await;
+    let a = ProjectMeta::build("budi", "BACKEND/api-x", Some("git@github.com:org/api-x.git"), "Memakai [[LLM-MEMORY]] dan [[tabular|tabel]]", &["#backend, OPERON".into()], None);
+    let b = ProjectMeta::build("budi", "LLM-MEMORY", None, "Tanpa tautan, hanya [[LLM-MEMORY]] dirinya sendiri", &[], None);
+    store.put_project_meta(&a).await.unwrap();
+    store.put_project_meta(&b).await.unwrap();
+    assert!(b.links.is_empty(), "tautan ke diri sendiri dibuang");
+    let got = store.get_project_meta("budi", "api-x").await.unwrap().expect("varian nama ditemukan");
+    assert_eq!(got.tags, vec!["backend".to_string(), "OPERON".to_string()]);
+    assert_eq!(got.links, vec!["LLM-MEMORY".to_string(), "tabular".to_string()]);
+    assert!(store.get_project_meta("lain", "api-x").await.unwrap().is_none(), "terisolasi per subjek");
+    let all = store.list_project_meta("budi").await.unwrap();
+    assert_eq!(Store::project_backlinks(&all, "llm-memory"), vec!["BACKEND/api-x".to_string()]);
+    assert_eq!(Store::project_backlinks(&all, "TABULAR"), vec!["BACKEND/api-x".to_string()]);
+    // Simpan ulang memakai ID yang sama (deterministik), bukan record baru.
+    let a2 = ProjectMeta::build("budi", "BACKEND/api-x", None, "", &[], Some(&got));
+    assert_eq!(a2.id, got.id);
+    assert_eq!(a2.created_at, got.created_at);
+    store.put_project_meta(&a2).await.unwrap();
+    assert_eq!(store.list_project_meta("budi").await.unwrap().len(), 2);
+}
+

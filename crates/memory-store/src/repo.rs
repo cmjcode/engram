@@ -279,6 +279,36 @@ impl Store {
         self.rows_as(&format!("SELECT * FROM session WHERE {cond} ORDER BY last_activity_at DESC LIMIT {limit};"), b).await
     }
 
+    // ----------------------------------------------------------- project_meta
+    pub async fn put_project_meta(&self, m: &ProjectMeta) -> Result<()> {
+        self.upsert("project_meta", &m.id, m, None).await
+    }
+
+    pub async fn list_project_meta(&self, subject: &str) -> Result<Vec<ProjectMeta>> {
+        self.rows_as("SELECT * FROM project_meta WHERE subject = $s ORDER BY project ASC;", binds! {"s" => subject}).await
+    }
+
+    /// Metadata proyek `name`: kunci persis lebih dulu, lalu varian (`BACKEND/api-x` ~ `api-x`).
+    pub async fn get_project_meta(&self, subject: &str, name: &str) -> Result<Option<ProjectMeta>> {
+        if let Some(m) = self.get::<ProjectMeta>("project_meta", &memory_core::project::project_meta_id(subject, name)).await? {
+            return Ok(Some(m));
+        }
+        Ok(self.list_project_meta(subject).await?.into_iter().find(|m| memory_core::project::same_project(&m.project, name)))
+    }
+
+    /// Proyek yang catatannya menautkan `[[name]]` (backlink), dari daftar metadata `all`.
+    pub fn project_backlinks(all: &[ProjectMeta], name: &str) -> Vec<String> {
+        all.iter()
+            .filter(|m| !memory_core::project::same_project(&m.project, name))
+            .filter(|m| m.links.iter().any(|l| memory_core::project::same_project(l, name)))
+            .map(|m| m.project.clone())
+            .collect()
+    }
+
+    pub async fn delete_project_meta(&self, id: &str) -> Result<()> {
+        self.delete("project_meta", id).await
+    }
+
     // ----------------------------------------------------------------- lesson
     pub async fn put_lesson(&self, l: &Lesson) -> Result<()> {
         self.upsert("lesson", &l.id, l, None).await
