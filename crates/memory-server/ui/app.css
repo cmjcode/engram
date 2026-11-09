@@ -1279,3 +1279,6 @@ a.tag-chip:hover { background: rgba(13, 148, 136, 0.22); }
     display: none;
   }
 }
+/* Baris setup memori tim (.engram/) di kartu proyek. */
+.proj-engram { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; }
+.proj-engram button { padding: 4px 10px; font-size: 12px; min-height: 0; }

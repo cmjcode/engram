@@ -450,7 +450,17 @@ async function viewProjects(el) {
       <div class="proj-types">${types}</div>
       ${sm?.next_steps ? `<div class="next"><b>Langkah berikut:</b> ${esc(sm.next_steps)}</div>` : sm ? `<div class="next muted small">${esc(sm.title)}</div>` : ""}
       ${ls ? `<div class="small muted">Sesi terakhir: ${esc(ls.client)} · ${esc(ago(ls.at))} · ${esc(ls.status)}${ls.first_prompt ? " · " + esc(ls.first_prompt.slice(0, 80)) : ""}</div>` : ""}
+      ${engramRow(p)}
     </div>`;
+  };
+  // Baris memori tim (.engram/) untuk proyek yang tertaut ke repo git.
+  const engramRow = (p) => {
+    const e = p.engram;
+    if (!e && !p.repo) return "";
+    if (e?.state === "active") return `<div class="proj-engram small"><span class="badge now">.engram aktif</span><span class="muted">memori proyek dibagikan lewat repo</span></div>`;
+    const label = e?.state === "bundle" ? "Aktifkan .engram" : "Setup .engram";
+    const hint = e?.state === "bundle" ? "Repo sudah berisi memori tim; aktifkan agar perangkat ini ikut menulis" : e ? `Buat folder .engram/ di ${e.root}` : "Folder repo belum diketahui; isi path-nya di halaman proyek";
+    return `<div class="proj-engram small"><button type="button" class="primary" data-engram="${esc(p.project)}" title="${esc(hint)}">${icon("git")} ${label}</button>${e?.state === "bundle" ? '<span class="badge warn">ada memori tim</span>' : ""}</div>`;
   };
   // Tag unik (tanpa membedakan huruf besar-kecil) beserta jumlah proyeknya.
   const tags = [];
@@ -498,6 +508,23 @@ async function viewProjects(el) {
     const go = () => { location.hash = projHref(c.dataset.proj); };
     c.onclick = go;
     c.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
+  });
+  el.querySelectorAll("[data-engram]").forEach((b) => {
+    b.onkeydown = (e) => e.stopPropagation();
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const name = b.dataset.engram;
+      const p = r.projects.find((x) => x.project === name);
+      // Akar repo belum diketahui: buka halaman proyek, isi path di panel memori tim.
+      if (!p?.engram) { sessionStorage.setItem("share-focus", "1"); location.hash = projHref(name); return; }
+      b.disabled = true;
+      try {
+        const res = await api(`/api/subjects/${S()}/projects/share`, { method: "POST", json: { project: name, action: "init", root: p.engram.root } });
+        const ex = res.result?.export || {};
+        toast(ex.unchanged ? ".engram/ sudah ada dan tidak berubah" : `.engram/ dibuat di ${p.engram.root}. Commit folder itu agar rekan tim menerimanya`);
+        route();
+      } catch (err) { toast(err.message); b.disabled = false; }
+    };
   });
 }
 
@@ -633,9 +660,10 @@ async function projectSharePanel(box, name) {
     box.innerHTML = `<div class="card proj-share">
       <div class="proj-share-head">${icon("users")} <b>Memori tim lewat repo git</b></div>
       <p class="small muted">Siapa pun yang punya akses ke repo proyek ini bisa berbagi konvensi, keputusan, dan fakta proyek lewat folder <code>.engram/</code>. Folder repo belum diketahui; mulai satu sesi agent di repo itu, atau isi path-nya.</p>
-      <form class="row" id="share-root"><input type="text" id="share-path" placeholder="/path/ke/repo" autocomplete="off" spellcheck="false"><button class="primary" type="submit">${icon("check")} Aktifkan</button></form>
+      <form class="row" id="share-root"><input type="text" id="share-path" placeholder="/path/ke/repo" autocomplete="off" spellcheck="false"><button class="primary" type="submit">${icon("git")} Setup .engram</button></form>
     </div>`;
     $("#share-root", box).onsubmit = (e) => { e.preventDefault(); const root = $("#share-path", box).value.trim(); if (root) act("init", { root }); };
+    if (sessionStorage.getItem("share-focus")) { sessionStorage.removeItem("share-focus"); box.scrollIntoView({ block: "center" }); $("#share-path", box).focus(); }
     return;
   }
   const s = d.status;
@@ -654,7 +682,7 @@ async function projectSharePanel(box, name) {
     ${s.last_error ? `<div class="small bad">${icon("alert")} ${esc(s.last_error)}</div>` : ""}
     ${!s.enabled ? `<div class="small muted">${icon("info")} Otomatisasi dimatikan di memory.toml (<code>[repo_share] enabled = false</code>); tombol di bawah tetap bekerja.</div>` : ""}
     <div class="row">
-      ${s.active ? `<button type="button" data-act="export">${icon("upload")} Tulis sekarang</button>` : `<button class="primary" type="button" data-act="init">${icon("check")} Aktifkan</button>`}
+      ${s.active ? `<button type="button" data-act="export">${icon("upload")} Tulis sekarang</button>` : `<button class="primary" type="button" data-act="init">${icon("git")} ${s.bundle ? "Aktifkan .engram" : "Setup .engram"}</button>`}
       ${s.bundle ? `<button type="button" data-act="import">${icon("download")} Gabungkan sekarang</button>` : ""}
       ${s.hooks.length ? `<button type="button" data-act="unhooks">${icon("git")} Cabut hook git</button>` : `<button type="button" data-act="hooks" title="post-merge & post-checkout menggabungkan setelah pull; pre-commit menulis bundel sebelum commit">${icon("git")} Pasang hook git</button>`}
     </div>

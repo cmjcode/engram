@@ -1382,6 +1382,32 @@ pub async fn root_for_project(rt: &Runtime, subject: &str, name: &str) -> Result
     Ok(sessions.iter().filter_map(|s| s.cwd.as_deref()).filter_map(|c| detect_project(Path::new(c))).find(|p| p.from_git && same_project(&p.name, name)).map(|p| p.root))
 }
 
+/// Akar repo yang sudah dikenal (path, nama proyek) untuk [`quick_share_state`].
+pub fn known_roots(rt: &Runtime) -> Result<Vec<(PathBuf, String)>> {
+    with_state(&rt.vault, |st| st.repos.iter().map(|(k, r)| (PathBuf::from(k), r.project.clone())).collect())
+}
+
+/// Keadaan `.engram/` proyek `name` tanpa query DB (untuk kartu beranda): akar repo dari
+/// repo yang dikenal atau folder kerja sesi, lalu `active` (config.toml ada), `bundle`
+/// (hanya bundel rekan), atau `none`. `None` bila akar repo git belum diketahui.
+pub fn quick_share_state(known: &[(PathBuf, String)], name: &str, cwds: &[String]) -> Option<(PathBuf, &'static str)> {
+    let root = known
+        .iter()
+        .filter(|(p, n)| same_project(n, name) && p.is_dir())
+        .map(|(p, _)| p.clone())
+        .next()
+        .or_else(|| cwds.iter().filter_map(|c| detect_project(Path::new(c))).find(|p| p.from_git && same_project(&p.name, name)).map(|p| p.root))?;
+    let dir = root.join(BUNDLE_DIR);
+    let state = if dir.join(CONFIG_FILE).is_file() {
+        "active"
+    } else if dir.join(MANIFEST).is_file() {
+        "bundle"
+    } else {
+        "none"
+    };
+    Some((root, state))
+}
+
 /// Path binary `engram` untuk git hook: `ENGRAM_BIN`, binary ini bila bernama engram,
 /// atau `engram` di PATH / lokasi instalasi umum.
 fn engram_bin() -> String {

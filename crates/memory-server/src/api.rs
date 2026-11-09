@@ -964,6 +964,20 @@ async fn projects_overview(State(st): State<AppState>, Path(s): Path<String>) ->
             v
         })
         .collect();
+    // Keadaan `.engram/` per proyek (akar repo + aktif/tidak) untuk tombol setup di kartu.
+    let known = memory_jobs::repo_bundle::known_roots(&st.rt).unwrap_or_default();
+    let jobs: Vec<(String, Vec<String>)> = out
+        .iter()
+        .map(|v| {
+            let name = v["project"].as_str().unwrap_or("").to_string();
+            let cwds = sessions.iter().filter(|se| se.project.as_deref().is_some_and(|p| key(p) == key(&name))).filter_map(|se| se.cwd.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            (name, cwds)
+        })
+        .collect();
+    let shares = tokio::task::spawn_blocking(move || jobs.iter().map(|(n, c)| memory_jobs::repo_bundle::quick_share_state(&known, n, c)).collect::<Vec<_>>()).await.unwrap_or_default();
+    for (v, sh) in out.iter_mut().zip(shares) {
+        v["engram"] = sh.map_or(Value::Null, |(root, state)| json!({"root": root, "state": state}));
+    }
     out.sort_by(|a, b| b["last_activity"].as_str().unwrap_or("").cmp(a["last_activity"].as_str().unwrap_or("")));
     let no_project = eps.iter().filter(|e| e.project.is_none()).count();
     Ok(Json(json!({"projects": out, "episodes_without_project": no_project})))
