@@ -644,6 +644,16 @@ impl Pipeline {
             quotes,
             trait_signals,
             entity_ids: entity_ids.clone(),
+            links: {
+                let mut l: Vec<String> = Vec::new();
+                for t in members.iter().flat_map(|m| m.links.iter()) {
+                    if !l.iter().any(|x| memory_core::project::same_project(x, t)) {
+                        l.push(t.clone());
+                    }
+                }
+                l.truncate(12);
+                l
+            },
             obs_type: members.iter().find_map(|m| m.obs_type.clone()),
             concepts: {
                 let mut c: Vec<String> = members.iter().flat_map(|m| m.concepts.iter().cloned()).collect();

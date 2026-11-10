@@ -342,6 +342,11 @@ pub fn parse_wikilinks(text: &str) -> Vec<String> {
     out
 }
 
+/// Tautan `[[...]]` di teks episode: target selain proyek episode itu sendiri, maks. 12.
+pub fn episode_links(text: &str, own_project: Option<&str>) -> Vec<String> {
+    parse_wikilinks(text).into_iter().filter(|l| own_project.is_none_or(|p| !same_project(l, p))).take(12).collect()
+}
+
 /// Normalisasi satu tag: tanpa `#` di depan, spasi menjadi `-`, hanya huruf/angka dan `-_/.`.
 pub fn normalize_tag(tag: &str) -> Option<String> {
     let t: String = tag
@@ -597,6 +602,8 @@ mod tests {
         assert_eq!(a, project_meta_id("budi", "llm-memory"));
         assert_ne!(a, project_meta_id("budi", "LLM-MEMORY-2"));
         assert!(crate::ids::is_valid_id(&a));
+        assert_eq!(episode_links("Pakai [[TABULAR]] dari [[llm-memory]] dan [[api-x|API]]", Some("LLM-MEMORY")), vec!["TABULAR".to_string(), "api-x".to_string()]);
+        assert_eq!(episode_links("tanpa tautan", None), Vec::<String>::new());
     }
 
     #[test]

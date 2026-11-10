@@ -166,7 +166,7 @@ fn all_tools() -> Vec<Value> {
             "Remember",
             "Save a new technical decision, project architecture note, bug root cause, work preference, or personal story/fact to cross-tool long-term memory. The ingestion pipeline filters small talk, so it is safe to call proactively. Identical text is detected as a duplicate.",
             schema(json!({
-                "text": {"type": "string", "description": "What to remember, in the user's own words where possible"},
+                "text": {"type": "string", "description": "What to remember, in the user's own words where possible. Write [[Project]] to link another project (Obsidian-style); links show up as backlinks and in the project graph."},
                 "source": {"type": "string", "description": "Origin as '<client>:<project>', e.g. 'claude-code:LLM-MEMORY' or 'codex:api-master-sensor'"},
                 "project": {"type": "string", "description": "Related project/repository name (optional; derived from 'source' when it has the '<client>:<project>' form)"},
                 "subject": subject_prop()

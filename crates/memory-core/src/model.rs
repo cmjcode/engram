@@ -294,6 +294,10 @@ pub struct Episode {
     pub trait_signals: Vec<TraitSignal>,
     #[serde(default)]
     pub entity_ids: Vec<String>,
+    /// Proyek lain yang ditautkan eksplisit di teks dengan `[[Nama]]` (tanpa proyek episode
+    /// itu sendiri). Dipakai untuk backlink dan graf proyek.
+    #[serde(default)]
+    pub links: Vec<String>,
     /// Jenis observasi untuk episode dari sesi kerja agent:
     /// `bugfix | feature | decision | refactor | discovery | change | session_summary`.
     /// Kosong untuk cerita/fakta biasa.

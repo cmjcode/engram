@@ -622,3 +622,66 @@ async fn project_meta_api_links_tags_and_overview() {
     let bad = c.put(format!("{base}/api/subjects/budi/projects/meta")).json(&json!({"project": " "})).send().await.unwrap();
     assert_eq!(bad.status(), 400);
 }
+
+#[tokio::test]
+async fn project_graph_api_and_episode_backlinks() {
+    let (base, st, _d) = spawn(None).await;
+    let c = reqwest::Client::new();
+    post(&c, format!("{base}/api/subjects"), json!({"id": "budi", "name": "Budi"})).await;
+    // Agent menautkan proyek lain lewat `[[...]]` di teks `remember`.
+    let text = "Pakde Karno membuka toko batik di Solo. Skema datanya dipakai ulang oleh [[TABULAR]] dan [[LLM-MEMORY]].";
+    post(&c, format!("{base}/api/subjects/budi/remember"), json!({"text": text, "source": "claude-code:LLM-MEMORY"})).await;
+    st.rt.drain().await.unwrap();
+    let eps: Value = c.get(format!("{base}/api/subjects/budi/episodes?project=LLM-MEMORY")).send().await.unwrap().json().await.unwrap();
+    let ep = eps
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["text"].as_str().is_some_and(|t| t.contains("[[TABULAR]]")))
+        .cloned()
+        .unwrap_or_else(|| panic!("episode bertautan tidak ada: {eps}"));
+    // Tautan ke proyek sendiri dibuang.
+    assert_eq!(ep["links"], json!(["TABULAR"]));
+
+    for (p, tags) in [("TABULAR", json!(["data"])), ("LLM-MEMORY", json!(["Data"]))] {
+        let r = c.put(format!("{base}/api/subjects/budi/projects/meta")).json(&json!({"project": p, "tags": tags})).send().await.unwrap();
+        assert!(r.status().is_success());
+    }
+    // Backlink dari memori agent terpisah dari backlink catatan.
+    let m: Value = c.get(format!("{base}/api/subjects/budi/projects/meta?project=TABULAR")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(m["episode_backlinks"], json!(["LLM-MEMORY"]), "{m}");
+    assert_eq!(m["backlinks"], json!([]));
+    let ov: Value = c.get(format!("{base}/api/subjects/budi/projects")).send().await.unwrap().json().await.unwrap();
+    let tab = ov["projects"].as_array().unwrap().iter().find(|p| p["project"] == "TABULAR").cloned().unwrap();
+    assert_eq!(tab["episode_backlinks"], json!(["LLM-MEMORY"]));
+
+    // Graf global: tautan terarah + tag bersama (tanpa membedakan huruf besar-kecil).
+    let g: Value = c.get(format!("{base}/api/subjects/budi/projects/graph")).send().await.unwrap().json().await.unwrap();
+    let has_edge = |g: &Value, from: &str, to: &str, kind: &str| {
+        g["edges"].as_array().unwrap().iter().any(|e| e["from"] == from && e["to"] == to && e["kind"] == kind)
+    };
+    assert!(has_edge(&g, "p:llm-memory", "p:tabular", "link"), "{g}");
+    assert!(has_edge(&g, "p:tabular", "t:data", "tag") && has_edge(&g, "p:llm-memory", "t:data", "tag"), "{g}");
+    let node = |g: &Value, id: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).cloned();
+    assert_eq!(node(&g, "p:llm-memory").unwrap()["kind"], "project");
+    assert_eq!(g["truncated"], false);
+
+    // Graf lokal dari sisi proyek yang ditautkan.
+    let l: Value = c
+        .get(format!("{base}/api/subjects/budi/projects/graph?project=TABULAR&depth=1&tags=false"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(l["focus"], "p:tabular");
+    assert!(node(&l, "p:llm-memory").is_some() && node(&l, "t:data").is_none(), "{l}");
+
+    // project_context TABULAR menyebut LLM-MEMORY sebagai proyek terkait.
+    let pc: Value = c.get(format!("{base}/api/subjects/budi/project-context?project=TABULAR")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(pc["related"], json!(["LLM-MEMORY"]), "{}", pc["related"]);
+
+    let bad = c.get(format!("{base}/api/subjects/budi/projects/graph?project={}", "x".repeat(201))).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+}

@@ -458,7 +458,7 @@ const LEGACY_RULE_END: &str = "<!-- MNEMONIC_MEMORY_END -->";
 const RULE_BLOCK: &str = "<!-- ENGRAM_START -->
 ## Engram (`engram` MCP)
 
-- **Simpan Otomatis (`remember`)**: Saat pengguna menceritakan kisah hidup, fakta pribadi/keluarga, pengalaman masa lalu, preferensi, atau keputusan penting (termasuk keputusan arsitektur/teknis, konvensi kode, akar masalah bug, dan konfigurasi di project), panggil tool MCP `remember` (dari server `engram`) untuk menyimpannya tanpa perlu diminta. Isi parameter `source` dengan format `<client>:<nama-project>` (misal `antigravity:LLM-MEMORY`) dan `project` sesuai nama project.
+- **Simpan Otomatis (`remember`)**: Saat pengguna menceritakan kisah hidup, fakta pribadi/keluarga, pengalaman masa lalu, preferensi, atau keputusan penting (termasuk keputusan arsitektur/teknis, konvensi kode, akar masalah bug, dan konfigurasi di project), panggil tool MCP `remember` (dari server `engram`) untuk menyimpannya tanpa perlu diminta. Isi parameter `source` dengan format `<client>:<nama-project>` (misal `antigravity:LLM-MEMORY`) dan `project` sesuai nama project. Bila memori menyangkut project lain, tulis `[[Nama-Project]]` di teks agar keduanya tertaut (backlink & graf proyek).
 - **Ambil Konteks (`project_context`, `recall`, `who_is`, `timeline`, `principles`, `family_tree`)**: Saat mulai mengerjakan tugas di suatu project atau saat pengguna bertanya tentang arsitektur/keputusan teknis/masa lalu/keluarga/prinsip kerja, panggil tool MCP `engram` yang relevan terlebih dahulu (`project_context` untuk ringkasan lengkap project, atau `recall` dengan parameter `project`). Selalu bedakan fakta yang masih berlaku sekarang dengan riwayat masa lalu.
 - **Rangkum & Padatkan Memori (`compact`)**: Saat memori sudah cukup banyak atau pengguna meminta merangkum/memadatkan memori, panggil tool MCP `compact` dengan `mode=\"candidates\"` untuk meninjau klaster episode serupa, fakta redundan/sesaat per entitas, dan review terbuka; lalu kirim rangkuman intinya lewat `compact` dengan `mode=\"apply\"` dan `plan` (non-destruktif: episode mikro ditandai sebagai `retelling` dari episode kanonik baru sehingga bukti asli tetap utuh).
 <!-- ENGRAM_END -->";
@@ -469,7 +469,7 @@ const CODING_RULE_BLOCK: &str = "<!-- ENGRAM_START -->
 
 - **Awal tugas**: panggil `project_context` (parameter `project` = nama repositori/folder kerja, `task` = tugas saat ini) sebelum membaca kode, agar keputusan arsitektur, konvensi, dan akar masalah bug dari sesi sebelumnya ikut dipertimbangkan. Untuk pertanyaan spesifik pakai `recall` dengan parameter `project`.
 - **Fakta berlabel waktu**: hasil tool membedakan fakta yang masih berlaku dan riwayat. Jangan menyajikan fakta lama sebagai kondisi sekarang; bila tool menjawab tidak ada catatan, katakan apa adanya.
-- **Simpan keputusan (`remember`)**: setelah keputusan teknis, perubahan arsitektur, konvensi baru, atau akar masalah bug ditemukan, simpan ringkasannya lewat `remember` dengan `source` berformat `<client>:<nama-project>` (misal `codex:LLM-MEMORY`).
+- **Simpan keputusan (`remember`)**: setelah keputusan teknis, perubahan arsitektur, konvensi baru, atau akar masalah bug ditemukan, simpan ringkasannya lewat `remember` dengan `source` berformat `<client>:<nama-project>` (misal `codex:LLM-MEMORY`); tulis `[[Nama-Project]]` untuk menautkan project lain.
 <!-- ENGRAM_END -->";
 
 fn strip_marker_block(text: &str, start: &str, end: &str) -> String {

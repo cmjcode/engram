@@ -73,6 +73,7 @@ pub async fn run(cfg: &MemoryConfig, n: usize, queries: usize, index: &str, dir:
                 quotes: vec![],
                 trait_signals: vec![],
                 entity_ids: vec![],
+                links: vec![],
                 obs_type: None,
                 concepts: vec![],
                 files_read: vec![],

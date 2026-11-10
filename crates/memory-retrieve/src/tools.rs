@@ -151,9 +151,12 @@ pub struct ProjectContext {
     /// Remote/nama repositori git (isian pengguna, atau terdeteksi dari `.git/config`).
     #[serde(default)]
     pub repo: Option<String>,
-    /// Proyek terkait: tautan `[[...]]` dari catatan proyek ini lalu backlink dari proyek lain.
+    /// Proyek terkait: tautan `[[...]]` dari catatan/episode proyek ini lalu backlink dari proyek lain.
     #[serde(default)]
     pub related: Vec<String>,
+    /// Proyek yang saling menyebut tanpa tautan eksplisit (dari entitas proyek di episode), maks. 5.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_auto: Vec<String>,
     /// Ringkasan konteks siap pakai untuk AI coding agent.
     pub context: String,
 }
@@ -565,7 +568,8 @@ impl Retriever {
             Ok::<_, crate::RetrieveError>(self.store.list_sessions(subject, &project_names, 5).await?)
         };
         let metas_fut = async { Ok::<_, crate::RetrieveError>(self.store.list_project_meta(subject).await?) };
-        let (recall, entity, mut ep_list, principles_raw, mut lessons, sessions, metas) = tokio::try_join!(
+        let rows_fut = async { Ok::<_, crate::RetrieveError>(self.store.episode_link_rows(subject).await?) };
+        let (recall, entity, mut ep_list, principles_raw, mut lessons, sessions, metas, link_rows) = tokio::try_join!(
             self.recall(&rq),
             self.find_entity(subject, proj),
             ep_fut,
@@ -573,6 +577,7 @@ impl Retriever {
             lessons_fut,
             sessions_fut,
             metas_fut,
+            rows_fut,
         )?;
 
         if let Some(ent) = &entity {
@@ -675,9 +680,38 @@ impl Retriever {
             .or_else(|| metas.iter().find(|m| matches_proj_name(&m.project)))
             .cloned();
         let mut related: Vec<String> = meta.as_ref().map(|m| m.links.clone()).unwrap_or_default();
-        for b in memory_store::Store::project_backlinks(&metas, meta.as_ref().map(|m| m.project.as_str()).unwrap_or(proj)) {
+        let canon_name = meta.as_ref().map(|m| m.project.as_str()).unwrap_or(proj);
+        for b in memory_store::Store::project_backlinks(&metas, canon_name) {
             if !related.iter().any(|r| memory_core::project::same_project(r, &b)) {
                 related.push(b);
+            }
+        }
+        // Tetangga dari graf: tautan `[[...]]` di episode (dua arah) dan sebutan entitas proyek.
+        // Entitas yang diambil hanya milik episode proyek ini + entitas proyek ini sendiri (murah).
+        let mut related_auto: Vec<String> = Vec::new();
+        {
+            let mut ids: Vec<String> = link_rows
+                .iter()
+                .filter(|r| r.project.as_deref().is_some_and(matches_proj_name))
+                .flat_map(|r| r.entity_ids.iter().cloned())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            if let Some(e) = &entity {
+                ids.push(e.id.clone());
+            }
+            let ents: Vec<Entity> = self.store.entities_by_ids(&ids).await?.into_iter().filter(|e| e.kind == EntityKind::Project).collect();
+            let gopts = crate::GraphOpts { project: Some(canon_name.to_string()), depth: 1, include_tags: false, include_entities: false, ..Default::default() };
+            let g = crate::build_project_graph(&metas, &link_rows, &ents, &gopts);
+            for (n, kind) in crate::graph_neighbors(&g, canon_name) {
+                if related.iter().chain(related_auto.iter()).any(|r| memory_core::project::same_project(r, &n)) {
+                    continue;
+                }
+                if kind == "link" {
+                    related.push(n);
+                } else if related_auto.len() < 5 {
+                    related_auto.push(n);
+                }
             }
         }
         let found = meta.is_some()
@@ -759,6 +793,9 @@ impl Retriever {
         if !related.is_empty() {
             push(&format!("Proyek terkait: {}", related.iter().map(|r| format!("[[{r}]]")).collect::<Vec<_>>().join(", ")), &mut ctx);
         }
+        if !related_auto.is_empty() {
+            push(&format!("Proyek yang saling menyebut: {}", related_auto.iter().map(|r| format!("[[{r}]]")).collect::<Vec<_>>().join(", ")), &mut ctx);
+        }
         if let Some(m) = meta.as_ref().filter(|m| !m.notes.trim().is_empty()) {
             push(&format!("Catatan proyek dari pengguna: {}", truncate_chars(m.notes.trim(), 600)), &mut ctx);
         }
@@ -838,6 +875,7 @@ impl Retriever {
             meta,
             repo,
             related,
+            related_auto,
             context: ctx,
         })
     }

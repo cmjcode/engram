@@ -705,6 +705,7 @@ impl Pipeline {
             quotes,
             trait_signals,
             entity_ids,
+            links: memory_core::project::episode_links(&seg.text, src.project.as_deref()),
             obs_type: ext.obs_type.clone().map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()),
             concepts: ext.concepts.iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).take(12).collect(),
             files_read: ext.files_read.iter().map(|f| f.trim().replace('\\', "/")).filter(|f| !f.is_empty()).take(40).collect(),

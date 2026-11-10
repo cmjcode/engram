@@ -12,6 +12,7 @@
 
 mod context;
 mod detail;
+mod graph;
 mod inject;
 mod recall;
 mod tools;
@@ -24,6 +25,7 @@ use memory_store::Store;
 
 pub use context::{approx_tokens, assemble_context, assemble_index, fit_text, index_line, is_event_fact};
 pub use detail::*;
+pub use graph::*;
 pub use inject::*;
 pub use recall::*;
 pub use tools::*;

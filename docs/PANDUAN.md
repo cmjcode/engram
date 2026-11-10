@@ -119,6 +119,32 @@ Tool (deskripsi dalam bahasa Inggris, lengkap dengan `title`, `annotations`, dan
 - `engram who "Pakde Karno"`, `engram timeline --entity Karno`, `engram principles`.
 - `engram review list` lalu `approve`/`reject`: konflik fakta, entitas kembar, data zona abu-abu.
 
+## Tautan antar proyek & graf proyek
+
+Proyek bisa saling ditautkan dengan sintaks Obsidian `[[Nama-Proyek]]` (juga `[[Nama|label]]` dan
+`[[Nama#bagian]]`):
+
+- **Catatan proyek**: di halaman proyek, *Edit info proyek*, ketik `[[` untuk saran nama proyek.
+- **Memori agent**: teks `remember` (atau observasi sesi) yang memuat `[[Nama-Proyek]]` menautkan proyek
+  memori itu ke proyek tujuan. Tautan ke proyek itu sendiri diabaikan.
+
+Proyek tujuan menampilkan backlink: *Ditautkan dari* (catatan) dan *Ditautkan di memori* (episode).
+Halaman **Graf proyek** (menu Kerja) dan tab **Graf** di tiap proyek menggambarkan semuanya:
+
+| Garis | Arti |
+|---|---|
+| panah penuh | tautan `[[...]]` dari catatan atau memori |
+| panah putus-putus | sebutan otomatis: memori proyek A menyebut entitas proyek B |
+| titik-titik | tag grup yang sama (simpul `#tag`) |
+| garis tipis ke simpul ungu | tool, organisasi, orang, atau tempat yang dipakai dua proyek atau lebih |
+
+Simpul berongga adalah proyek yang baru dikenal dari tautan (belum punya memori). Seret latar untuk
+menggeser, roda atau tombol untuk zoom, seret simpul untuk merapikan, klik simpul untuk membuka proyek,
+tag, atau entitas. Tab Graf proyek menampilkan graf lokal (kedalaman 1 sampai 3) beserta berkas dan
+komponen proyek itu. Daftar teks di bawah kanvas memuat tautan yang sama. API:
+`GET /api/subjects/{s}/projects/graph?project=<nama>&depth=1`. `project_context` menyebut proyek yang
+tertaut dan proyek yang saling menyebut.
+
 ## Pengaturan, tentang & update
 
 Klik ikon roda gigi di kanan atas UI:

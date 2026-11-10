@@ -31,6 +31,17 @@ pub struct EpisodeFilter {
     pub offset: usize,
 }
 
+/// Baris ringan episode untuk graf/backlink proyek: tanpa teks dan embedding.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EpisodeLinkRow {
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub entity_ids: Vec<String>,
+    #[serde(default)]
+    pub links: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SubjectStats {
     pub sources: u64,
@@ -305,6 +316,33 @@ impl Store {
             .collect()
     }
 
+    /// Proyek, entitas, dan tautan `[[...]]` dari semua episode aktif berproyek milik subjek.
+    pub async fn episode_link_rows(&self, subject: &str) -> Result<Vec<EpisodeLinkRow>> {
+        let rows: Vec<EpisodeLinkRow> = self
+            .rows_as(
+                "SELECT project, entity_ids, links FROM episode WHERE subject = $s AND status = 'active' AND project != NONE AND project != NULL;",
+                binds! {"s" => subject},
+            )
+            .await?;
+        Ok(rows.into_iter().filter(|r| r.project.as_deref().is_some_and(|p| !p.trim().is_empty())).collect())
+    }
+
+    /// Proyek yang episodenya menautkan `[[name]]` (backlink dari memori agent/sesi), unik per kunci proyek.
+    pub fn episode_backlinks(rows: &[EpisodeLinkRow], name: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for r in rows {
+            let Some(p) = r.project.as_deref() else { continue };
+            if memory_core::project::same_project(p, name) || !r.links.iter().any(|l| memory_core::project::same_project(l, name)) {
+                continue;
+            }
+            if !out.iter().any(|o| memory_core::project::same_project(o, p)) {
+                out.push(p.to_string());
+            }
+        }
+        out.sort_by_key(|p| p.to_lowercase());
+        out
+    }
+
     pub async fn delete_project_meta(&self, id: &str) -> Result<()> {
         self.delete("project_meta", id).await
     }
@@ -412,6 +450,14 @@ impl Store {
             .rows_as("SELECT * OMIT embedding, alias_keys FROM type::record('entity', $id);", binds! {"id" => id})
             .await?
             .pop())
+    }
+
+    /// Entitas untuk daftar ID (yang tidak ada dilewati; urutan tidak dijamin).
+    pub async fn entities_by_ids(&self, ids: &[String]) -> Result<Vec<Entity>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        self.rows_as("SELECT * OMIT embedding, alias_keys FROM array::map($ids, |$i| type::record('entity', $i));", binds! {"ids" => ids}).await
     }
 
     /// Ikuti rantai `merged_into` sampai entitas aktif.

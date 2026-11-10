@@ -22,7 +22,7 @@ use surrealdb::engine::local::{Db, Mem, RocksDb};
 
 use memory_core::config::IndexConfig;
 
-pub use repo::{EpisodeFilter, SubjectStats, alias_keys, entity_doc};
+pub use repo::{EpisodeFilter, EpisodeLinkRow, SubjectStats, alias_keys, entity_doc};
 pub use tx::Tx;
 pub use vector::{SurrealVectorIndex, VectorHit, VectorIndex};
 

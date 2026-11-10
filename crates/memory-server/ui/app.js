@@ -36,6 +36,9 @@ const ICONS = {
   tag: '<path d="M3 12V4h8l9 9-8 8z"/><circle cx="7.5" cy="8.5" r="1.5"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
+  graph: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="8" r="2.5"/><circle cx="9" cy="18" r="2.5"/><path d="M8.3 7.1 15.6 7.6M7 8.4l1.4 7.2M16.4 9.9l-5.6 6.4"/>',
+  minus: '<path d="M5 12h14"/>',
+  fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
 };
 const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -105,6 +108,7 @@ const ROUTES = [
   ["ringkasan", "book", "Statistik & perawatan", viewHome, "semua"],
   // Kerja: proyek koding dan sesi agent.
   ["proyek", "home", "Proyek", viewProjects, "kerja"],
+  ["graf", "graph", "Graf proyek", viewGraph, "kerja"],
   ["sesi", "code", "Sesi & pelajaran", viewSessions, "kerja"],
   // Personal: biografi dan keluarga.
   ["wawancara", "mic", "Wawancara", viewInterview, "personal"],
@@ -226,6 +230,8 @@ function bindCites(root) {
   root.querySelectorAll("[data-ep]").forEach((a) => { a.onclick = (e) => { e.stopPropagation(); showEpisode(a.dataset.ep); }; });
   root.querySelectorAll("[data-entity]").forEach((a) => { a.onclick = (e) => { e.stopPropagation(); showEntity(a.dataset.entity); }; });
   root.querySelectorAll("[data-source]").forEach((a) => { a.onclick = (e) => { e.stopPropagation(); showSource(a.dataset.source); }; });
+  // Tautan [[proyek]] di dalam baris yang bisa diklik: jangan ikut membuka episode induknya.
+  root.querySelectorAll("a.wikilink").forEach((a) => { a.onclick = (e) => { e.stopPropagation(); $("#drawer").hidden = true; }; });
 }
 
 function factBadge(f) {
@@ -257,7 +263,8 @@ async function showEpisode(id) {
     ${dec ? `<h3>Keputusan</h3><ul>${dec}</ul>` : ""}
     ${facts ? `<h3>Fakta dari cerita ini</h3>${facts}` : ""}
     ${ents ? `<p><b>Disebut:</b> ${ents}</p>` : ""}${retold}
-    <h3>Teks asli</h3><pre class="src">${esc(e.text)}</pre>
+    ${(e.links || []).length ? `<p><b>Menautkan proyek:</b> ${e.links.map((l) => wikiLink(l)).join(" ")}</p>` : ""}
+    <h3>Teks asli</h3><pre class="src">${renderNotes(e.text)}</pre>
     ${r.source ? `<p class="small">Sumber: <a class="cite" data-source="${esc(r.source.id)}">${esc(r.source.title)}</a></p>` : ""}`);
 }
 
@@ -441,7 +448,7 @@ async function viewProjects(el) {
   const projCard = (p) => {
     const types = Object.entries(p.by_type || {}).filter(([k]) => k !== "cerita").sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${typeBadge(k)}<span class="small">${n}</span>`).join(" ");
     const ls = p.last_session, sm = p.last_summary;
-    const links = (p.links || []).length + (p.backlinks || []).length;
+    const links = (p.links || []).length + (p.backlinks || []).length + (p.episode_backlinks || []).length;
     return `<div class="card proj" data-proj="${esc(p.project)}" role="button" tabindex="0">
       <div class="proj-head"><h3>${esc(p.project)}</h3><span class="small muted">${esc(ago(p.last_activity))}</span></div>
       ${p.repo_name ? `<div class="small muted proj-repo">${icon("git")} ${esc(p.repo_name)}</div>` : ""}
@@ -535,6 +542,7 @@ async function projectMetaPanel(box, name) {
   catch (e) { box.innerHTML = `<div class="card small muted">Info proyek tidak termuat: ${esc(e.message)}</div>`; return; }
   const m = d.meta || { repo: null, notes: "", tags: [], links: [] };
   const repo = m.repo || d.repo_detected;
+  const epBack = (d.episode_backlinks || []).filter((l) => !d.backlinks.some((b) => sameProj(b, l)));
   const show = () => {
     const links = m.links || [];
     box.innerHTML = `<div class="card proj-meta">
@@ -546,15 +554,19 @@ async function projectMetaPanel(box, name) {
       </div>
       <div class="tag-list">${m.tags.length ? `${icon("tag")} ${m.tags.map(tagChip).join("")}` : '<span class="small muted">Belum ada tag grup.</span>'}</div>
       ${m.notes ? `<div class="proj-notes">${renderNotes(m.notes)}</div>` : ""}
-      ${links.length || d.backlinks.length ? `<div class="proj-links small">
+      ${links.length || d.backlinks.length || epBack.length ? `<div class="proj-links small">
         ${links.length ? `<div>${icon("link")} <b>Menautkan ke</b> ${links.map((l) => wikiLink(l)).join(" ")}</div>` : ""}
         ${d.backlinks.length ? `<div>${icon("link")} <b>Ditautkan dari</b> ${d.backlinks.map((l) => wikiLink(l)).join(" ")}</div>` : ""}
+        ${epBack.length ? `<div>${icon("link")} <b>Ditautkan di memori</b> ${epBack.map((l) => wikiLink(l)).join(" ")}</div>` : ""}
+        <div><button type="button" class="ghost" id="meta-graph">${icon("graph")} Lihat di graf</button></div>
       </div>` : ""}
     </div>`;
     bindTagChips(box);
     const rl = $("#repo-link", box);
     if (rl) rl.onclick = (e) => { e.preventDefault(); openRepo(name, d.repo_url); };
     $("#meta-edit", box).onclick = edit;
+    const mg = $("#meta-graph", box);
+    if (mg) mg.onclick = () => { const t = document.querySelector('[data-tab="graf"]'); if (t) { t.click(); t.scrollIntoView({ block: "start", behavior: "smooth" }); } };
   };
   const edit = () => {
     let tags = [...m.tags];
@@ -690,10 +702,344 @@ async function projectSharePanel(box, name) {
   box.querySelectorAll("[data-act]").forEach((b) => { b.onclick = () => { b.disabled = true; act(b.dataset.act); }; });
 }
 
-// Halaman satu proyek: Konteks, Keputusan, Konvensi, Berkas, Sesi, Fakta.
+// ---------------------------------------------------------------- graf proyek
+// Graf bergaya Obsidian: simpul proyek/tag/entitas, sisi tautan [[...]], sebutan, tag, entitas.
+// Kanvas + layout gaya pegas buatan sendiri (tanpa pustaka; UI di-embed & harus jalan offline).
+const GRAPH_KINDS = [["link", "Tautan [[ ]]"], ["mention", "Sebutan"], ["tag", "Tag"], ["entity", "Entitas"]];
+function graphFilters() {
+  const def = { link: true, mention: true, tag: true, entity: true, orphans: true };
+  try { return { ...def, ...JSON.parse(localStorage.getItem("graph-filters") || "{}") }; } catch (e) { return def; }
+}
+function saveGraphFilters(f) { try { localStorage.setItem("graph-filters", JSON.stringify(f)); } catch (e) {} }
+
+// Panel graf lengkap (toolbar, kanvas, legenda, daftar teks). `project` kosong = graf global.
+async function graphPanel(box, { project = "", depth = 1 } = {}) {
+  const q = new URLSearchParams();
+  if (project) { q.set("project", project); q.set("depth", String(depth)); }
+  box.innerHTML = '<div class="empty">Memuat graf...</div>';
+  let g;
+  try { g = await api(`/api/subjects/${S()}/projects/graph?${q}`); }
+  catch (e) { box.innerHTML = `<div class="card">Graf tidak termuat: ${esc(e.message)}</div>`; return; }
+  const projects = g.nodes.filter((n) => n.kind === "project");
+  const pairs = g.edges.filter((e) => e.kind === "link" || e.kind === "mention").length;
+  if (!projects.length || (!project && !g.edges.length)) {
+    box.innerHTML = `<div class="card empty-state"><p><b>${project ? "Proyek ini belum punya tetangga di graf." : "Belum ada tautan antar proyek."}</b></p>
+      <p class="small">Graf terbentuk dari tiga sumber:</p><ol class="small">
+      <li>Catatan proyek: buka halaman proyek, <b>Edit info proyek</b>, lalu ketik <code>[[</code> untuk menautkan proyek lain.</li>
+      <li>Memori agent: <code>remember</code> dengan teks berisi <code>[[Nama-Proyek]]</code>.</li>
+      <li>Otomatis: episode yang menyebut proyek lain, tag grup yang sama, dan tool/organisasi yang dipakai beberapa proyek.</li></ol></div>`;
+    return;
+  }
+  const filters = graphFilters();
+  const counts = { tag: g.nodes.filter((n) => n.kind === "tag").length, entity: g.nodes.filter((n) => n.kind === "entity").length };
+  box.innerHTML = `<div class="graph-wrap">
+    <div class="graph-tools" role="toolbar" aria-label="Kontrol graf">
+      <input type="search" class="graph-search" placeholder="Cari simpul..." aria-label="Cari simpul di graf" autocomplete="off">
+      <div class="tag-filter graph-filter">
+        ${GRAPH_KINDS.map(([k, l]) => `<button type="button" data-gk="${k}" class="${filters[k] ? "active" : ""}" aria-pressed="${filters[k]}"><span class="graph-key gk-${k}" aria-hidden="true"></span>${l}</button>`).join("")}
+        <button type="button" data-gk="orphans" class="${filters.orphans ? "active" : ""}" aria-pressed="${filters.orphans}">Proyek tanpa tautan</button>
+      </div>
+      ${project ? `<label class="small graph-depth">Kedalaman <select data-depth>${[1, 2, 3].map((d) => `<option value="${d}" ${d === depth ? "selected" : ""}>${d}</option>`).join("")}</select></label>` : ""}
+      <div class="graph-zoom">
+        <button type="button" class="ghost" data-zoom="in" title="Perbesar" aria-label="Perbesar">${icon("plus")}</button>
+        <button type="button" class="ghost" data-zoom="out" title="Perkecil" aria-label="Perkecil">${icon("minus")}</button>
+        <button type="button" class="ghost" data-zoom="fit" title="Muat semua simpul" aria-label="Muat semua simpul">${icon("fit")}</button>
+      </div>
+    </div>
+    <div class="graph-stage"><canvas class="graph-canvas" tabindex="0" role="img"></canvas><div class="graph-tip" hidden></div></div>
+    <div class="small muted graph-stats">${projects.length} proyek · ${pairs} tautan antar proyek · ${counts.tag} tag · ${counts.entity} entitas${g.truncated ? ` · dipotong dari ${g.total_nodes} simpul` : ""}. Seret untuk menggeser, roda untuk zoom, klik simpul untuk membuka.</div>
+    <details class="graph-list"><summary>Daftar tautan (teks)</summary><div class="graph-list-body"></div></details>
+  </div>`;
+  const canvas = $(".graph-canvas", box);
+  const view = mountGraph(canvas, g, filters, $(".graph-tip", box));
+  // Daftar ketetanggaan sebagai alternatif teks untuk kanvas.
+  const byId = new Map(g.nodes.map((n) => [n.id, n]));
+  const nodeLink = (n) => n.kind === "project" ? wikiLink(n.label) : n.kind === "tag" ? tagChip(n.label.replace(/^#/, "")) : `<a class="cite" data-entity="${esc(n.entity_id)}">${esc(n.label)}</a>`;
+  const rows = projects.slice().sort((a, b) => a.label.localeCompare(b.label)).map((p) => {
+    const out = (k) => g.edges.filter((e) => e.from === p.id && e.kind === k).map((e) => byId.get(e.to)).filter(Boolean);
+    const inc = (k) => g.edges.filter((e) => e.to === p.id && e.kind === k).map((e) => byId.get(e.from)).filter(Boolean);
+    const parts = [["Menautkan ke", out("link")], ["Ditautkan dari", inc("link")], ["Menyebut", out("mention")], ["Disebut oleh", inc("mention")], ["Tag", out("tag")], ["Entitas", out("entity")]]
+      .filter(([, l]) => l.length).map(([t, l]) => `<span class="muted">${t}:</span> ${l.map(nodeLink).join(" ")}`);
+    return `<li><b>${wikiLink(p.label)}</b>${parts.length ? " " + parts.join(" · ") : ' <span class="muted">tanpa tautan</span>'}</li>`;
+  });
+  $(".graph-list-body", box).innerHTML = `<ul>${rows.join("")}</ul>`;
+  bindCites($(".graph-list-body", box));
+  bindTagChips($(".graph-list-body", box));
+
+  box.querySelectorAll("[data-gk]").forEach((b) => {
+    b.onclick = () => {
+      const k = b.dataset.gk;
+      filters[k] = !filters[k];
+      b.classList.toggle("active", filters[k]);
+      b.setAttribute("aria-pressed", String(filters[k]));
+      saveGraphFilters(filters);
+      view.setFilters(filters);
+    };
+  });
+  box.querySelectorAll("[data-zoom]").forEach((b) => { b.onclick = () => view.zoom(b.dataset.zoom); });
+  const search = $(".graph-search", box);
+  search.oninput = () => view.search(search.value);
+  search.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); view.focusMatch(); } };
+  const ds = $("[data-depth]", box);
+  if (ds) ds.onchange = () => { sessionStorage.setItem("proj-graph-depth", ds.value); graphPanel(box, { project, depth: +ds.value }); };
+}
+
+// Simulasi + render kanvas. Mengembalikan kontrol (filter, zoom, cari).
+function mountGraph(canvas, g, filters, tip) {
+  const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const nodes = g.nodes.map((n, i) => {
+    // Posisi awal deterministik (spiral) agar tata letak stabil antar muat.
+    const a = i * 2.399963, r = 30 * Math.sqrt(i + 1);
+    const focus = n.id === g.focus;
+    return { ...n, x: focus ? 0 : Math.cos(a) * r, y: focus ? 0 : Math.sin(a) * r, vx: 0, vy: 0, fixed: false, focus };
+  });
+  const idx = new Map(nodes.map((n) => [n.id, n]));
+  const edges = g.edges.map((e) => ({ ...e, s: idx.get(e.from), t: idx.get(e.to) })).filter((e) => e.s && e.t);
+  let visN = [], visE = [], neigh = new Map();
+  const radius = (n) => (n.kind === "project" ? 5 + 2.2 * Math.sqrt(n.degree + n.weight / 8) : n.kind === "tag" ? 4 + 1.4 * Math.sqrt(n.degree) : 3 + Math.sqrt(n.degree));
+  const applyFilters = () => {
+    visE = edges.filter((e) => filters[e.kind] && (filters.tag || (e.s.kind !== "tag" && e.t.kind !== "tag")));
+    const deg = new Map();
+    for (const e of visE) { deg.set(e.s.id, (deg.get(e.s.id) || 0) + 1); deg.set(e.t.id, (deg.get(e.t.id) || 0) + 1); }
+    visN = nodes.filter((n) => {
+      if (n.focus) return true;
+      if (n.kind === "tag") return filters.tag && deg.has(n.id);
+      if (n.kind === "entity") return filters.entity && deg.has(n.id);
+      return filters.orphans || deg.has(n.id);
+    });
+    const vis = new Set(visN.map((n) => n.id));
+    visE = visE.filter((e) => vis.has(e.s.id) && vis.has(e.t.id));
+    neigh = new Map(visN.map((n) => [n.id, new Set()]));
+    for (const e of visE) { neigh.get(e.s.id).add(e.t.id); neigh.get(e.t.id).add(e.s.id); }
+    canvas.setAttribute("aria-label", `Graf ${visN.filter((n) => n.kind === "project").length} proyek dan ${visE.length} sisi. Daftar teks tersedia di bawah.`);
+  };
+  applyFilters();
+
+  // Transformasi tampilan: layar = dunia * scale + (tx, ty).
+  let W = 0, H = 0, scale = 1, tx = 0, ty = 0, userMoved = false;
+  let alpha = 1, ticks = 0, hover = null, query = "", raf = 0, everConnected = false;
+  const toWorld = (sx, sy) => [(sx - tx) / scale, (sy - ty) / scale];
+  const fit = () => {
+    if (!visN.length || !W) return;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const n of visN) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); }
+    const pad = 60;
+    scale = Math.max(0.2, Math.min(2, Math.min((W - pad * 2) / Math.max(1, x1 - x0), (H - pad * 2) / Math.max(1, y1 - y0))));
+    tx = W / 2 - ((x0 + x1) / 2) * scale; ty = H / 2 - ((y0 + y1) / 2) * scale;
+  };
+
+  const tick = () => {
+    const n = visN.length;
+    for (let i = 0; i < n; i++) {
+      const a = visN[i];
+      for (let j = i + 1; j < n; j++) {
+        const b = visN[j];
+        let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy;
+        if (d2 < 0.01) { dx = (i - j) * 0.1; dy = 0.1; d2 = 0.02; }
+        if (d2 > 250000) continue;
+        const f = (1800 * alpha) / d2, d = Math.sqrt(d2);
+        a.vx += (dx / d) * f; a.vy += (dy / d) * f; b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+      }
+    }
+    for (const e of visE) {
+      const L = e.kind === "link" || e.kind === "mention" ? 90 : 55;
+      const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y, d = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const k = ((d - L) / d) * 0.06 * alpha * Math.min(3, 1 + Math.log(e.weight));
+      e.s.vx += dx * k; e.s.vy += dy * k; e.t.vx -= dx * k; e.t.vy -= dy * k;
+    }
+    for (const a of visN) {
+      a.vx -= a.x * 0.012 * alpha; a.vy -= a.y * 0.012 * alpha;
+      if (a.fixed || a.focus) { a.vx = 0; a.vy = 0; if (!a.fixed) { a.x *= 0.9; a.y *= 0.9; } continue; }
+      a.vx *= 0.6; a.vy *= 0.6;
+      a.x += Math.max(-40, Math.min(40, a.vx)); a.y += Math.max(-40, Math.min(40, a.vy));
+    }
+    alpha *= 0.985; ticks++;
+  };
+
+  const css = () => {
+    const s = getComputedStyle(canvas);
+    const v = (k, d) => (s.getPropertyValue(k) || "").trim() || d;
+    return { project: v("--graph-project", "#0071e3"), tag: v("--graph-tag", "#0d9488"), entity: v("--graph-entity", "#8b5cf6"), missing: v("--graph-missing", "#94a3b8"), edge: v("--graph-edge", "rgba(100,116,139,.45)"), text: v("--graph-text", "#1d1d1f"), halo: v("--graph-halo", "rgba(255,255,255,.85)"), accent: v("--accent", "#0071e3") };
+  };
+  const matches = (n) => query && n.label.toLowerCase().includes(query);
+  const draw = () => {
+    const ctx = canvas.getContext("2d"), dpr = window.devicePixelRatio || 1, c = css();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const lit = hover ? neigh.get(hover.id) || new Set() : null;
+    const dim = (n) => (lit && n !== hover && !lit.has(n.id)) || (query && !matches(n) && !(hover && n === hover));
+    ctx.save(); ctx.translate(tx, ty); ctx.scale(scale, scale);
+    for (const e of visE) {
+      const on = hover && (e.s === hover || e.t === hover);
+      ctx.globalAlpha = (hover || query) && !on ? 0.12 : e.kind === "link" || e.kind === "mention" ? 0.9 : 0.55;
+      ctx.strokeStyle = on ? c.accent : c.edge;
+      ctx.lineWidth = Math.min(4, 0.8 + Math.log(1 + e.weight) * 0.7) / Math.sqrt(scale);
+      ctx.setLineDash(e.kind === "mention" ? [5 / scale, 4 / scale] : e.kind === "tag" ? [1.5 / scale, 3 / scale] : []);
+      const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y, d = Math.sqrt(dx * dx + dy * dy) || 1, rt = radius(e.t) + 2;
+      const ex = e.t.x - (dx / d) * rt, ey = e.t.y - (dy / d) * rt;
+      ctx.beginPath(); ctx.moveTo(e.s.x, e.s.y); ctx.lineTo(ex, ey); ctx.stroke();
+      if (e.kind === "link" || e.kind === "mention") {
+        // Panah arah tautan, ukuran tetap di layar.
+        const ah = 7 / scale, ang = Math.atan2(dy, dx);
+        ctx.setLineDash([]); ctx.fillStyle = on ? c.accent : c.edge;
+        ctx.beginPath(); ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - ah * Math.cos(ang - 0.4), ey - ah * Math.sin(ang - 0.4));
+        ctx.lineTo(ex - ah * Math.cos(ang + 0.4), ey - ah * Math.sin(ang + 0.4));
+        ctx.closePath(); ctx.fill();
+      }
+    }
+    ctx.setLineDash([]);
+    for (const n of visN) {
+      const r = radius(n), col = n.missing ? c.missing : c[n.kind] || c.entity;
+      ctx.globalAlpha = dim(n) ? 0.18 : 1;
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      if (n.missing) { ctx.lineWidth = 1.5 / scale; ctx.strokeStyle = col; ctx.stroke(); }
+      else { ctx.fillStyle = col; ctx.fill(); }
+      if (n.focus || n === hover || matches(n)) {
+        ctx.lineWidth = 2 / scale; ctx.strokeStyle = c.accent;
+        ctx.beginPath(); ctx.arc(n.x, n.y, r + 3 / scale, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    ctx.restore();
+    // Label di ruang layar agar ukuran huruf tetap terbaca saat zoom.
+    ctx.font = "12px -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.lineJoin = "round";
+    for (const n of visN) {
+      const focusLit = n === hover || (lit && lit.has(n.id)) || matches(n) || n.focus;
+      const show = focusLit || (n.kind === "project" ? scale >= 0.45 : scale >= 1.4);
+      if (!show) continue;
+      const sx = n.x * scale + tx, sy = (n.y + radius(n)) * scale + ty + 4;
+      if (sx < -100 || sx > W + 100 || sy < -20 || sy > H + 20) continue;
+      ctx.globalAlpha = dim(n) ? 0.25 : 1;
+      const label = n.label.length > 32 ? n.label.slice(0, 31) + "..." : n.label;
+      ctx.lineWidth = 3; ctx.strokeStyle = c.halo; ctx.strokeText(label, sx, sy);
+      ctx.fillStyle = n.missing ? c.missing : c.text; ctx.fillText(label, sx, sy);
+    }
+    ctx.globalAlpha = 1;
+  };
+
+  const loop = () => {
+    raf = 0;
+    if (!canvas.isConnected) { if (everConnected) { ro.disconnect(); return; } raf = requestAnimationFrame(loop); return; }
+    everConnected = true;
+    if (alpha > 0.02) {
+      const t0 = performance.now();
+      do tick(); while (alpha > 0.02 && performance.now() - t0 < 10);
+      if (!userMoved && ticks % 4 === 0) fit();
+      raf = requestAnimationFrame(loop);
+    }
+    draw();
+  };
+  const kick = (a = 0.5) => { alpha = Math.max(alpha, a); if (reduce) settle(); else if (!raf) raf = requestAnimationFrame(loop); };
+  const settle = () => { let i = 0; while (alpha > 0.02 && i++ < 600) tick(); if (!userMoved) fit(); draw(); };
+  const resize = () => {
+    const r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    if (!r.width) return;
+    const first = !W;
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    if (first || !userMoved) fit();
+    draw();
+  };
+  const ro = new ResizeObserver(resize);
+  ro.observe(canvas);
+  if (reduce) {
+    // Hitung tata letak sekali tanpa animasi, gambar setelah kanvas punya ukuran.
+    let i = 0; while (alpha > 0.02 && i++ < 600) tick();
+  } else raf = requestAnimationFrame(loop);
+
+  // --- interaksi: hover, seret simpul, geser, zoom, klik.
+  const hit = (sx, sy) => {
+    const [wx, wy] = toWorld(sx, sy);
+    let best = null, bd = Infinity;
+    for (const n of visN) {
+      const d = Math.hypot(n.x - wx, n.y - wy), r = radius(n) + 4 / scale;
+      if (d < r && d < bd) { best = n; bd = d; }
+    }
+    return best;
+  };
+  const pos = (e) => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  const kindLabel = { project: "proyek", tag: "tag", entity: "entitas" };
+  const showTip = (n, sx, sy) => {
+    if (!n) { tip.hidden = true; return; }
+    const extra = n.kind === "project" ? (n.missing ? "belum ada memori" : `${n.weight} memori · ${neigh.get(n.id)?.size || 0} tetangga`) : `${n.entity_kind ? n.entity_kind + " · " : ""}${n.weight} proyek`;
+    tip.innerHTML = `<b>${esc(n.label)}</b><br><span class="muted">${esc(kindLabel[n.kind] || n.kind)} · ${esc(extra)}</span>`;
+    tip.style.left = `${Math.min(sx + 14, W - 200)}px`; tip.style.top = `${sy + 14}px`; tip.hidden = false;
+  };
+  const activate = (n) => {
+    if (n.kind === "project") location.hash = projHref(n.label);
+    else if (n.kind === "tag") { localStorage.setItem("proj-tag", n.label.replace(/^#/, "")); location.hash = "#proyek"; }
+    else if (n.entity_id) showEntity(n.entity_id);
+  };
+  let drag = null;
+  canvas.onpointerdown = (e) => {
+    const [sx, sy] = pos(e);
+    const n = hit(sx, sy);
+    drag = { n, sx, sy, tx, ty, moved: false };
+    if (n) { n.fixed = true; }
+    canvas.setPointerCapture(e.pointerId);
+  };
+  canvas.onpointermove = (e) => {
+    const [sx, sy] = pos(e);
+    if (drag) {
+      if (Math.hypot(sx - drag.sx, sy - drag.sy) > 4) drag.moved = true;
+      if (!drag.moved) return;
+      userMoved = true; tip.hidden = true;
+      if (drag.n) { const [wx, wy] = toWorld(sx, sy); drag.n.x = wx; drag.n.y = wy; kick(0.3); }
+      else { tx = drag.tx + (sx - drag.sx); ty = drag.ty + (sy - drag.sy); }
+      draw();
+      return;
+    }
+    const n = hit(sx, sy);
+    canvas.style.cursor = n ? "pointer" : "grab";
+    if (n !== hover) { hover = n; draw(); }
+    showTip(n, sx, sy);
+  };
+  canvas.onpointerup = (e) => {
+    if (!drag) return;
+    const d = drag; drag = null;
+    if (d.n) d.n.fixed = false;
+    canvas.releasePointerCapture(e.pointerId);
+    if (!d.moved && d.n) activate(d.n);
+  };
+  canvas.onpointerleave = () => { if (!drag && hover) { hover = null; draw(); } tip.hidden = true; };
+  const zoomAt = (f, sx = W / 2, sy = H / 2) => {
+    const ns = Math.max(0.2, Math.min(4, scale * f));
+    tx = sx - ((sx - tx) * ns) / scale; ty = sy - ((sy - ty) * ns) / scale; scale = ns;
+    userMoved = true; draw();
+  };
+  canvas.addEventListener("wheel", (e) => { e.preventDefault(); const [sx, sy] = pos(e); zoomAt(Math.exp(-e.deltaY * 0.0015), sx, sy); }, { passive: false });
+  canvas.onkeydown = (e) => {
+    if (e.key === "+" || e.key === "=") zoomAt(1.25);
+    else if (e.key === "-") zoomAt(0.8);
+    else if (e.key === "0") { userMoved = false; fit(); draw(); }
+  };
+
+  return {
+    setFilters(f) { Object.assign(filters, f); applyFilters(); if (hover && !neigh.has(hover.id)) hover = null; kick(0.6); if (reduce) draw(); },
+    zoom(k) { if (k === "in") zoomAt(1.25); else if (k === "out") zoomAt(0.8); else { userMoved = false; fit(); draw(); } },
+    search(s) { query = s.trim().toLowerCase(); draw(); },
+    focusMatch() {
+      const n = visN.find(matches);
+      if (!n) return;
+      userMoved = true; scale = Math.max(scale, 1.2);
+      tx = W / 2 - n.x * scale; ty = H / 2 - n.y * scale; draw();
+    },
+  };
+}
+
+async function viewGraph(el) {
+  el.innerHTML = `<h1>Graf proyek</h1>
+    <p class="small muted">Proyek sebagai simpul, seperti graf catatan Obsidian. Panah = tautan <code>[[...]]</code> dari catatan proyek atau memori agent; garis putus = sebutan proyek lain di memori; titik-titik = tag grup; garis tipis = tool, organisasi, atau orang yang dipakai beberapa proyek.</p>
+    <div id="graph-box"></div>`;
+  if (!state.projects.length) await loadProjects();
+  await graphPanel($("#graph-box", el));
+}
+
+// Halaman satu proyek: Konteks, Keputusan, Konvensi, Berkas, Sesi, Fakta, Graf.
 async function viewProject(el, name) {
   const q = `?project=${encodeURIComponent(name)}`;
-  const tabs = [["konteks", "Konteks untuk agent"], ["keputusan", "Keputusan"], ["konvensi", "Konvensi & jebakan"], ["berkas", "Berkas"], ["sesi", "Sesi & observasi"], ["fakta", "Fakta"]];
+  const tabs = [["konteks", "Konteks untuk agent"], ["keputusan", "Keputusan"], ["konvensi", "Konvensi & jebakan"], ["berkas", "Berkas"], ["sesi", "Sesi & observasi"], ["fakta", "Fakta"], ["graf", "Graf"]];
   const cur = sessionStorage.getItem("proj-tab") || "konteks";
   el.innerHTML = `<p class="small"><a href="#proyek">Proyek</a> / <b>${esc(name)}</b></p><h1>${esc(name)}</h1>
     <div id="proj-meta"></div>
@@ -726,6 +1072,8 @@ async function viewProject(el, name) {
       } else if (tab === "berkas") {
         const f = await api(`/api/subjects/${S()}/projects/files${q}`);
         body.innerHTML = f.files.length ? `<table class="tbl"><thead><tr><th>Berkas</th><th>Diubah</th><th>Dibaca</th><th>Observasi</th></tr></thead><tbody>${f.files.slice(0, 300).map((x) => `<tr><td><code>${esc(x.path)}</code></td><td>${x.modified}</td><td>${x.read}</td><td>${x.episodes.map((e) => `<a class="cite" data-ep="${esc(e.id)}" title="${esc(e.title)}">${esc(e.at)}${e.modified ? "*" : ""}</a>`).join(" ")}</td></tr>`).join("")}</tbody></table><p class="small muted">* = berkas diubah pada observasi itu. Riwayat ini juga disisipkan ke agent sebelum ia membaca berkas (hook PreToolUse).</p>` : '<p class="muted">Belum ada berkas tercatat; muncul setelah sesi kerja dengan hook PostToolUse.</p>';
+      } else if (tab === "graf") {
+        await graphPanel(body, { project: name, depth: +(sessionStorage.getItem("proj-graph-depth") || 1) });
       } else if (tab === "sesi") {
         const [sessions, obs] = await Promise.all([api(`/api/subjects/${S()}/sessions${q}`), api(`/api/subjects/${S()}/episodes${q}&newest_first=true&limit=200`)]);
         body.innerHTML = `${sessionTable(sessions)}<h2>Observasi</h2>${obsList(obs.filter((e) => e.obs_type))}`;
@@ -754,7 +1102,8 @@ function sessionTable(sessions) {
 function obsList(obs) {
   return obs.length ? obs.slice(0, 200).map((e) => `<div class="tl-item" data-ep="${esc(e.id)}"><span class="tl-time">${esc(when(e.created_at))}<br><span class="small">${esc(e.project || "")}</span></span>
     <span>${typeBadge(e.obs_type)} <b>${esc(e.title || "Tanpa judul")}</b><br><span class="small muted">${esc(e.summary || e.text.slice(0, 200))}</span>
-    ${(e.files_modified || []).length ? `<br><span class="small">diubah: ${e.files_modified.slice(0, 5).map(esc).join(", ")}</span>` : ""}</span></div>`).join("") : '<p class="muted">Belum ada observasi.</p>';
+    ${(e.files_modified || []).length ? `<br><span class="small">diubah: ${e.files_modified.slice(0, 5).map(esc).join(", ")}</span>` : ""}
+    ${(e.links || []).length ? `<br><span class="small">${icon("link")} ${e.links.map((l) => wikiLink(l)).join(" ")}</span>` : ""}</span></div>`).join("") : '<p class="muted">Belum ada observasi.</p>';
 }
 
 async function showSource(id) {

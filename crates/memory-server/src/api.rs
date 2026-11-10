@@ -32,6 +32,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/subjects/{s}/sessions", get(sessions))
         .route("/api/subjects/{s}/projects", get(projects_overview))
         .route("/api/subjects/{s}/projects/files", get(project_files))
+        .route("/api/subjects/{s}/projects/graph", get(projects_graph))
         .route("/api/subjects/{s}/projects/meta", get(project_meta_get).put(project_meta_put))
         .route("/api/subjects/{s}/projects/share", get(project_share_get).post(project_share_post))
         .route("/api/sessions/{id}", get(session_detail))
@@ -941,6 +942,12 @@ async fn projects_overview(State(st): State<AppState>, Path(s): Path<String>) ->
     }
     // Metadata pengguna (repo, tag, tautan); proyek yang hanya punya metadata tetap tampil.
     let metas = st.rt.store.list_project_meta(&s).await?;
+    // Tautan `[[...]]` yang ditulis di episode (memori agent/sesi) untuk backlink.
+    let link_rows: Vec<memory_store::EpisodeLinkRow> = eps
+        .iter()
+        .filter(|e| !e.links.is_empty())
+        .map(|e| memory_store::EpisodeLinkRow { project: e.project.clone(), entity_ids: vec![], links: e.links.clone() })
+        .collect();
     for m in &metas {
         let k = key(&m.project);
         names.entry(k.clone()).or_insert_with(|| m.project.clone());
@@ -957,6 +964,7 @@ async fn projects_overview(State(st): State<AppState>, Path(s): Path<String>) ->
             v["tags"] = json!(meta.map(|m| m.tags.clone()).unwrap_or_default());
             v["links"] = json!(meta.map(|m| m.links.clone()).unwrap_or_default());
             v["backlinks"] = json!(memory_store::Store::project_backlinks(&metas, &name));
+            v["episode_backlinks"] = json!(memory_store::Store::episode_backlinks(&link_rows, &name));
             v["repo"] = json!(repo);
             v["repo_name"] = json!(repo.as_deref().map(memory_core::project::repo_short_name));
             v["repo_url"] = json!(repo.as_deref().and_then(memory_core::project::repo_web_url));
@@ -984,6 +992,38 @@ async fn projects_overview(State(st): State<AppState>, Path(s): Path<String>) ->
 }
 
 #[derive(Deserialize)]
+struct GraphQ {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    depth: Option<usize>,
+    #[serde(default)]
+    tags: Option<bool>,
+    #[serde(default)]
+    entities: Option<bool>,
+    #[serde(default)]
+    max_nodes: Option<usize>,
+}
+
+/// Graf proyek bergaya Obsidian (global, atau lokal bila `project` diisi): simpul proyek/tag/entitas,
+/// sisi `link` (tautan `[[...]]`), `mention`, `tag`, `entity`.
+async fn projects_graph(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<GraphQ>) -> ApiResult<memory_retrieve::ProjectGraph> {
+    check(&s)?;
+    let project = q.project.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
+    if project.as_deref().is_some_and(|p| p.chars().count() > 200) {
+        return Err(ApiError::BadRequest("nama proyek terlalu panjang".into()));
+    }
+    let opts = memory_retrieve::GraphOpts {
+        project,
+        depth: q.depth.unwrap_or(1).clamp(1, 3),
+        include_tags: q.tags.unwrap_or(true),
+        include_entities: q.entities.unwrap_or(true),
+        max_nodes: q.max_nodes.unwrap_or(memory_retrieve::GRAPH_MAX_NODES).clamp(10, 2000),
+    };
+    Ok(Json(st.rt.retriever.project_graph(&s, &opts).await?))
+}
+
+#[derive(Deserialize)]
 struct ProjectMetaIn {
     project: String,
     #[serde(default)]
@@ -999,7 +1039,7 @@ struct ProjectMetaIn {
 async fn project_meta_get(State(st): State<AppState>, Path(s): Path<String>, Query(q): Query<ProjectQ>) -> ApiResult<Value> {
     check(&s)?;
     let name = q.project.as_deref().map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| ApiError::BadRequest("project wajib diisi".into()))?;
-    let all = st.rt.store.list_project_meta(&s).await?;
+    let (all, link_rows) = tokio::try_join!(st.rt.store.list_project_meta(&s), st.rt.store.episode_link_rows(&s))?;
     let meta = st.rt.store.get_project_meta(&s, name).await?;
     let names = st.rt.store.project_names(&s, name).await?;
     let sessions = st.rt.store.list_sessions(&s, &names, 50).await?;
@@ -1016,6 +1056,7 @@ async fn project_meta_get(State(st): State<AppState>, Path(s): Path<String>, Que
         "project": name,
         "meta": meta,
         "backlinks": memory_store::Store::project_backlinks(&all, name),
+        "episode_backlinks": memory_store::Store::episode_backlinks(&link_rows, meta.as_ref().map(|m| m.project.as_str()).unwrap_or(name)),
         "repo_detected": detected,
         "repo_name": repo.as_deref().map(memory_core::project::repo_short_name),
         "repo_url": repo.as_deref().and_then(memory_core::project::repo_web_url),

@@ -19,6 +19,12 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
   `.git/config` of the session folder), notes with Obsidian-style `[[Project]]` links plus backlinks,
   and group tags. The Projects page filters and groups by tag; `project_context` now reports the
   repository, tags and related projects to agents. API: `GET/PUT /api/subjects/{s}/projects/meta`.
+- Obsidian-style project graph: `[[Project]]` links written in remembered text and session observations
+  are stored on the episode (`links`) and count as backlinks ("linked in memory") next to note backlinks.
+  `GET /api/subjects/{s}/projects/graph?project=&depth=&tags=&entities=` returns project, tag and entity
+  nodes with `link`, `mention`, `tag` and `entity` edges (global, or a local graph around one project).
+  The UI adds a *Project graph* page and a *Graph* tab per project (canvas, pan/zoom/drag, search, filters,
+  text adjacency list); `project_context` lists linked and mutually-mentioning projects.
 - `engram projects remap <plan.json> [--apply]`: move episodes, sessions, sources and lessons of old
   data to the right project and add group tags; dry run by default, `null` clears a project.
 
