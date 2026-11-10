@@ -30,8 +30,22 @@ from pathlib import Path
 DEFAULT_MAX_CHARS = 6000
 
 
+def resolve_data_dir() -> Path:
+    if os.environ.get("ENGRAM_DATA_DIR"):
+        return Path(os.environ["ENGRAM_DATA_DIR"])
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "id.engram.ai"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        return (Path(appdata) if appdata else home) / "id.engram.ai"
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg_data) if xdg_data else (home / ".local" / "share")
+    return base / "id.engram.ai"
+
+
 def load_connection() -> tuple[str, str]:
-    data_dir = Path.home() / "Library" / "Application Support" / "id.engram.ai"
+    data_dir = resolve_data_dir()
     mcp_url = "http://127.0.0.1:7878/mcp"
     token = os.environ.get("MEMORY_TOKEN", "").strip()
     conn_file = data_dir / "connection.json"

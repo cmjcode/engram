@@ -29,12 +29,20 @@ UNINSTALL=0
 DRY_RUN=0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DATA_DIR="$HOME/Library/Application Support/id.engram.ai"
+OS="$(uname -s)"
+if [[ -n "${ENGRAM_DATA_DIR:-}" ]]; then
+  DATA_DIR="$ENGRAM_DATA_DIR"
+elif [[ "$OS" == "Darwin" ]]; then
+  DATA_DIR="$HOME/Library/Application Support/id.engram.ai"
+else
+  DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/id.engram.ai"
+fi
 CONFIG="$DATA_DIR/memory.toml"
 BIN="$ROOT/target/release/engram"
 TOKEN_FILE="$DATA_DIR/mcp_token"
 AGENT_LABEL="id.engram.ai.token"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+ENV_D_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/engram.conf"
 DEFAULT_URL="http://127.0.0.1:7878/mcp"
 
 usage() {
@@ -76,7 +84,7 @@ case "$CLIENT" in
   all)
     CLIENTS=(antigravity gemini claude cursor)
     if [[ -d "$HOME/.codex" ]] || command -v codex >/dev/null; then CLIENTS+=(codex); fi
-    if [[ -d "$HOME/.codeium/windsurf" || -d "/Applications/Windsurf.app" ]]; then CLIENTS+=(windsurf); fi
+    if [[ -d "$HOME/.codeium/windsurf" || -d "/Applications/Windsurf.app" ]] || command -v windsurf >/dev/null; then CLIENTS+=(windsurf); fi
     ;;
   *) echo "Client tidak dikenal: $CLIENT" >&2; exit 2 ;;
 esac
@@ -104,7 +112,13 @@ command -v python3 >/dev/null || { echo "python3 diperlukan untuk mengedit confi
 # ---------- token & URL (mode http) ----------
 
 ensure_token() {
-  [[ -n "$TOKEN" ]] || TOKEN="$(launchctl getenv MEMORY_TOKEN 2>/dev/null || true)"
+  [[ -n "$TOKEN" ]] || TOKEN="${MEMORY_TOKEN:-}"
+  if [[ -z "$TOKEN" && "$OS" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+    TOKEN="$(launchctl getenv MEMORY_TOKEN 2>/dev/null || true)"
+  fi
+  if [[ -z "$TOKEN" && "$OS" != "Darwin" ]] && command -v systemctl >/dev/null 2>&1; then
+    TOKEN="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^MEMORY_TOKEN=//p' | head -1 || true)"
+  fi
   if [[ -z "$TOKEN" && -f "$TOKEN_FILE" ]]; then
     TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
   fi
@@ -115,14 +129,22 @@ ensure_token() {
 
   step "Menyimpan token tetap MEMORY_TOKEN"
   if [[ $DRY_RUN -eq 1 ]]; then
-    info "[dry-run] simpan token ke $TOKEN_FILE dan $AGENT_PLIST"
+    if [[ "$OS" == "Darwin" ]]; then
+      info "[dry-run] simpan token ke $TOKEN_FILE dan $AGENT_PLIST"
+    else
+      info "[dry-run] simpan token ke $TOKEN_FILE dan $ENV_D_FILE"
+    fi
     return
   fi
-  mkdir -p "$DATA_DIR" "$(dirname "$AGENT_PLIST")"
+  mkdir -p "$DATA_DIR"
   (umask 077; printf '%s\n' "$TOKEN" > "$TOKEN_FILE")
-  # Aplikasi GUI mewarisi env dari launchd. LaunchAgent ini mengisi ulang
-  # MEMORY_TOKEN setiap login, karena `launchctl setenv` hilang saat reboot.
-  (umask 077; cat > "$AGENT_PLIST" <<EOF
+  info "Token disimpan di $TOKEN_FILE"
+
+  if [[ "$OS" == "Darwin" ]]; then
+    mkdir -p "$(dirname "$AGENT_PLIST")"
+    # Aplikasi GUI mewarisi env dari launchd. LaunchAgent ini mengisi ulang
+    # MEMORY_TOKEN setiap login, karena `launchctl setenv` hilang saat reboot.
+    (umask 077; cat > "$AGENT_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -137,12 +159,24 @@ ensure_token() {
 </dict>
 </plist>
 EOF
-  )
-  launchctl setenv MEMORY_TOKEN "$TOKEN"
-  launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" 2>/dev/null || true
-  info "Token disimpan di $TOKEN_FILE"
-  info "LaunchAgent: $AGENT_PLIST (token tetap setelah reboot)"
+    )
+    if command -v launchctl >/dev/null 2>&1; then
+      launchctl setenv MEMORY_TOKEN "$TOKEN"
+      launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+      launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" 2>/dev/null || true
+    fi
+    info "LaunchAgent: $AGENT_PLIST (token tetap setelah reboot)"
+  else
+    mkdir -p "$(dirname "$ENV_D_FILE")"
+    (umask 077; printf 'MEMORY_TOKEN=%s\n' "$TOKEN" > "$ENV_D_FILE")
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user set-environment "MEMORY_TOKEN=$TOKEN" 2>/dev/null || true
+    fi
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+      MEMORY_TOKEN="$TOKEN" dbus-update-activation-environment --systemd MEMORY_TOKEN 2>/dev/null || true
+    fi
+    info "Environment systemd: $ENV_D_FILE (token tetap setelah login ulang)"
+  fi
 }
 
 mcp_url() {
@@ -669,8 +703,13 @@ for c in "${CLIENTS[@]}"; do "do_$c"; done
 
 if [[ $UNINSTALL -eq 1 ]]; then
   step "Token"
-  info "Token & LaunchAgent dibiarkan (mungkin dipakai client lain). Untuk menghapus:"
-  info "  launchctl bootout gui/$(id -u)/$AGENT_LABEL; rm \"$AGENT_PLIST\" \"$TOKEN_FILE\"; launchctl unsetenv MEMORY_TOKEN"
+  if [[ "$OS" == "Darwin" ]]; then
+    info "Token & LaunchAgent dibiarkan (mungkin dipakai client lain). Untuk menghapus:"
+    info "  launchctl bootout gui/$(id -u)/$AGENT_LABEL; rm \"$AGENT_PLIST\" \"$TOKEN_FILE\"; launchctl unsetenv MEMORY_TOKEN"
+  else
+    info "Token dibiarkan (mungkin dipakai client lain). Untuk menghapus:"
+    info "  rm -f \"$ENV_D_FILE\" \"$TOKEN_FILE\"; systemctl --user unset-environment MEMORY_TOKEN 2>/dev/null || true"
+  fi
 elif [[ "$MODE" == "http" && $DRY_RUN -eq 0 ]]; then
   verify_http
   info "Untuk 'engram serve' dari terminal: export MEMORY_TOKEN=\$(cat \"$TOKEN_FILE\")"

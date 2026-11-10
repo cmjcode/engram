@@ -158,9 +158,22 @@ def extract_project_name(payload: dict) -> str:
     return ""
 
 
-def load_connection() -> tuple[str, str, Path]:
+def resolve_data_dir() -> Path:
+    if os.environ.get("ENGRAM_DATA_DIR"):
+        return Path(os.environ["ENGRAM_DATA_DIR"])
     home = Path.home()
-    data_dir = home / "Library" / "Application Support" / "id.engram.ai"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "id.engram.ai"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        return (Path(appdata) if appdata else home) / "id.engram.ai"
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg_data) if xdg_data else (home / ".local" / "share")
+    return base / "id.engram.ai"
+
+
+def load_connection() -> tuple[str, str, Path]:
+    data_dir = resolve_data_dir()
     conn_file = data_dir / "connection.json"
     token_file = data_dir / "mcp_token"
 
