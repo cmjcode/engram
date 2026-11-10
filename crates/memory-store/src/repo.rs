@@ -31,14 +31,24 @@ pub struct EpisodeFilter {
     pub offset: usize,
 }
 
-/// Baris ringan episode untuk graf/backlink proyek: tanpa teks dan embedding.
+/// `null` (kolom yang dipilih eksplisit tetapi tidak ada di record lama) dibaca sebagai nilai default.
+fn null_as_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    Ok(<Option<T> as serde::Deserialize>::deserialize(d)?.unwrap_or_default())
+}
+
+/// Baris ringan episode untuk graf/backlink proyek: tanpa teks dan embedding. Episode dari
+/// sebelum field `links` ada mengembalikan `links: null` pada SELECT berkolom, bukan field kosong.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EpisodeLinkRow {
     #[serde(default)]
     pub project: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub entity_ids: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub links: Vec<String>,
 }
 

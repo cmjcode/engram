@@ -15,3 +15,11 @@ __pycache__/
 
 # Gold set evaluasi (berisi chat asli)
 /eval
+vault/repo_share.json
+vault/db/000004.log
+vault/db/CURRENT
+vault/db/IDENTITY
+vault/db/LOCK
+vault/db/LOG
+vault/db/MANIFEST-000005
+vault/db/OPTIONS-000007

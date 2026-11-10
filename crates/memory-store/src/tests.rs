@@ -326,3 +326,24 @@ async fn project_meta_roundtrip_and_backlinks() {
     assert_eq!(store.list_project_meta("budi").await.unwrap().len(), 2);
 }
 
+/// Regresi: episode lama (sebelum field `links`) dan entitas yang tidak ada tidak boleh
+/// menggagalkan graf proyek ("invalid type: null, expected a sequence").
+#[tokio::test]
+async fn episode_link_rows_tolerates_old_episodes() {
+    let s = mem().await;
+    let old = json!({"id": "old1", "subject": "s", "text": "lama", "status": "active", "project": "LLM-MEMORY"});
+    s.upsert("episode", "old1", &old, None).await.unwrap();
+    let null_ids = json!({"id": "old2", "subject": "s", "text": "lama", "status": "active", "project": "TABULAR", "entity_ids": null});
+    s.upsert("episode", "old2", &null_ids, None).await.unwrap();
+    let new = json!({"id": "new1", "subject": "s", "text": "baru", "status": "active", "project": "TABULAR", "entity_ids": ["e1"], "links": ["LLM-MEMORY"]});
+    s.upsert("episode", "new1", &new, None).await.unwrap();
+    let no_project = json!({"id": "np", "subject": "s", "text": "x", "status": "active"});
+    s.upsert("episode", "np", &no_project, None).await.unwrap();
+    let mut rows = s.episode_link_rows("s").await.unwrap();
+    rows.sort_by(|a, b| a.links.len().cmp(&b.links.len()).then(a.project.cmp(&b.project)));
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows[0].links.is_empty() && rows[0].entity_ids.is_empty());
+    assert_eq!(rows[2].links, vec!["LLM-MEMORY".to_string()]);
+    assert_eq!(Store::episode_backlinks(&rows, "LLM-MEMORY"), vec!["TABULAR".to_string()]);
+    assert!(s.entities_by_ids(&["tidak-ada".to_string()]).await.unwrap().is_empty());
+}
