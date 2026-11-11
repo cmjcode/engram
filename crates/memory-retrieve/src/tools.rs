@@ -157,6 +157,10 @@ pub struct ProjectContext {
     /// Proyek yang saling menyebut tanpa tautan eksplisit (dari entitas proyek di episode), maks. 5.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related_auto: Vec<String>,
+    /// Konteks seluruh grup proyek (tag bersama, mis. `#VOLTUNES`): peta repo lain,
+    /// arsitektur bersama dari proyek payung, konvensi lintas repo, sesi terbaru.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<crate::GroupContext>,
     /// Ringkasan konteks siap pakai untuk AI coding agent.
     pub context: String,
 }
@@ -166,6 +170,8 @@ pub struct ProjectContext {
 pub struct ToolOpts {
     /// Perkiraan token untuk teks konteks; `None` = `retrieval.tool_budget_tokens`.
     pub budget_tokens: Option<usize>,
+    /// Jangan sertakan konteks grup proyek di `project_context` (bawaan: disertakan).
+    pub skip_group: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -529,6 +535,7 @@ impl Retriever {
 
     pub async fn project_context_with(&self, subject: &str, project: &str, task: Option<&str>, opts: &ToolOpts) -> Result<ProjectContext> {
         let proj = project.trim();
+        let explicit_budget = opts.budget_tokens.is_some();
         let budget_tokens = opts.budget_tokens.unwrap_or(self.cfg.retrieval.tool_budget_tokens).clamp(200, 50_000);
         let project_names = self.store.project_names(subject, proj).await?;
         let query_str = match task.map(str::trim).filter(|t| !t.is_empty()) {
@@ -722,6 +729,27 @@ impl Retriever {
             || !principles.is_empty()
             || !lessons.is_empty();
 
+        // Grup proyek (tag bersama, mis. `#VOLTUNES`): sertakan gambaran seluruh repo saudaranya.
+        let group = if opts.skip_group {
+            None
+        } else {
+            let cwds: Vec<String> = sessions.iter().filter_map(|s| s.cwd.clone()).collect();
+            let own_ids: HashSet<String> = lessons.iter().map(|l| l.id.clone()).collect();
+            self.group_context(subject, meta.as_ref().map(|m| m.project.as_str()).unwrap_or(proj), &metas, &cwds, &own_ids)
+                .await?
+                .filter(|g| g.has_data() || !g.lessons.is_empty() || !g.episodes.is_empty())
+        };
+        let own_found = found;
+        let found = found || group.as_ref().is_some_and(|g| g.has_data());
+        // Anggaran: bagian proyek sendiri dulu, lalu grup. Tanpa `budget` eksplisit grup mendapat
+        // tambahan `group_budget_tokens`; dengan `budget` eksplisit grup memakai ~40% darinya.
+        let (own_budget, total_budget) = match &group {
+            None => (budget_tokens, budget_tokens),
+            Some(_) if explicit_budget => (budget_tokens * 3 / 5, budget_tokens),
+            Some(_) => (budget_tokens, (budget_tokens + self.cfg.retrieval.group_budget_tokens).min(50_000)),
+        };
+        let limit = std::cell::Cell::new(own_budget);
+
         // Deteksi metadata Git & berkas yang sudah dihapus/dipindah di disk (bila akar repo lokal diketahui dari sesi).
         let repo_root = sessions
             .iter()
@@ -751,7 +779,7 @@ impl Retriever {
 
         let mut ctx = String::new();
         let push = |line: &str, out: &mut String| -> bool {
-            if crate::approx_tokens(out) + crate::approx_tokens(line) > budget_tokens {
+            if crate::approx_tokens(out) + crate::approx_tokens(line) > limit.get() {
                 return false;
             }
             out.push_str(line);
@@ -858,8 +886,15 @@ impl Retriever {
                 }
             }
         }
-        if !found {
-            push("\n(Belum ada catatan memori untuk proyek ini.)", &mut ctx);
+        if !own_found {
+            push(
+                if group.is_some() { "\n(Belum ada catatan memori khusus proyek ini; lihat konteks grupnya di bawah.)" } else { "\n(Belum ada catatan memori untuk proyek ini.)" },
+                &mut ctx,
+            );
+        }
+        if let Some(g) = &group {
+            limit.set(total_budget);
+            crate::render_group(g, proj, task, &mut |l: &str| push(l, &mut ctx));
         }
 
         Ok(ProjectContext {
@@ -876,6 +911,7 @@ impl Retriever {
             repo,
             related,
             related_auto,
+            group,
             context: ctx,
         })
     }

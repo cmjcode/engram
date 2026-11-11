@@ -280,7 +280,7 @@ async fn index_mode_get_episodes_and_anchor_timeline() {
 
     // Anggaran: project_context dengan budget kecil tetap valid dan pendek.
     let pc = r
-        .project_context_with("budi", "LLM-MEMORY", None, &crate::ToolOpts { budget_tokens: Some(200) })
+        .project_context_with("budi", "LLM-MEMORY", None, &crate::ToolOpts { budget_tokens: Some(200), ..Default::default() })
         .await
         .unwrap();
     assert!(pc.found);
@@ -292,3 +292,113 @@ async fn index_mode_get_episodes_and_anchor_timeline() {
 
 #[allow(dead_code)]
 fn _unused(_: Value) {}
+
+#[tokio::test]
+async fn project_context_and_recall_cover_project_group() {
+    use memory_core::model::{Entity, EntityKind, EntityStatus, Evidence, Fact, FactKind, FactStatus};
+    use memory_core::TimeRef;
+    let (r, p, _d) = setup().await;
+    let mut ep_of = std::collections::HashMap::new();
+    for (proj, text) in [
+        ("api-a", "Pada project api-a kita memutuskan memakai JWT untuk otentikasi pengguna."),
+        ("api-b", "Pada project api-b kita memutuskan memakai antrean Redis Streams untuk job laporan."),
+        ("VOLTUNES", "Seluruh layanan VOLTUNES memakai paket go-helper sqlsafe untuk kueri aman."),
+        ("OTHER", "Pada project OTHER kita memakai Kafka untuk telemetri armada."),
+    ] {
+        let out = p
+            .ingest(IngestDoc {
+                subject: "budi".into(),
+                kind: SourceKind::AgentConversation,
+                title: format!("Diingat agent: claude-code:{proj}"),
+                text: text.into(),
+                meta: json!({"source": format!("claude-code:{proj}")}),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        p.process_source(&out.source.id, None).await.unwrap();
+        let eps = r.store.list_episodes("budi", &memory_store::EpisodeFilter { project: Some(proj.into()), limit: 5, ..Default::default() }).await.unwrap();
+        ep_of.insert(proj, eps[0].id.clone());
+    }
+    let store = &r.store;
+    for (p, tags) in [("api-a", vec!["VOLTUNES"]), ("api-b", vec!["#voltunes"]), ("OTHER", vec!["FOX"])] {
+        store.put_project_meta(&ProjectMeta::build("budi", p, None, "", &tags.iter().map(|t| t.to_string()).collect::<Vec<_>>(), None)).await.unwrap();
+    }
+    let ent = |id: &str, name: &str, kind: EntityKind| Entity {
+        id: id.into(),
+        subject: "budi".into(),
+        kind,
+        name: name.into(),
+        aliases: vec![],
+        description: String::new(),
+        status: EntityStatus::Confirmed,
+        merged_into: None,
+        is_self: false,
+        gender: None,
+        mention_count: 1,
+        episode_ids: vec![],
+        created_at: String::new(),
+    };
+    store.put_entity(&ent("ent-b", "api-b", EntityKind::Project), None).await.unwrap();
+    store.put_entity(&ent("ent-v", "VOLTUNES", EntityKind::Org), None).await.unwrap();
+    let fact = |id: &str, eid: &str, pred: &str, obj: &str, cat: &str, ep: &str| Fact {
+        id: id.into(),
+        subject: "budi".into(),
+        entity_id: eid.into(),
+        predicate: pred.into(),
+        category: cat.into(),
+        object_entity: None,
+        object_text: obj.into(),
+        kind: FactKind::default(),
+        exclusive: false,
+        time: TimeRef::Unknown,
+        valid_from: Some("2026-01-01".into()),
+        valid_to: None,
+        ongoing: true,
+        time_confidence: 0.8,
+        observed_at: "2026-01-01".into(),
+        confidence: 0.9,
+        evidence: vec![Evidence { episode_id: ep.into(), quote: String::new() }],
+        status: FactStatus::Active,
+        superseded_by: None,
+        supersedes: None,
+        created_at: String::new(),
+    };
+    store.put_fact(&fact("f-b1", "ent-b", "adalah", "layanan antrean laporan berbasis Redis Streams", "arsitektur", &ep_of["api-b"])).await.unwrap();
+    store.put_fact(&fact("f-b2", "ent-b", "menggunakan", "Go", "tech_stack", &ep_of["api-b"])).await.unwrap();
+    store.put_fact(&fact("f-v1", "ent-v", "berjalan di", "jaringan docker eksternal chick", "infrastruktur", &ep_of["VOLTUNES"])).await.unwrap();
+
+    // Satu repo ditanya: konteks memuat peta repo saudara + arsitektur payung, tanpa grup lain.
+    let pc = r.project_context("budi", "api-a", None).await.unwrap();
+    let g = pc.group.as_ref().expect("api-a tergabung dalam grup VOLTUNES");
+    assert_eq!(g.group.members, vec!["api-b".to_string()]);
+    assert_eq!(g.group.umbrella.as_deref(), Some("VOLTUNES"));
+    assert!(pc.context.contains("## Ekosistem grup #VOLTUNES"), "{}", pc.context);
+    assert!(pc.context.contains("- api-b: adalah layanan antrean laporan berbasis Redis Streams | Go"), "{}", pc.context);
+    assert!(pc.context.contains("jaringan docker eksternal chick"), "{}", pc.context);
+    assert!(!pc.context.contains("Kafka"), "grup lain bocor:\n{}", pc.context);
+    assert!(g.episodes.iter().any(|e| e.project.as_deref() == Some("api-b")));
+
+    // Repo baru tanpa tag/memori: grup dikenali dari folder induk di path sesi tidak tersedia,
+    // tetapi `VOLTUNES/<repo>` dikenali dari prefiksnya.
+    let fresh = r.project_context("budi", "VOLTUNES/api-new", None).await.unwrap();
+    assert!(fresh.found && fresh.context.contains("lihat konteks grupnya"), "{}", fresh.context);
+
+    // Nama grup sendiri: seluruh anggota.
+    let all = r.project_context("budi", "VOLTUNES", None).await.unwrap();
+    let ga = all.group.as_ref().unwrap();
+    assert!(ga.group.is_umbrella);
+    assert_eq!(ga.group.members, vec!["api-a".to_string(), "api-b".to_string()]);
+
+    // Bisa dimatikan.
+    let solo = r.project_context_with("budi", "api-a", None, &crate::ToolOpts { skip_group: true, ..Default::default() }).await.unwrap();
+    assert!(solo.group.is_none() && !solo.context.contains("Ekosistem grup"));
+
+    // recall dengan project: fakta repo saudara ikut, kecuali skip_group.
+    let q = RecallQuery { project: Some("api-a".into()), ..RecallQuery::new("budi", "api-b antrean Redis Streams") };
+    let res = r.recall(&q).await.unwrap();
+    assert!(res.facts.iter().any(|f| f.id == "f-b1"), "{:?}", res.facts.iter().map(|f| &f.statement).collect::<Vec<_>>());
+    assert!(res.episodes.iter().any(|e| e.project.as_deref() == Some("api-b") && e.via.contains(&"group".to_string())));
+    let res_solo = r.recall(&RecallQuery { skip_group: true, ..q.clone() }).await.unwrap();
+    assert!(!res_solo.facts.iter().any(|f| f.id == "f-b1"));
+}

@@ -132,10 +132,11 @@ fn all_tools() -> Vec<Value> {
         tool(
             "project_context",
             "Project context",
-            "Get the full cross-tool context of a project, repository, or service before working on it: the project entity, architecture and configuration facts that hold now, technical decisions and bug fixes, the subject's relevant engineering principles, and related past sessions. Call this at the start of a coding task.",
+            "Get the full cross-tool context of a project, repository, or service before working on it: the project entity, architecture and configuration facts that hold now, technical decisions and bug fixes, the subject's relevant engineering principles, and related past sessions. When the project belongs to a project group (a shared tag such as 'VOLTUNES', or a parent folder named after one), the result also maps every sibling repository in the group, the umbrella project's shared architecture, cross-repo conventions, and recent group sessions. Passing the group name itself (e.g. 'VOLTUNES') gives the whole group. Call this at the start of a coding task.",
             schema(json!({
                 "project": {"type": "string", "description": "Project, repository, or service name (e.g. 'LLM-MEMORY' or 'BACKEND/api-data-warehouse')"},
                 "task": {"type": "string", "description": "The specific task or topic being worked on (optional; focuses the result)"},
+                "group": {"type": "boolean", "description": "Include the context of the whole project group (sibling repos sharing a tag). Default true"},
                 "subject": subject_prop(),
                 "budget": {"type": "integer", "minimum": 200, "maximum": 50000, "description": "Approximate token budget for the text result (default from config, ~2500)"}
             }), &["project"]),
@@ -148,7 +149,8 @@ fn all_tools() -> Vec<Value> {
             "Search the subject's memory (technical decisions, project architecture, bug root causes, stories, facts, work/life principles, traits) with hybrid vector + keyword + graph retrieval. Every fact is labelled 'current' or 'past' with its validity range. Set 'project' to prioritise one project/repository, 'from'/'to' for a time window, and 'as_of' to see memory as it stood on that date. Results come back as a compact index by default; call get_episodes with the IDs you need.",
             schema(json!({
                 "query": {"type": "string", "description": "Question, topic, bug, or feature/project name"},
-                "project": {"type": "string", "description": "Filter/prioritise a project or service name (e.g. 'LLM-MEMORY' or 'BACKEND/api-master-sensor')"},
+                "project": {"type": "string", "description": "Filter/prioritise a project or service name (e.g. 'LLM-MEMORY' or 'BACKEND/api-master-sensor'). Sibling repos in the same project group (shared tag, e.g. 'VOLTUNES') stay in scope at lower priority; a group name covers the whole group"},
+                "group": {"type": "boolean", "description": "With 'project': also search sibling repos in the same project group. Default true"},
                 "subject": subject_prop(),
                 "from": date("Start of time window"),
                 "to": date("End of time window"),
@@ -373,7 +375,12 @@ fn budget_tokens(st: &AppState, args: &Value) -> usize {
 /// tidak ada tool yang membanjiri konteks klien.
 async fn call_tool(st: &AppState, name: &str, args: &Value) -> Result<Value, String> {
     let mut v = call_tool_inner(st, name, args).await?;
-    let max_chars = budget_tokens(st, args) * 4 + 400;
+    let mut max_tokens = budget_tokens(st, args);
+    // `project_context` tanpa `budget` eksplisit mendapat tambahan anggaran untuk bagian grup.
+    if name == "project_context" && args["budget"].as_u64().is_none() && args["group"].as_bool() != Some(false) {
+        max_tokens = (max_tokens + st.rt.cfg.retrieval.group_budget_tokens).min(50_000);
+    }
+    let max_chars = max_tokens * 4 + 400;
     if let Some(text) = v["content"][0]["text"].as_str()
         && text.chars().count() > max_chars
     {
@@ -405,6 +412,7 @@ async fn call_tool_inner(st: &AppState, name: &str, args: &Value) -> Result<Valu
                 // Agent: indeks ringkas dulu, detail per ID lewat get_episodes.
                 detail: Some(s("detail").unwrap_or_else(|| "index".into())),
                 budget: args["budget"].as_u64().map(|x| x as usize),
+                skip_group: args["group"].as_bool() == Some(false),
             };
             let mut res = r.recall(&q).await.map_err(e)?;
             // structuredContent ikut diringkas di mode indeks (kutipan panjang dibuang).
@@ -418,7 +426,10 @@ async fn call_tool_inner(st: &AppState, name: &str, args: &Value) -> Result<Valu
         }
         "project_context" => {
             let project = s("project").ok_or("project wajib diisi")?;
-            let opts = memory_retrieve::ToolOpts { budget_tokens: Some(budget_tokens(st, args)) };
+            let opts = memory_retrieve::ToolOpts {
+                budget_tokens: args["budget"].as_u64().map(|_| budget_tokens(st, args)),
+                skip_group: args["group"].as_bool() == Some(false),
+            };
             let pc = r.project_context_with(&subject, &project, s("task").as_deref(), &opts).await.map_err(e)?;
             let slim = json!({
                 "project": pc.project, "found": pc.found,
@@ -427,6 +438,14 @@ async fn call_tool_inner(st: &AppState, name: &str, args: &Value) -> Result<Valu
                 "repo": pc.repo,
                 "tags": pc.meta.as_ref().map(|m| m.tags.clone()).unwrap_or_default(),
                 "related_projects": pc.related,
+                "group": pc.group.as_ref().map(|g| json!({
+                    "tags": g.group.tags, "umbrella": g.group.umbrella, "is_umbrella": g.group.is_umbrella,
+                    "members": g.member_info,
+                    "shared_facts": g.shared_facts.iter().map(|f| json!({"id": f.id, "statement": f.statement, "category": f.category, "evidence": f.evidence})).collect::<Vec<_>>(),
+                    "shared_decisions": g.shared_decisions,
+                    "lessons": g.lessons.iter().map(|l| json!({"id": l.id, "project": l.project, "kind": l.kind, "title": l.title})).collect::<Vec<_>>(),
+                    "episodes": g.episodes.iter().map(|ep| json!({"id": ep.id, "project": ep.project, "title": ep.title, "time": ep.time, "approx_tokens": ep.approx_tokens})).collect::<Vec<_>>(),
+                })),
                 "decisions": pc.decisions,
                 "lessons": pc.lessons.iter().map(|l| json!({"id": l.id, "kind": l.kind, "title": l.title, "occurrences": l.occurrences})).collect::<Vec<_>>(),
                 "principles": pc.principles.iter().map(|p| json!({"id": p.principle.id, "statement": p.principle.statement, "confidence": p.principle.confidence})).collect::<Vec<_>>(),

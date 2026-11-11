@@ -497,6 +497,11 @@ struct ProjectContextQ {
     project: String,
     #[serde(default)]
     task: Option<String>,
+    /// `false` = tanpa konteks grup proyek.
+    #[serde(default)]
+    group: Option<bool>,
+    #[serde(default)]
+    budget: Option<usize>,
 }
 
 async fn project_context(
@@ -511,7 +516,7 @@ async fn project_context(
     Ok(Json(
         st.rt
             .retriever
-            .project_context(&s, &q.project, q.task.as_deref())
+            .project_context_with(&s, &q.project, q.task.as_deref(), &memory_retrieve::ToolOpts { budget_tokens: q.budget, skip_group: q.group == Some(false) })
             .await?,
     ))
 }
@@ -528,7 +533,7 @@ async fn project_context_post(
     Ok(Json(
         st.rt
             .retriever
-            .project_context(&s, &q.project, q.task.as_deref())
+            .project_context_with(&s, &q.project, q.task.as_deref(), &memory_retrieve::ToolOpts { budget_tokens: q.budget, skip_group: q.group == Some(false) })
             .await?,
     ))
 }
@@ -947,7 +952,7 @@ async fn projects_overview(State(st): State<AppState>, Path(s): Path<String>) ->
     let link_rows: Vec<memory_store::EpisodeLinkRow> = eps
         .iter()
         .filter(|e| !e.links.is_empty())
-        .map(|e| memory_store::EpisodeLinkRow { project: e.project.clone(), entity_ids: vec![], links: e.links.clone() })
+        .map(|e| memory_store::EpisodeLinkRow { project: e.project.clone(), entity_ids: vec![], links: e.links.clone(), created_at: e.created_at.clone() })
         .collect();
     for m in &metas {
         let k = key(&m.project);

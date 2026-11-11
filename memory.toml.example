@@ -66,6 +66,7 @@ top_k = 8
 candidate_k = 40
 context_budget_tokens = 3000  # anggaran teks `recall` (perkiraan token)
 tool_budget_tokens = 2500     # anggaran teks tool MCP lain (project_context, get_episodes, ...); klien bisa menaikkan per panggilan lewat `budget`
+group_budget_tokens = 3000    # tambahan untuk bagian "Ekosistem grup" project_context (proyek bertag sama, mis. VOLTUNES)
 min_similarity = 0.35
 graph_hops = 2
 

@@ -318,7 +318,7 @@ async fn mcp_install_disabled_without_local_url() {
 #[test]
 fn ui_has_no_icon_glyphs() {
     const ALLOWED: &[char] = &['·', '–', '—', '…'];
-    for (name, src) in [("index.html", crate::INDEX_HTML), ("app.js", crate::APP_JS), ("app.css", crate::APP_CSS), ("liquid-glass.js", crate::LIQUID_GLASS_JS)] {
+    for (name, src) in [("index.html", crate::INDEX_HTML), ("app.js", crate::APP_JS), ("app.css", crate::APP_CSS), ("liquid-glass.js", crate::LIQUID_GLASS_JS), ("graph.js", crate::GRAPH_JS)] {
         let bad: Vec<char> = src.chars().filter(|c| !c.is_ascii() && !ALLOWED.contains(c)).collect();
         assert!(bad.is_empty(), "{name} memuat karakter non-ASCII yang dilarang: {bad:?}");
     }
@@ -328,10 +328,32 @@ fn ui_has_no_icon_glyphs() {
 /// jadi `prompt()`/`confirm()`/`alert()` akan diam-diam gagal. Pakai formulir di halaman.
 #[test]
 fn ui_has_no_browser_dialogs() {
-    for call in ["prompt(", "confirm(", "alert("] {
-        let used = crate::APP_JS.lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| l.contains(call));
-        assert!(!used, "app.js memakai {call}");
+    for (name, src) in [("app.js", crate::APP_JS), ("graph.js", crate::GRAPH_JS)] {
+        for call in ["prompt(", "confirm(", "alert("] {
+            let used = src.lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| l.contains(call));
+            assert!(!used, "{name} memakai {call}");
+        }
     }
+}
+
+/// Smoke test graf proyek (bola 3D & 2D) di Node dengan DOM/kanvas tiruan; dilewati bila `node`
+/// tidak terpasang. Lihat `scripts/ui-graph-smoke.mjs`.
+#[test]
+fn ui_graph_smoke_test_passes() {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/ui-graph-smoke.mjs");
+    let out = match std::process::Command::new("node").arg(script).output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("node tidak tersedia, smoke test graf dilewati: {e}");
+            return;
+        }
+    };
+    assert!(
+        out.status.success(),
+        "smoke test graf gagal:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Pengendali palsu: layanan "workers" berhenti sampai dijalankan.
@@ -665,6 +687,10 @@ async fn project_graph_api_and_episode_backlinks() {
     let node = |g: &Value, id: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).cloned();
     assert_eq!(node(&g, "p:llm-memory").unwrap()["kind"], "project");
     assert_eq!(g["truncated"], false);
+    // Waktu memori terakhir untuk filter aktivitas: ada pada proyek bermemori dan diwarisi tag.
+    let last = node(&g, "p:llm-memory").unwrap()["last_at"].as_str().unwrap_or("").to_string();
+    assert!(last.starts_with("20"), "{g}");
+    assert_eq!(node(&g, "t:data").unwrap()["last_at"], json!(last));
 
     // Graf lokal dari sisi proyek yang ditautkan.
     let l: Value = c

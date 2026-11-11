@@ -58,6 +58,10 @@ pub struct GraphNode {
     pub missing: bool,
     /// Jumlah sisi yang menyentuh simpul.
     pub degree: u32,
+    /// Waktu memori terakhir (ISO 8601) dari episode proyek; tag/entitas mewarisi nilai terbaru
+    /// dari proyek tetangganya. `None` = belum ada memori (mis. simpul "missing").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -125,6 +129,7 @@ impl Builder {
             has_meta: false,
             missing: false,
             degree: 0,
+            last_at: None,
         })
     }
 
@@ -162,6 +167,10 @@ pub fn build_project_graph(metas: &[ProjectMeta], rows: &[EpisodeLinkRow], entit
             let n = b.node(&id, p, "project");
             n.weight += 1;
             n.missing = false;
+            // String ISO dari formatter yang sama bisa dibandingkan secara leksikografis.
+            if !r.created_at.is_empty() && n.last_at.as_deref().is_none_or(|c| c < r.created_at.as_str()) {
+                n.last_at = Some(r.created_at.clone());
+            }
         }
     }
 
@@ -255,6 +264,24 @@ pub fn build_project_graph(metas: &[ProjectMeta], rows: &[EpisodeLinkRow], entit
             if let Some(n) = nodes.get_mut(id) {
                 n.degree += 1;
             }
+        }
+    }
+    // Tag/entitas: terakhir aktif = memori terbaru dari proyek yang memakainya, agar filter
+    // aktivitas di UI menyembunyikan simpul sekunder yang basi secara konsisten.
+    let mut inherited: HashMap<String, String> = HashMap::new();
+    for e in &edges {
+        if e.kind != "tag" && e.kind != "entity" {
+            continue;
+        }
+        let Some(at) = nodes.get(&e.from).and_then(|n| n.last_at.clone()) else { continue };
+        let cur = inherited.entry(e.to.clone()).or_default();
+        if *cur < at {
+            *cur = at;
+        }
+    }
+    for (id, at) in inherited {
+        if let Some(n) = nodes.get_mut(&id) {
+            n.last_at = Some(at);
         }
     }
 
@@ -360,7 +387,11 @@ mod tests {
             project: Some(p.into()),
             entity_ids: ents.iter().map(|s| s.to_string()).collect(),
             links: links.iter().map(|s| s.to_string()).collect(),
+            created_at: String::new(),
         }
+    }
+    fn row_at(p: &str, ents: &[&str], links: &[&str], at: &str) -> EpisodeLinkRow {
+        EpisodeLinkRow { created_at: at.into(), ..row(p, ents, links) }
     }
     fn ent(id: &str, name: &str, kind: EntityKind) -> Entity {
         Entity {
@@ -387,9 +418,9 @@ mod tests {
         let metas =
             vec![meta("BACKEND/api-x", "Konsumen [[LLM-MEMORY]] dan [[Rencana Baru]]", &["OPERON"]), meta("TABULAR", "", &["operon"])];
         let rows = vec![
-            row("LLM-MEMORY", &["e_rust", "e_tab", "e_file"], &["TABULAR"]),
-            row("LLM-MEMORY", &["e_rust"], &["tabular", "llm-memory"]),
-            row("TABULAR", &["e_rust", "e_file2"], &[]),
+            row_at("LLM-MEMORY", &["e_rust", "e_tab", "e_file"], &["TABULAR"], "2026-11-01T08:00:00Z"),
+            row_at("LLM-MEMORY", &["e_rust"], &["tabular", "llm-memory"], "2026-11-10T09:30:00Z"),
+            row_at("TABULAR", &["e_rust", "e_file2"], &[], "2026-03-02T10:00:00Z"),
             row("api-x", &[], &[]),
         ];
         let entities = vec![
@@ -427,6 +458,22 @@ mod tests {
         assert!(!g.nodes.iter().any(|n| n.id == "e:e_file"));
         assert!(g.focus.is_none() && !g.truncated);
         assert_eq!(g.total_nodes, g.nodes.len());
+    }
+
+    #[test]
+    fn last_at_is_latest_memory_and_inherited_by_tags() {
+        let (m, r, e) = sample();
+        let g = build_project_graph(&m, &r, &e, &GraphOpts::default());
+        let at = |id: &str| g.nodes.iter().find(|n| n.id == id).unwrap().last_at.clone();
+        // Proyek: episode terbaru menang, bukan yang pertama.
+        assert_eq!(at("p:llm-memory").as_deref(), Some("2026-11-10T09:30:00Z"));
+        assert_eq!(at("p:tabular").as_deref(), Some("2026-03-02T10:00:00Z"));
+        // Episode tanpa waktu dan target [[...]] yang belum punya memori: tidak diketahui.
+        assert_eq!(at("p:backend/api-x"), None);
+        assert_eq!(at("p:rencanabaru"), None);
+        // Tag & entitas mewarisi waktu terbaru dari proyek yang memakainya.
+        assert_eq!(at("t:operon").as_deref(), Some("2026-03-02T10:00:00Z"));
+        assert_eq!(at("e:e_rust").as_deref(), Some("2026-11-10T09:30:00Z"));
     }
 
     #[test]

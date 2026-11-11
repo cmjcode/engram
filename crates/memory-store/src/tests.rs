@@ -335,7 +335,7 @@ async fn episode_link_rows_tolerates_old_episodes() {
     s.upsert("episode", "old1", &old, None).await.unwrap();
     let null_ids = json!({"id": "old2", "subject": "s", "text": "lama", "status": "active", "project": "TABULAR", "entity_ids": null});
     s.upsert("episode", "old2", &null_ids, None).await.unwrap();
-    let new = json!({"id": "new1", "subject": "s", "text": "baru", "status": "active", "project": "TABULAR", "entity_ids": ["e1"], "links": ["LLM-MEMORY"]});
+    let new = json!({"id": "new1", "subject": "s", "text": "baru", "status": "active", "project": "TABULAR", "entity_ids": ["e1"], "links": ["LLM-MEMORY"], "created_at": "2026-03-01T00:00:00Z"});
     s.upsert("episode", "new1", &new, None).await.unwrap();
     let no_project = json!({"id": "np", "subject": "s", "text": "x", "status": "active"});
     s.upsert("episode", "np", &no_project, None).await.unwrap();
@@ -344,6 +344,9 @@ async fn episode_link_rows_tolerates_old_episodes() {
     assert_eq!(rows.len(), 3, "{rows:?}");
     assert!(rows[0].links.is_empty() && rows[0].entity_ids.is_empty());
     assert_eq!(rows[2].links, vec!["LLM-MEMORY".to_string()]);
+    // `created_at` ikut terbaca; episode lama tanpa kolom itu menjadi string kosong.
+    assert_eq!(rows[2].created_at, "2026-03-01T00:00:00Z");
+    assert!(rows[0].created_at.is_empty());
     assert_eq!(Store::episode_backlinks(&rows, "LLM-MEMORY"), vec!["TABULAR".to_string()]);
     assert!(s.entities_by_ids(&["tidak-ada".to_string()]).await.unwrap().is_empty());
 }

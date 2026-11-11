@@ -6,6 +6,12 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
 ## [Unreleased]
 
 ### Added
+- Project groups: projects sharing a tag (e.g. `#VOLTUNES`) form a group. `project_context` for one
+  repo now adds an "Ekosistem grup" section: the umbrella project's shared architecture, a map of every
+  sibling repo (role + tech stack), cross-repo conventions and recent group sessions. Membership also
+  comes from a `GROUP/repo` prefix or a parent folder named after the tag. `recall` with `project`
+  keeps sibling repos in scope at lower priority; a group name covers the whole group. Opt out with
+  `group: false`; extra budget via `retrieval.group_budget_tokens` (default 3000).
 - `LICENSE` (AGPL-3.0-or-later), `CONTRIBUTING.md`, `SECURITY.md`, this changelog.
 - `README.en.md`: English documentation.
 - `server.json` for the official MCP Registry (`io.github.cmjcode/engram`), `Dockerfile` and
@@ -43,6 +49,18 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
   page; API `GET/POST /api/subjects/{s}/projects/share`.
 - `ingest_distilled` accepts known structure (`obs_type`, decisions, entities, facts, concepts) in
   `meta.extraction`.
+- Project graph as a rotating 3D globe (default) with a 2D toggle, still offline and dependency-free
+  (hand-written perspective projection on the existing canvas, code moved to `ui/graph.js`). Drag to
+  rotate, Shift+drag or two fingers to pan, wheel or pinch to zoom; auto-rotation on the global graph.
+- Graph detail panel: kind, memory count, last activity, tags, neighbours grouped by edge kind with the
+  reason for each link, and *Open*, *Focus here* (local graph without leaving the page, Back works) and
+  *Copy name* actions. Shareable URLs `#graf/<project>?depth=N`; "Open full graph" link on project pages.
+- Graph colouring by node kind, group tag (with a clickable legend that highlights a group) or activity;
+  "Active within 7/30/90 days" filter. Edge tooltips explain why two nodes are linked. Keyboard: arrows
+  step through nodes, Enter opens, Esc closes, `/` search, `m` 2D/3D, `r` auto-rotate.
+- Graph API nodes carry `last_at` (latest memory of a project; tags and entities inherit the newest of
+  their projects).
+- `scripts/ui-graph-smoke.mjs`: mock-DOM smoke test for the graph, run by `cargo test` when Node is present.
 
 ### Fixed
 - Project attribution per git repository: a watched folder that holds many repos (e.g. `FOX/`,
@@ -52,6 +70,8 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
   project, and OS temp folders (`/var/folders/.../T`) are no longer recorded as projects.
 
 ### Changed
+- Project graph: clicking a node now selects it and opens the detail panel; double-click (or Enter)
+  opens the project, tag or entity as before.
 - `build.sh` no longer contains credentials; it reads them from the environment, `~/.config/engram/notarize.env`
   or the macOS Keychain.
 

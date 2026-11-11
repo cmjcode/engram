@@ -503,8 +503,132 @@ pub fn remote_for_project<'a>(name: &str, cwds: impl IntoIterator<Item = &'a str
         .find_map(|root| detect_git_remote(&root))
 }
 
+/// Grup proyek (mis. `VOLTUNES`): semua proyek yang berbagi tag grup yang sama.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectGroup {
+    /// Tag grup (tanpa `#`) yang menyatukan proyek-proyek ini.
+    pub tags: Vec<String>,
+    /// Nama proyek anggota lain (tanpa proyek yang ditanyakan), urut nama.
+    pub members: Vec<String>,
+    /// Proyek yang ditanyakan adalah proyek payung grup (namanya sama dengan tag).
+    pub is_umbrella: bool,
+    /// Calon proyek payung (nama = tag pertama) bila yang ditanyakan bukan payung;
+    /// pemanggil memeriksa apakah proyek itu benar-benar punya memori.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub umbrella: Option<String>,
+}
+
+fn tag_key(t: &str) -> String {
+    project_key(t.trim().trim_start_matches('#'))
+}
+
+/// Tentukan grup untuk proyek `proj` dari metadata semua proyek subjek.
+///
+/// Urutan sumber tag: (1) tag di metadata proyek itu, (2) nama proyek sama dengan
+/// tag yang dipakai proyek lain (proyek payung, mis. `VOLTUNES`), (3) segmen awal
+/// nama `GRUP/repo`, (4) nama folder induk di path kerja `cwds` (mis.
+/// `.../VOLTUNES/BACKEND/api-x`) yang cocok dengan tag yang sudah ada.
+/// Anggota = semua proyek lain yang memiliki salah satu tag itu.
+pub fn resolve_group<'a>(metas: &[crate::ProjectMeta], proj: &str, cwds: impl IntoIterator<Item = &'a str>) -> Option<ProjectGroup> {
+    let proj = proj.trim();
+    if proj.is_empty() {
+        return None;
+    }
+    let pk = project_key(proj);
+    let own = metas.iter().find(|m| project_key(&m.project) == pk).or_else(|| metas.iter().find(|m| same_project(&m.project, proj)));
+    let known: Vec<String> = {
+        let mut v: Vec<String> = Vec::new();
+        for m in metas {
+            for t in &m.tags {
+                if !v.iter().any(|x| tag_key(x) == tag_key(t)) {
+                    v.push(t.clone());
+                }
+            }
+        }
+        v
+    };
+    let find_known = |cand: &str| known.iter().find(|t| tag_key(t) == tag_key(cand)).cloned();
+
+    let mut tags: Vec<String> = own.map(|m| m.tags.clone()).unwrap_or_default();
+    let mut is_umbrella = false;
+    if let Some(t) = find_known(proj) {
+        is_umbrella = true;
+        if !tags.iter().any(|x| tag_key(x) == tag_key(&t)) {
+            tags.push(t);
+        }
+    }
+    if tags.is_empty()
+        && let Some((head, _)) = proj.split_once('/')
+        && let Some(t) = find_known(head)
+    {
+        tags.push(t);
+    }
+    if tags.is_empty() {
+        'outer: for c in cwds {
+            let mut dir = Path::new(c).parent();
+            while let Some(d) = dir {
+                if is_ignored_dir(d) {
+                    break;
+                }
+                if let Some(t) = basename(d).and_then(|n| find_known(&n)) {
+                    tags.push(t);
+                    break 'outer;
+                }
+                dir = d.parent();
+            }
+        }
+    }
+    if tags.is_empty() {
+        return None;
+    }
+    let keys: Vec<String> = tags.iter().map(|t| tag_key(t)).collect();
+    let mut members: Vec<String> = metas
+        .iter()
+        .filter(|m| !same_project(&m.project, proj))
+        .filter(|m| m.tags.iter().any(|t| keys.contains(&tag_key(t))) || keys.contains(&project_key(&m.project)))
+        .map(|m| m.project.clone())
+        .collect();
+    members.sort_by_key(|m| m.to_lowercase());
+    members.dedup();
+    let umbrella = if is_umbrella { None } else { tags.first().cloned() };
+    members.retain(|m| umbrella.as_deref().is_none_or(|u| !same_project(m, u)));
+    Some(ProjectGroup { tags, members, is_umbrella, umbrella })
+}
+
+
 #[cfg(test)]
 mod tests {
+
+    fn gm(p: &str, tags: &[&str]) -> crate::ProjectMeta {
+        crate::ProjectMeta::build("s", p, None, "", &tags.iter().map(|t| t.to_string()).collect::<Vec<_>>(), None)
+    }
+
+    #[test]
+    fn resolve_group_by_tag_umbrella_prefix_and_cwd() {
+        let metas = vec![gm("api-a", &["VOLTUNES"]), gm("api-b", &["#voltunes"]), gm("iot-pwa", &["VOLTUNES"]), gm("TRACKER", &["FOX"]), gm("lone", &[])];
+
+        let g = super::resolve_group(&metas, "api-a", std::iter::empty()).unwrap();
+        assert_eq!(g.members, vec!["api-b", "iot-pwa"]);
+        assert_eq!(g.umbrella.as_deref(), Some("VOLTUNES"));
+        assert!(!g.is_umbrella);
+
+        // Nama proyek = tag: proyek payung, anggotanya seluruh grup.
+        let u = super::resolve_group(&metas, "voltunes", std::iter::empty()).unwrap();
+        assert!(u.is_umbrella && u.umbrella.is_none());
+        assert_eq!(u.members, vec!["api-a", "api-b", "iot-pwa"]);
+
+        // `GRUP/repo` tanpa metadata.
+        let p = super::resolve_group(&metas, "VOLTUNES/api-new", std::iter::empty()).unwrap();
+        assert_eq!(p.members, vec!["api-a", "api-b", "iot-pwa"]);
+
+        // Repo baru tanpa tag: dikenali dari folder induk di path kerja.
+        let c = super::resolve_group(&metas, "api-new", ["/work/PROJECT/VOLTUNES/BACKEND/api-new"]).unwrap();
+        assert_eq!(c.tags, vec!["VOLTUNES"]);
+        assert!(c.members.contains(&"api-a".to_string()));
+
+        assert!(super::resolve_group(&metas, "lone", ["/work/PROJECT/lone"]).is_none());
+        assert_eq!(super::resolve_group(&metas, "TRACKER", std::iter::empty()).unwrap().members, Vec::<String>::new());
+    }
     use super::*;
 
     /// Direktori uji di luar folder temp OS (yang sengaja tidak dianggap proyek) dan di luar repo git.

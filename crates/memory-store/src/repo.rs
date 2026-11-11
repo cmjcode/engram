@@ -11,6 +11,22 @@ use crate::{Result, Store, StoreError, binds};
 const EP: &str = "SELECT * OMIT embedding FROM episode";
 const EN: &str = "SELECT * OMIT embedding, alias_keys FROM entity";
 
+/// Baris ringan episode (tanpa teks/embedding) untuk meringkas banyak proyek sekaligus.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EpisodeBrief {
+    pub id: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub title: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub summary: String,
+    #[serde(default)]
+    pub obs_type: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EpisodeFilter {
     pub status: Option<EpisodeStatus>,
@@ -50,6 +66,9 @@ pub struct EpisodeLinkRow {
     pub entity_ids: Vec<String>,
     #[serde(default, deserialize_with = "null_as_default")]
     pub links: Vec<String>,
+    /// Waktu episode dibuat (ISO 8601), untuk "terakhir aktif" di graf. Kosong bila tidak ada.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -330,7 +349,7 @@ impl Store {
     pub async fn episode_link_rows(&self, subject: &str) -> Result<Vec<EpisodeLinkRow>> {
         let rows: Vec<EpisodeLinkRow> = self
             .rows_as(
-                "SELECT project, entity_ids, links FROM episode WHERE subject = $s AND status = 'active' AND project != NONE AND project != NULL;",
+                "SELECT project, entity_ids, links, created_at FROM episode WHERE subject = $s AND status = 'active' AND project != NONE AND project != NULL;",
                 binds! {"s" => subject},
             )
             .await?;
@@ -386,6 +405,20 @@ impl Store {
             b.insert("st".into(), json!(st));
         }
         self.rows_as(&format!("SELECT * FROM lesson WHERE {cond} ORDER BY occurrences DESC, updated_at DESC LIMIT {limit};"), b).await
+    }
+
+    /// Judul & ringkasan episode aktif dari proyek-proyek `projects` (terbaru dulu), tanpa teks.
+    pub async fn episode_briefs(&self, subject: &str, projects: &[String], limit: usize) -> Result<Vec<EpisodeBrief>> {
+        if projects.is_empty() {
+            return Ok(vec![]);
+        }
+        self.rows_as(
+            &format!(
+                "SELECT id, project, title, summary, obs_type, created_at FROM episode WHERE subject = $s AND status = 'active' AND project IN $projs ORDER BY created_at DESC LIMIT {limit};"
+            ),
+            binds! {"s" => subject, "projs" => projects},
+        )
+        .await
     }
 
     pub async fn episodes_mentioning(&self, entity_id: &str, limit: usize) -> Result<Vec<Episode>> {

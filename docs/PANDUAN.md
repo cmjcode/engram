@@ -138,12 +138,61 @@ Halaman **Graf proyek** (menu Kerja) dan tab **Graf** di tiap proyek menggambark
 | titik-titik | tag grup yang sama (simpul `#tag`) |
 | garis tipis ke simpul ungu | tool, organisasi, orang, atau tempat yang dipakai dua proyek atau lebih |
 
-Simpul berongga adalah proyek yang baru dikenal dari tautan (belum punya memori). Seret latar untuk
-menggeser, roda atau tombol untuk zoom, seret simpul untuk merapikan, klik simpul untuk membuka proyek,
-tag, atau entitas. Tab Graf proyek menampilkan graf lokal (kedalaman 1 sampai 3) beserta berkas dan
-komponen proyek itu. Daftar teks di bawah kanvas memuat tautan yang sama. API:
-`GET /api/subjects/{s}/projects/graph?project=<nama>&depth=1`. `project_context` menyebut proyek yang
-tertaut dan proyek yang saling menyebut.
+Simpul berongga adalah proyek yang baru dikenal dari tautan (belum punya memori).
+
+**Tampilan bola 3D (bawaan) atau 2D.** Tombol *3D / 2D* di toolbar berganti tampilan; pilihan diingat.
+
+| Aksi | 3D (bola) | 2D (datar) |
+|---|---|---|
+| Seret latar | memutar bola | menggeser |
+| Shift+seret, tombol tengah, dua jari | menggeser | menggeser |
+| Roda, cubit, tombol +/- | zoom | zoom |
+| Seret simpul | merapikan di permukaan bola | merapikan |
+| Klik simpul | pilih, bola berputar ke simpul itu, panel detail terbuka | pilih, panel detail terbuka |
+| Klik ganda simpul / Enter | buka proyek, tag, atau entitas | sama |
+
+Graf global berputar pelan sampai disentuh (tombol putar atau tombol `r` menyalakan/mematikannya;
+dimatikan otomatis bila sistem meminta gerak dikurangi). Arahkan kursor ke garis untuk melihat alasan
+tautannya, misalnya "Disebut di 3 memori".
+
+**Panel detail** di samping kanvas menampilkan jenis simpul, jumlah memori, kapan terakhir aktif, tag,
+dan tetangga per jenis tautan beserta alasannya. Klik tetangga untuk memutar bola ke sana. Tombolnya:
+*Buka proyek*, *Fokus di sini* (ganti ke graf lokal proyek itu tanpa pindah halaman; tombol Back browser
+kembali ke graf sebelumnya), dan *Salin nama*.
+
+**Warna & filter.** *Warna*: jenis simpul, *tag grup* (seperti "groups" Obsidian; klik legenda untuk
+menyorot satu kelompok), atau *aktivitas* (makin redup makin lama tidak aktif). *Aktif dalam* 7/30/90 hari
+menyembunyikan proyek yang lama tidak punya memori baru. Tombol jenis tautan dan *Proyek tanpa tautan*
+tetap ada.
+
+**Keyboard** (fokus di kanvas): panah = pindah antar simpul (urut jumlah tetangga), Enter = buka,
+Esc = tutup panel, `/` = cari, `m` = 3D/2D, `r` = putar otomatis, `+`/`-`/`0` = zoom/muat semua.
+
+**Tautan langsung**: `#graf` untuk graf global, `#graf/<nama-proyek>?depth=2` untuk graf lokal. Di halaman
+proyek ada tautan *Buka graf penuh*. Tab Graf proyek menampilkan graf lokal (kedalaman 1 sampai 3) beserta
+berkas dan komponen proyek itu. Daftar teks di bawah kanvas memuat tautan yang sama. API:
+`GET /api/subjects/{s}/projects/graph?project=<nama>&depth=1`; tiap simpul membawa `last_at` (memori
+terakhir). `project_context` menyebut proyek yang tertaut dan proyek yang saling menyebut.
+
+## Grup proyek (konteks lintas repo)
+
+Proyek yang memakai tag grup yang sama (mis. `#VOLTUNES` di *Edit info proyek*) membentuk satu grup.
+Saat agent memanggil `project_context` untuk satu repo, hasilnya menyertakan bagian **Ekosistem grup**:
+
+- **Arsitektur bersama** dari proyek payung, yaitu proyek yang namanya sama dengan tag (mis. `VOLTUNES`).
+- **Peta repo dalam grup**: tiap repo saudara dengan peran singkat dan tech stack terkininya.
+  Bila `task` diisi, repo yang paling relevan dengan tugas tampil lebih dulu.
+- **Konvensi & jebakan lintas repo** dan **sesi terbaru di grup** (ambil detailnya dengan `get_episodes`).
+
+Keanggotaan grup dikenali dari tag proyek, dari nama proyek yang sama dengan tag (proyek payung),
+dari prefiks `GRUP/repo`, atau dari nama folder induk di path sesi (repo baru di
+`.../VOLTUNES/BACKEND/api-baru` langsung masuk grup `VOLTUNES` walau belum diberi tag).
+`project_context(project="VOLTUNES")` memberi gambaran seluruh grup.
+
+`recall` dengan `project` juga ikut mencari di repo saudara, dengan proyek sendiri tetap diutamakan.
+Matikan dengan argumen `group: false` di kedua tool. Tanpa `budget` eksplisit, bagian grup mendapat
+tambahan anggaran `retrieval.group_budget_tokens` (bawaan 3000); dengan `budget` eksplisit, grup
+memakai sekitar 40% darinya.
 
 ## Pengaturan, tentang & update
 

@@ -41,6 +41,10 @@ pub struct RecallQuery {
     /// Anggaran teks konteks (perkiraan token); bawaan `retrieval.context_budget_tokens`.
     #[serde(default)]
     pub budget: Option<usize>,
+    /// Dengan `project`: jangan perluas cakupan ke repo lain di grup proyek yang sama
+    /// (tag bersama, mis. `VOLTUNES`). Bawaan: repo saudara ikut, proyek sendiri tetap diutamakan.
+    #[serde(default)]
+    pub skip_group: bool,
 }
 
 impl RecallQuery {
@@ -214,18 +218,38 @@ impl Retriever {
         let proj_fut = async {
             match want_project {
                 Some(proj) => {
-                    let (ents, names) = tokio::try_join!(
+                    let (ents, names, metas) = tokio::try_join!(
                         self.store.entities_by_alias(&q.subject, proj),
                         self.store.project_names(&q.subject, proj),
+                        async {
+                            if q.skip_group { Ok(vec![]) } else { self.store.list_project_meta(&q.subject).await }
+                        },
                     )?;
-                    Ok::<_, crate::RetrieveError>((ents, names))
+                    let cwds: Vec<String> = if metas.is_empty() {
+                        vec![]
+                    } else {
+                        self.store.list_sessions(&q.subject, &names, 3).await?.into_iter().filter_map(|s| s.cwd).collect()
+                    };
+                    let group = memory_core::project::resolve_group(&metas, proj, cwds.iter().map(String::as_str));
+                    Ok::<_, crate::RetrieveError>((ents, names, group))
                 }
-                None => Ok((vec![], vec![])),
+                None => Ok((vec![], vec![], None)),
             }
         };
 
-        let (vhits, ehits, fts_hits, mut entities, (proj_ents, project_names)) =
+        let (vhits, ehits, fts_hits, mut entities, (proj_ents, mut project_names, group)) =
             tokio::try_join!(v_fut, ev_fut, fts_fut, ent_fut, proj_fut)?;
+        // Grup proyek: nama repo saudara. Bila yang diminta adalah nama grup/payung
+        // (mis. `VOLTUNES`), seluruh anggota grup dianggap bagian proyek itu.
+        let group_names: Vec<String> = group.as_ref().map(crate::group_names).unwrap_or_default();
+        if group.as_ref().is_some_and(|g| g.is_umbrella) {
+            for n in &group_names {
+                if !project_names.contains(n) {
+                    project_names.push(n.clone());
+                }
+            }
+        }
+        let in_group = |p: &str| group_names.iter().any(|n| memory_core::project::same_project(p, n));
 
         let best_sim = vhits.first().map(|h| h.similarity).unwrap_or(0.0);
         let vlist: Vec<String> = vhits.iter().filter(|h| h.similarity >= rc.min_similarity * 0.8).map(|h| h.id.clone()).collect();
@@ -338,11 +362,15 @@ impl Retriever {
                 via.push("graph".to_string());
             }
             let proj_match = want_project.is_some_and(|wp| ep_belongs_to_project(e, wp));
+            let group_match = !proj_match && e.project.as_deref().is_some_and(in_group);
             if proj_match {
                 via.push("project".to_string());
+            } else if group_match {
+                via.push("group".to_string());
             }
             let proj_boost = match want_project {
                 Some(_) if proj_match => 1.35,
+                Some(_) if group_match => 1.0,
                 Some(_) if e.project.is_some() => 0.65,
                 _ => 1.0,
             };
@@ -423,9 +451,9 @@ impl Retriever {
                 }
                 f.evidence.iter().any(|ev| {
                     plist.contains(&ev.episode_id)
-                        || ev_eps_map
-                            .get(&ev.episode_id)
-                            .is_some_and(|ep| ep_belongs_to_project(ep, wp))
+                        || ev_eps_map.get(&ev.episode_id).is_some_and(|ep| {
+                            ep_belongs_to_project(ep, wp) || ep.project.as_deref().is_some_and(in_group)
+                        })
                 })
             };
 

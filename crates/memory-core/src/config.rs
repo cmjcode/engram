@@ -236,11 +236,15 @@ pub struct RetrievalConfig {
     /// (`project_context`, `who_is`, `timeline`, `get_episodes`, ...). Klien bisa
     /// menaikkannya per panggilan lewat argumen `budget`.
     pub tool_budget_tokens: usize,
+    /// Anggaran tambahan (perkiraan token) untuk bagian "Ekosistem grup" di
+    /// `project_context` bila proyek tergabung dalam grup (tag bersama, mis. `VOLTUNES`).
+    /// Dipakai saat klien tidak memberi `budget`; bila `budget` diberi, grup mendapat ~40%.
+    pub group_budget_tokens: usize,
 }
 
 impl Default for RetrievalConfig {
     fn default() -> Self {
-        Self { rrf_k: 60.0, top_k: 8, candidate_k: 40, context_budget_tokens: 3000, min_similarity: 0.35, graph_hops: 2, tool_budget_tokens: 2500 }
+        Self { rrf_k: 60.0, top_k: 8, candidate_k: 40, context_budget_tokens: 3000, min_similarity: 0.35, graph_hops: 2, tool_budget_tokens: 2500, group_budget_tokens: 3000 }
     }
 }
 
