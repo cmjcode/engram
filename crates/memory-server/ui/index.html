@@ -1,40 +1,45 @@
 <!doctype html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>engram</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="apple-touch-icon" href="/logo.png">
 <link rel="stylesheet" href="/app.css">
-<script>try { var t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}</script>
+<script src="/i18n.js"></script>
+<script>try { var theme = localStorage.getItem("theme"); if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme; } catch (e) {}</script>
 </head>
 <body>
 <aside id="sidebar" class="sidebar">
-  <a class="brand" href="#"><span class="brand-mark" aria-hidden="true"></span><span><b>engram</b><small>memori kerja &amp; hidup</small></span></a>
-  <nav id="nav" aria-label="Navigasi utama"></nav>
-  <div class="side-foot small muted" id="side-foot">Cmd/Ctrl+K untuk cari cepat</div>
+  <a class="brand" href="#"><img class="brand-mark" src="/logo.png" alt="" width="30" height="30"><span><b>engram</b><small data-i18n="work &amp; life memory">work &amp; life memory</small></span></a>
+  <nav id="nav" aria-label="Main navigation" data-i18n-aria-label="Main navigation"></nav>
+  <div class="side-foot small muted" id="side-foot" data-i18n="Cmd/Ctrl+K for quick search">Cmd/Ctrl+K for quick search</div>
 </aside>
 <div class="content">
   <header class="top">
-    <div class="top-left"><button id="sidebar-toggle" class="ghost" title="Menu" aria-label="Menu"><span data-icon="menu"></span></button><span id="mode-slot"></span></div>
+    <div class="top-left"><button id="sidebar-toggle" class="ghost" title="Menu" aria-label="Menu" data-i18n-title="Menu" data-i18n-aria-label="Menu"><span data-icon="menu"></span></button><span id="mode-slot"></span></div>
     <div class="subject">
-      <button id="palette-btn" class="ghost" title="Cari cepat (Cmd/Ctrl+K)" aria-label="Cari cepat"><span data-icon="search"></span></button>
-      <label for="project-select" class="sr">Proyek</label>
+      <button id="palette-btn" class="ghost" title="Quick search (Cmd/Ctrl+K)" aria-label="Quick search" data-i18n-title="Quick search (Cmd/Ctrl+K)" data-i18n-aria-label="Quick search"><span data-icon="search"></span></button>
+      <label for="project-select" class="sr" data-i18n="Project">Project</label>
       <select id="project-select" hidden></select>
-      <label for="subject-select" class="sr">Subjek</label>
+      <label for="subject-select" class="sr" data-i18n="Subject">Subject</label>
       <select id="subject-select"></select>
-      <button id="new-subject" class="ghost" title="Subjek baru"><span data-icon="plus"></span></button>
-      <button id="start-services-btn" title="Jalankan semua layanan &amp; proses ulang antrean" aria-label="Start semua service"><span data-icon="play"></span><span id="start-services-label">Start semua service</span><span id="services-dot" class="dot" hidden></span></button>
-      <button id="settings-btn" class="ghost" title="Pengaturan, tentang & update" aria-label="Pengaturan"><span data-icon="settings"></span><span id="settings-dot" class="dot" hidden></span></button>
+      <button id="new-subject" class="ghost" title="New subject" data-i18n-title="New subject"><span data-icon="plus"></span></button>
+      <button id="start-services-btn" title="Start all services &amp; reprocess the queue" aria-label="Start all services" data-i18n-title="Start all services &amp; reprocess the queue" data-i18n-aria-label="Start all services"><span data-icon="play"></span><span id="start-services-label" data-i18n="Start all services">Start all services</span><span id="services-dot" class="dot" hidden></span></button>
+      <button id="settings-btn" class="ghost" title="Settings, about &amp; updates" aria-label="Settings" data-i18n-title="Settings, about &amp; updates" data-i18n-aria-label="Settings"><span data-icon="settings"></span><span id="settings-dot" class="dot" hidden></span></button>
     </div>
   </header>
   <div id="update-banner" class="update-banner" hidden role="status" aria-live="polite"></div>
   <main id="view" tabindex="-1"></main>
 </div>
 <aside id="drawer" class="drawer" hidden>
-  <div class="drawer-head"><strong id="drawer-title"></strong><button id="drawer-close" class="ghost" title="Tutup"><span data-icon="x"></span></button></div>
+  <div class="drawer-head"><strong id="drawer-title"></strong><button id="drawer-close" class="ghost" title="Close" data-i18n-title="Close"><span data-icon="x"></span></button></div>
   <div id="drawer-body"></div>
 </aside>
 <div id="toast" role="status" aria-live="polite"></div>
+<script>applyI18n();</script>
 <script src="/app.js"></script>
+<script src="/liquid-glass.js"></script>
 </body>
 </html>

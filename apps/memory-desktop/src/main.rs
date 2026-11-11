@@ -14,11 +14,13 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod i18n;
 mod services;
 mod update;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,6 +33,7 @@ use memory_import::Importer;
 use memory_jobs::Runtime;
 use memory_server::AppState;
 
+use i18n::{tr, trf};
 use services::{Kind, Services};
 
 const MAIN: &str = "main";
@@ -41,6 +44,10 @@ struct Desktop {
     /// Layanan latar; kosong bila mesin memori gagal dijalankan.
     engine: OnceLock<Arc<Services>>,
     data_dir: PathBuf,
+    /// Baris status layanan di menu bar (diganti saat menu dibangun ulang).
+    svc_items: Mutex<Vec<MenuItem<tauri::Wry>>>,
+    /// Menu baru dibangun (mis. bahasa berganti): status layanan perlu ditulis ulang.
+    tray_dirty: AtomicBool,
 }
 
 /// Hasil menjalankan mesin memori.
@@ -98,9 +105,14 @@ fn apply_pending_move(data_dir: &Path) -> Result<Option<String>> {
     std::fs::write(&path, file_cfg.to_toml()).with_context(|| format!("menulis {}", path.display()))?;
     tracing::info!(from = %from.display(), to = %plan.target.display(), files, "vault dipindahkan");
     Ok(Some(if plan.use_existing {
-        format!("Sekarang memakai data di:\n{}\n\nData lama tetap ada di:\n{}", plan.target.display(), from.display())
+        tr!("Now using the data in:\n{}\n\nThe old data is still in:\n{}", "Sekarang memakai data di:\n{}\n\nData lama tetap ada di:\n{}", plan.target.display(), from.display())
     } else {
-        format!("Data dipindahkan ke:\n{}\n\nSalinan lama masih ada di:\n{}\nHapus folder lama itu bila semuanya sudah berjalan baik.", plan.target.display(), from.display())
+        tr!(
+            "Data moved to:\n{}\n\nThe old copy is still in:\n{}\nDelete that old folder once everything works.",
+            "Data dipindahkan ke:\n{}\n\nSalinan lama masih ada di:\n{}\nHapus folder lama itu bila semuanya sudah berjalan baik.",
+            plan.target.display(),
+            from.display()
+        )
     }))
 }
 
@@ -133,7 +145,7 @@ fn write_private(path: &Path, body: &str) -> Result<()> {
 fn start_engine(app: &AppHandle, desktop: &Desktop) -> Result<Started> {
     let cfg = load_or_create_config(&desktop.data_dir)?;
     tauri::async_runtime::block_on(async {
-        let rt = Runtime::open(cfg).await.context("membuka vault")?;
+        let rt = Runtime::open(cfg).await.context(tr!("opening the vault", "membuka vault"))?;
         let transcriber = memory_llm::WhisperTranscriber::new(&rt.cfg.transcription).map(|w| Arc::new(w) as Arc<dyn memory_llm::Transcriber>);
         let importer = Importer::new(rt.pipeline.clone(), transcriber);
         let mut state = AppState::new(rt.clone(), importer.clone());
@@ -190,11 +202,16 @@ fn build_main_window(app: &AppHandle, started: &Result<Started>) -> tauri::Resul
         Ok(s) => {
             let url = s.url.parse().expect("url server lokal valid");
             // Token disimpan sebelum UI berjalan, jadi UI tidak pernah meminta token.
-            let init = format!("try {{ localStorage.setItem('token', {}); }} catch (e) {{}}", js_string(&s.token));
+            // Bahasa dari aplikasi desktop dipakai juga oleh UI web.
+            let init = format!(
+                "try {{ localStorage.setItem('token', {}); localStorage.setItem('lang', {}); }} catch (e) {{}}",
+                js_string(&s.token),
+                js_string(i18n::code())
+            );
             WebviewWindowBuilder::new(app, MAIN, WebviewUrl::External(url)).initialization_script(&init)
         }
         Err(e) => {
-            let init = format!("window.__STARTUP_ERROR = {};", js_string(&format!("{e:#}")));
+            let init = format!("window.__STARTUP_ERROR = {}; window.__LANG = {};", js_string(&format!("{e:#}")), js_string(i18n::code()));
             WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into())).initialization_script(&init)
         }
     };
@@ -223,18 +240,19 @@ fn open_in_file_manager(path: &Path) {
     }
 }
 
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Buka engram", true, None::<&str>)?;
-    let inbox = MenuItem::with_id(app, "inbox", "Buka folder inbox", true, None::<&str>)?;
-    let data = MenuItem::with_id(app, "data", "Buka folder data", true, None::<&str>)?;
-    let version = format!("Versi {}", app.package_info().version);
+/// Menu bar dalam bahasa aktif, plus baris status tiap layanan.
+fn tray_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, Vec<MenuItem<tauri::Wry>>)> {
+    let open = MenuItem::with_id(app, "open", tr!("Open engram", "Buka engram"), true, None::<&str>)?;
+    let inbox = MenuItem::with_id(app, "inbox", tr!("Open inbox folder", "Buka folder inbox"), true, None::<&str>)?;
+    let data = MenuItem::with_id(app, "data", tr!("Open data folder", "Buka folder data"), true, None::<&str>)?;
+    let version = tr!("Version {}", "Versi {}", app.package_info().version);
     let version = MenuItem::with_id(app, "version", version, false, None::<&str>)?;
-    let check_update = MenuItem::with_id(app, "check_update", "Periksa update", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Keluar", true, None::<&str>)?;
+    let check_update = MenuItem::with_id(app, "check_update", tr!("Check for updates", "Periksa update"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", tr!("Quit", "Keluar"), true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;
-    let header = MenuItem::with_id(app, "svc_header", "Layanan", false, None::<&str>)?;
+    let header = MenuItem::with_id(app, "svc_header", tr!("Services", "Layanan"), false, None::<&str>)?;
     // Satu baris per layanan: teks & aktif/tidaknya diperbarui oleh `watch_services`.
     let svc_items = Kind::ALL
         .into_iter()
@@ -244,6 +262,28 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     items.extend(svc_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>));
     items.extend([&sep3 as &dyn tauri::menu::IsMenuItem<tauri::Wry>, &version, &check_update, &sep2, &quit]);
     let menu = Menu::with_items(app, &items)?;
+    Ok((menu, svc_items))
+}
+
+/// Bangun ulang menu bar (dipanggil saat bahasa diganti dari UI).
+pub fn refresh_tray(app: &AppHandle) -> tauri::Result<()> {
+    let (menu, items) = tray_menu(app)?;
+    if let Some(tray) = app.tray_by_id("main") {
+        tray.set_menu(Some(menu))?;
+    }
+    let desktop = app.state::<Desktop>();
+    if let Ok(mut g) = desktop.svc_items.lock() {
+        *g = items;
+    }
+    desktop.tray_dirty.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let (menu, svc_items) = tray_menu(app)?;
+    if let Ok(mut g) = app.state::<Desktop>().svc_items.lock() {
+        *g = svc_items;
+    }
     let mut tray = TrayIconBuilder::with_id("main").tooltip("engram").menu(&menu).show_menu_on_left_click(true);
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
@@ -274,20 +314,29 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     })
     .build(app)?;
     let stop = app.state::<Desktop>().shutdown.subscribe();
-    tauri::async_runtime::spawn(watch_services(app.clone(), svc_items, stop));
+    tauri::async_runtime::spawn(watch_services(app.clone(), stop));
     Ok(())
 }
 
 /// Label menu bar untuk satu layanan.
 fn service_label(kind: Kind, running: bool) -> String {
-    if running { format!("{}: berjalan", kind.name()) } else { format!("{}: berhenti - klik untuk menjalankan", kind.name()) }
+    if running {
+        tr!("{}: running", "{}: berjalan", kind.name())
+    } else {
+        tr!("{}: stopped - click to start", "{}: berhenti - klik untuk menjalankan", kind.name())
+    }
 }
 
 /// Perbarui status layanan di menu bar secara berkala.
-async fn watch_services(app: AppHandle, items: Vec<MenuItem<tauri::Wry>>, mut stop: tokio::sync::watch::Receiver<bool>) {
+async fn watch_services(app: AppHandle, mut stop: tokio::sync::watch::Receiver<bool>) {
     let mut last: Option<Vec<bool>> = None;
     loop {
-        let engine = app.state::<Desktop>().engine.get().cloned();
+        let desktop = app.state::<Desktop>();
+        if desktop.tray_dirty.swap(false, Ordering::SeqCst) {
+            last = None;
+        }
+        let items = desktop.svc_items.lock().map(|g| g.clone()).unwrap_or_default();
+        let engine = desktop.engine.get().cloned();
         let status: Vec<bool> = Kind::ALL.iter().map(|k| engine.as_ref().is_some_and(|e| e.is_running(*k))).collect();
         if last.as_ref() != Some(&status) {
             for ((kind, item), running) in Kind::ALL.iter().zip(&items).zip(&status) {
@@ -319,7 +368,7 @@ fn start_service(app: &AppHandle, kind: Kind) {
         Err(e) => {
             tracing::error!(service = kind.id(), error = %e, "gagal menjalankan layanan");
             use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-            app.dialog().message(format!("{} gagal dijalankan:\n{e}", kind.name())).title("engram").kind(MessageDialogKind::Error).show(|_| {});
+            app.dialog().message(tr!("{} failed to start:\n{e}", "{} gagal dijalankan:\n{e}", kind.name())).title("engram").kind(MessageDialogKind::Error).show(|_| {});
         }
     }
 }
@@ -357,7 +406,8 @@ fn main() {
             if let Err(e) = &moved {
                 tracing::error!("pemindahan data gagal: {e:#}");
             }
-            app.manage(Desktop { shutdown, engine: OnceLock::new(), data_dir });
+            i18n::load(&data_dir);
+            app.manage(Desktop { shutdown, engine: OnceLock::new(), data_dir, svc_items: Mutex::new(Vec::new()), tray_dirty: AtomicBool::new(false) });
             let started = start_engine(app.handle(), &app.state::<Desktop>());
             if let Err(e) = &started {
                 tracing::error!("mesin memori gagal: {e:#}");
@@ -367,12 +417,12 @@ fn main() {
             {
                 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
                 match moved {
-                    Ok(Some(msg)) => app.dialog().message(msg).title("Lokasi data diubah").kind(MessageDialogKind::Info).show(|_| {}),
+                    Ok(Some(msg)) => app.dialog().message(msg).title(tr!("Data location changed", "Lokasi data diubah")).kind(MessageDialogKind::Info).show(|_| {}),
                     Ok(None) => {}
                     Err(e) => app
                         .dialog()
-                        .message(format!("Data tidak dipindahkan, aplikasi tetap memakai lokasi lama.\n\n{e:#}"))
-                        .title("Gagal memindah data")
+                        .message(trf!("Data was not moved; the app keeps using the old location.\n\n{e:#}", "Data tidak dipindahkan, aplikasi tetap memakai lokasi lama.\n\n{e:#}"))
+                        .title(tr!("Failed to move data", "Gagal memindah data"))
                         .kind(MessageDialogKind::Error)
                         .show(|_| {}),
                 }

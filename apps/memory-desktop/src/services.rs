@@ -17,6 +17,8 @@ use memory_import::Importer;
 use memory_jobs::Runtime;
 use memory_server::{AppState, ServiceControl, ServiceInfo};
 
+use crate::i18n::{tr, trf};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Server,
@@ -40,18 +42,18 @@ impl Kind {
     pub fn name(self) -> &'static str {
         match self {
             Kind::Server => "Server UI, API & MCP",
-            Kind::Workers => "Worker pemrosesan",
-            Kind::Scheduler => "Penjadwal",
-            Kind::Inbox => "Pemantau inbox",
+            Kind::Workers => tr!("Processing workers", "Worker pemrosesan"),
+            Kind::Scheduler => tr!("Scheduler", "Penjadwal"),
+            Kind::Inbox => tr!("Inbox watcher", "Pemantau inbox"),
         }
     }
 
     fn description(self) -> &'static str {
         match self {
-            Kind::Server => "Melayani jendela aplikasi dan agent AI lewat MCP.",
-            Kind::Workers => "Memproses antrean job: import, ekstraksi, dan embedding.",
-            Kind::Scheduler => "Menjadwalkan pemeliharaan dan mencoba ulang job yang gagal.",
-            Kind::Inbox => "Mengimpor berkas di folder inbox dan memantau perubahan folder penting lewat agy CLI.",
+            Kind::Server => tr!("Serves the app window and AI agents over MCP.", "Melayani jendela aplikasi dan agent AI lewat MCP."),
+            Kind::Workers => tr!("Processes the job queue: import, extraction, and embedding.", "Memproses antrean job: import, ekstraksi, dan embedding."),
+            Kind::Scheduler => tr!("Schedules maintenance and retries failed jobs.", "Menjadwalkan pemeliharaan dan mencoba ulang job yang gagal."),
+            Kind::Inbox => tr!("Imports files from the inbox folder and watches important folders for changes via the agy CLI.", "Mengimpor berkas di folder inbox dan memantau perubahan folder penting lewat agy CLI."),
         }
     }
 
@@ -107,16 +109,16 @@ impl Services {
 
     fn spawn(&self, kind: Kind, listener: Option<tokio::net::TcpListener>) -> Result<(), String> {
         if *self.shutdown.borrow() {
-            return Err("aplikasi sedang ditutup".into());
+            return Err(tr!("the app is shutting down", "aplikasi sedang ditutup").into());
         }
-        let mut handles = self.handles.lock().map_err(|_| "status layanan rusak".to_string())?;
+        let mut handles = self.handles.lock().map_err(|_| tr!("service state is corrupted", "status layanan rusak").to_string())?;
         if handles.get(&kind).is_some_and(|t| !t.inner().is_finished()) {
             return Ok(());
         }
         let stop = self.shutdown.clone();
         let task = match kind {
             Kind::Server => {
-                let state = self.state.get().cloned().ok_or("server belum siap")?;
+                let state = self.state.get().cloned().ok_or(tr!("server is not ready yet", "server belum siap"))?;
                 let listener = match listener {
                     Some(l) => l,
                     None => self.bind()?,
@@ -163,7 +165,7 @@ impl Services {
             s.bind(self.addr)?;
             s.listen(1024)
         };
-        sock.and_then(open).map_err(|e| format!("tidak bisa membuka {}: {e}", self.addr))
+        sock.and_then(open).map_err(|e| tr!("cannot open {}: {e}", "tidak bisa membuka {}: {e}", self.addr))
     }
 }
 
@@ -176,7 +178,7 @@ impl ServiceControl for Services {
     }
 
     fn start(&self, id: &str) -> Result<(), String> {
-        let kind = Kind::from_id(id).ok_or_else(|| format!("layanan tidak dikenal: {id}"))?;
+        let kind = Kind::from_id(id).ok_or_else(|| trf!("unknown service: {id}", "layanan tidak dikenal: {id}"))?;
         self.start_kind(kind)
     }
 
@@ -198,7 +200,7 @@ impl ServiceControl for Services {
             std::thread::sleep(Duration::from_millis(800));
             app.restart();
         });
-        Ok(format!("Aplikasi dibuka ulang untuk memindahkan data ke {}", target.display()))
+        Ok(tr!("Restarting the app to move data to {}", "Aplikasi dibuka ulang untuk memindahkan data ke {}", target.display()))
     }
 
     fn check_update(&self) -> Option<Result<memory_server::settings::UpdateInfo, String>> {
@@ -207,7 +209,7 @@ impl ServiceControl for Services {
 
     fn install_update(&self) -> Result<String, String> {
         crate::update::start_install(&self.app)?;
-        Ok("Mengunduh update. Aplikasi dibuka ulang setelah terpasang.".into())
+        Ok(tr!("Downloading the update. The app restarts once it is installed.", "Mengunduh update. Aplikasi dibuka ulang setelah terpasang.").into())
     }
 
     fn update_progress(&self) -> Option<memory_server::settings::UpdateProgress> {
@@ -229,11 +231,21 @@ impl ServiceControl for Services {
             std::thread::sleep(Duration::from_millis(800));
             app.request_restart();
         });
-        Ok("Aplikasi dibuka ulang...".into())
+        Ok(tr!("Restarting the app...", "Aplikasi dibuka ulang...").into())
     }
 
     fn open(&self, target: &str) -> Result<(), String> {
         crate::open_in_file_manager(Path::new(target));
         Ok(())
+    }
+
+    fn language(&self) -> Option<String> {
+        Some(crate::i18n::code().into())
+    }
+
+    /// Simpan bahasa lalu bangun ulang menu bar agar teksnya ikut berganti.
+    fn set_language(&self, lang: &str) -> Result<(), String> {
+        crate::i18n::set(&self.data_dir, lang).map_err(|e| format!("{e:#}"))?;
+        crate::refresh_tray(&self.app).map_err(|e| e.to_string())
     }
 }

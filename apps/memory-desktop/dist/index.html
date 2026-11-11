@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="id">
+<html lang="en">
 
 <head>
   <meta charset="utf-8">
@@ -62,6 +62,14 @@
       box-shadow: var(--shadow);
     }
 
+    .logo {
+      display: block;
+      width: 84px;
+      height: 84px;
+      margin: 0 0 14px;
+      filter: drop-shadow(0 8px 16px rgba(0, 60, 140, 0.28));
+    }
+
     h1 {
       color: var(--accent);
       font-size: 24px;
@@ -88,19 +96,35 @@
 
 <body>
   <main>
+    <img class="logo" src="logo.png" alt="" width="84" height="84">
     <h1>engram</h1>
     <div id="msg">
-      <p>Menyiapkan memori...</p>
+      <p id="loading">Preparing memory...</p>
     </div>
   </main>
   <script>
-    // Diisi oleh aplikasi bila mesin memori gagal dijalankan.
+    // Diisi oleh aplikasi: bahasa aktif dan pesan bila mesin memori gagal dijalankan.
+    var T = {
+      en: {
+        loading: "Preparing memory...",
+        fail: "The memory engine could not start:",
+        help: "Check the config file in the app data folder (menu bar icon, then Open data folder), " +
+          "then reopen the app. If the vault is in use by <code>engram serve</code>, stop it first."
+      },
+      id: {
+        loading: "Menyiapkan memori...",
+        fail: "Mesin memori tidak bisa dijalankan:",
+        help: "Periksa berkas konfigurasi di folder data aplikasi (menu ikon di menu bar, lalu Buka folder data), " +
+          "lalu buka ulang aplikasi. Bila vault sedang dipakai perintah <code>engram serve</code>, hentikan dulu."
+      }
+    };
+    var L = T[window.__LANG] ? window.__LANG : "en";
+    document.documentElement.lang = L;
+    document.getElementById("loading").textContent = T[L].loading;
     var err = window.__STARTUP_ERROR;
     if (err) {
       var box = document.getElementById("msg");
-      box.innerHTML = "<p>Mesin memori tidak bisa dijalankan:</p><pre></pre>" +
-        "<p>Periksa berkas konfigurasi di folder data aplikasi (menu ikon di menu bar, lalu Buka folder data), " +
-        "lalu buka ulang aplikasi. Bila vault sedang dipakai perintah <code>engram serve</code>, hentikan dulu.</p>";
+      box.innerHTML = "<p>" + T[L].fail + "</p><pre></pre><p>" + T[L].help + "</p>";
       box.querySelector("pre").textContent = err;
     }
   </script>

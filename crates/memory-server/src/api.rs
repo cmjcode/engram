@@ -105,6 +105,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/settings/test", post(settings_test))
         .route("/api/restart", post(restart))
         .route("/api/open", post(open_target))
+        .route("/api/language", post(set_language))
 }
 
 fn check(s: &str) -> Result<(), ApiError> {
@@ -1675,6 +1676,7 @@ async fn about(State(st): State<AppState>) -> ApiResult<Value> {
         "auto_update": c.and_then(|c| c.auto_update()),
         "can_open": c.is_some(),
         "can_restart": c.is_some(),
+        "language": c.and_then(|c| c.language()),
     })))
 }
 
@@ -1717,6 +1719,22 @@ async fn update_progress(State(st): State<AppState>) -> ApiResult<crate::setting
 #[derive(Deserialize)]
 struct OnIn {
     enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct LangIn {
+    lang: String,
+}
+
+/// Bahasa UI disimpan di browser; aplikasi desktop ikut menyimpannya untuk menu & dialog.
+async fn set_language(State(st): State<AppState>, Json(b): Json<LangIn>) -> ApiResult<Value> {
+    if !matches!(b.lang.as_str(), "en" | "id") {
+        return Err(ApiError::BadRequest(format!("unsupported language: {}", b.lang)));
+    }
+    if let Some(c) = st.services.as_ref() {
+        c.set_language(&b.lang).map_err(ApiError::BadRequest)?;
+    }
+    Ok(Json(json!({"ok": true, "lang": b.lang})))
 }
 
 async fn update_auto(State(st): State<AppState>, Json(b): Json<OnIn>) -> ApiResult<Value> {

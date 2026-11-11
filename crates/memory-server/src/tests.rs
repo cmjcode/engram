@@ -318,7 +318,7 @@ async fn mcp_install_disabled_without_local_url() {
 #[test]
 fn ui_has_no_icon_glyphs() {
     const ALLOWED: &[char] = &['·', '–', '—', '…'];
-    for (name, src) in [("index.html", crate::INDEX_HTML), ("app.js", crate::APP_JS), ("app.css", crate::APP_CSS)] {
+    for (name, src) in [("index.html", crate::INDEX_HTML), ("app.js", crate::APP_JS), ("app.css", crate::APP_CSS), ("liquid-glass.js", crate::LIQUID_GLASS_JS)] {
         let bad: Vec<char> = src.chars().filter(|c| !c.is_ascii() && !ALLOWED.contains(c)).collect();
         assert!(bad.is_empty(), "{name} memuat karakter non-ASCII yang dilarang: {bad:?}");
     }

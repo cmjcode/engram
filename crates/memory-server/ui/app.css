@@ -178,9 +178,9 @@ body {
 .brand-mark {
   width: 30px;
   height: 30px;
-  border-radius: 10px;
-  background: var(--accent-grad);
-  box-shadow: var(--specular), 0 6px 14px rgba(0, 113, 227, 0.3);
+  display: block;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 8px rgba(0, 60, 140, 0.3));
   flex: none;
 }
 
@@ -1325,4 +1325,92 @@ a.tag-chip:hover { background: rgba(13, 148, 136, 0.22); }
 @media (max-width: 640px) {
   .graph-zoom { margin-left: 0; }
   .graph-canvas { height: 60vh; }
+}
+
+/* ------------------------------------------------------------------
+ * Liquid glass (lihat liquid-glass.js). Wallpaper digambar di kanvas tetap;
+ * panel utama membiaskannya lewat WebGL. Tanpa WebGL, panel tetap memakai
+ * kaca CSS di atas --bg-mesh.
+ * ------------------------------------------------------------------ */
+#lg-wallpaper {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.lg-surface {
+  isolation: isolate;
+}
+
+.lg-canvas {
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  display: block;
+}
+
+/* Kanvas WebGL sudah memberi tint; latar CSS dibuat tipis agar biasan terlihat. */
+.lg-on .lg-surface {
+  background: transparent;
+}
+
+/* Sidebar & top bar mengambang sebagai panel kaca membulat. */
+.sidebar {
+  top: 10px;
+  height: calc(100vh - 20px);
+  margin: 10px 0 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+}
+
+.top {
+  top: 10px;
+  margin: 10px 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow: var(--shadow);
+}
+
+.pal-card {
+  position: relative;
+  border-radius: 24px;
+}
+
+#toast {
+  overflow: hidden;
+}
+
+/* Drawer: yang di-scroll isinya, bukan panelnya, agar kaca tetap menempel. */
+.drawer {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.drawer-head {
+  flex: none;
+  margin: 0;
+  padding: 18px 22px 10px;
+}
+
+#drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 22px 20px;
+}
+
+@media (max-width: 900px) {
+  .sidebar { top: 0; margin: 10px; height: calc(100vh - 20px); }
+  body:not(.nav-open) .sidebar { transform: translateX(calc(-100% - 20px)); }
+}
+
+@media (max-width: 640px) {
+  .top { top: 8px; margin: 8px 8px 0; border-radius: 18px; }
+  .drawer { border-radius: 0; }
 }

@@ -108,6 +108,14 @@ pub trait ServiceControl: Send + Sync {
     fn open(&self, _target: &str) -> Result<(), String> {
         Err("hanya tersedia di aplikasi desktop".into())
     }
+    /// Bahasa UI aplikasi (kode seperti "en"/"id"). `None` = tidak ada pengaturan ini.
+    fn language(&self) -> Option<String> {
+        None
+    }
+    /// Simpan bahasa pilihan pengguna agar menu & dialog bawaan aplikasi ikut berganti.
+    fn set_language(&self, _lang: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl AppState {
@@ -195,6 +203,9 @@ async fn auth(State(st): State<AppState>, req: Request, next: Next) -> Response 
 const INDEX_HTML: &str = include_str!("../ui/index.html");
 const APP_JS: &str = include_str!("../ui/app.js");
 const APP_CSS: &str = include_str!("../ui/app.css");
+const I18N_JS: &str = include_str!("../ui/i18n.js");
+const LIQUID_GLASS_JS: &str = include_str!("../ui/liquid-glass.js");
+const LOGO_PNG: &[u8] = include_bytes!("../ui/logo.png");
 
 fn asset(body: &'static str, ctype: &'static str) -> Response {
     let mut r = body.into_response();
@@ -214,6 +225,12 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(|| async { asset(INDEX_HTML, "text/html; charset=utf-8") }))
         .route("/app.js", get(|| async { asset(APP_JS, "text/javascript; charset=utf-8") }))
         .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8") }))
+        .route("/i18n.js", get(|| async { asset(I18N_JS, "text/javascript; charset=utf-8") }))
+        .route("/liquid-glass.js", get(|| async { asset(LIQUID_GLASS_JS, "text/javascript; charset=utf-8") }))
+        .route(
+            "/logo.png",
+            get(|| async { ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=86400")], LOGO_PNG) }),
+        )
         .route("/api/health", get(|| async { axum::Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})) }))
         .merge(protected)
         .with_state(state)

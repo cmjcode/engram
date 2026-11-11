@@ -1,3 +1,5 @@
+<p align="center"><img src="apps/memory-desktop/icons/128x128@2x.png" alt="engram" width="128" height="128"></p>
+
 # engram
 
 [![CI](https://github.com/cmjcode/engram/actions/workflows/ci.yml/badge.svg)](https://github.com/cmjcode/engram/actions/workflows/ci.yml)

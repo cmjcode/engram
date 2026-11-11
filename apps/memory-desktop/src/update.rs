@@ -23,28 +23,17 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 use memory_server::settings::{UpdateInfo, UpdateProgress};
 
-/// Preferensi aplikasi desktop (bukan bagian memory.toml).
-const PREFS: &str = "desktop.json";
+use crate::i18n::{tr, trf};
 
 /// Cek update otomatis aktif? Default: ya.
 pub fn auto_enabled(data_dir: &Path) -> bool {
-    std::fs::read_to_string(data_dir.join(PREFS))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v["auto_update"].as_bool())
+    crate::i18n::read_prefs(data_dir)["auto_update"]
+        .as_bool()
         .unwrap_or(true)
 }
 
 pub fn set_auto(data_dir: &Path, on: bool) -> Result<()> {
-    let path = data_dir.join(PREFS);
-    let mut v = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .filter(|v| v.is_object())
-        .unwrap_or_else(|| serde_json::json!({}));
-    v["auto_update"] = serde_json::Value::Bool(on);
-    std::fs::write(&path, serde_json::to_string_pretty(&v)?)
-        .with_context(|| format!("menulis {}", path.display()))
+    crate::i18n::write_pref(data_dir, "auto_update", on.into())
 }
 
 const FIRST_CHECK: Duration = Duration::from_secs(30);
@@ -127,7 +116,7 @@ pub async fn check(app: AppHandle, manual: bool) {
             message(
                 &app,
                 MessageDialogKind::Info,
-                "Pemeriksaan update sedang berjalan.",
+                tr!("An update check is already running.", "Pemeriksaan update sedang berjalan."),
             )
             .await;
         }
@@ -142,7 +131,7 @@ pub async fn check(app: AppHandle, manual: bool) {
             p.running = false;
             p.stage = "error".into();
             p.error = Some(format!("{e:#}"));
-            p.message = Some(format!("Gagal memasang update: {e:#}"));
+            p.message = Some(trf!("Failed to install update: {e:#}", "Gagal memasang update: {e:#}"));
             set_progress(&app, p);
         } else {
             set_tooltip(&app, None);
@@ -151,7 +140,7 @@ pub async fn check(app: AppHandle, manual: bool) {
             message(
                 &app,
                 MessageDialogKind::Error,
-                &format!("Gagal memeriksa atau memasang update:\n{e:#}"),
+                &trf!("Failed to check for or install the update:\n{e:#}", "Gagal memeriksa atau memasang update:\n{e:#}"),
             )
             .await;
         }
@@ -168,7 +157,7 @@ async fn find(app: &AppHandle) -> Result<Option<Update>> {
         // Windows: installer menutup aplikasi lewat process::exit, jadi hentikan mesin dulu.
         .on_before_exit(move || crate::stop_engine(&app_for_exit))
         .build()
-        .context("menyiapkan updater")?;
+        .context(tr!("setting up the updater", "menyiapkan updater"))?;
     match updater.check().await {
         Ok(u) => Ok(u),
         // Rilis baru sedang dibangun di CI: latest.json atau paket platform ini belum diunggah.
@@ -180,7 +169,7 @@ async fn find(app: &AppHandle) -> Result<Option<Update>> {
             tracing::debug!("manifest atau paket rilis untuk platform ini belum tersedia");
             Ok(None)
         }
-        Err(e) => Err(e).context("membaca info rilis"),
+        Err(e) => Err(e).context(tr!("reading release info", "membaca info rilis")),
     }
 }
 
@@ -214,7 +203,7 @@ pub async fn info(app: &AppHandle) -> Result<UpdateInfo> {
 /// Pasang update yang diminta dari UI (pengguna sudah setuju di sana).
 pub fn start_install(app: &AppHandle) -> Result<(), String> {
     if BUSY.swap(true, Ordering::SeqCst) {
-        return Err("pemeriksaan atau pemasangan update sedang berjalan".into());
+        return Err(tr!("an update check or install is already running", "pemeriksaan atau pemasangan update sedang berjalan").into());
     }
     set_progress(
         app,
@@ -225,14 +214,14 @@ pub fn start_install(app: &AppHandle) -> Result<(), String> {
             downloaded_bytes: 0,
             total_bytes: None,
             percent: Some(0),
-            message: Some("Menyiapkan unduhan update...".into()),
+            message: Some(tr!("Preparing update download...", "Menyiapkan unduhan update...").into()),
             error: None,
         },
     );
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let res = async {
-            let update = find(&app).await?.context("tidak ada update baru")?;
+            let update = find(&app).await?.context(tr!("no new update", "tidak ada update baru"))?;
             install(&app, update).await
         }
         .await;
@@ -243,12 +232,12 @@ pub fn start_install(app: &AppHandle) -> Result<(), String> {
             p.running = false;
             p.stage = "error".into();
             p.error = Some(format!("{e:#}"));
-            p.message = Some(format!("Gagal memasang update: {e:#}"));
+            p.message = Some(trf!("Failed to install update: {e:#}", "Gagal memasang update: {e:#}"));
             set_progress(&app, p);
             message(
                 &app,
                 MessageDialogKind::Error,
-                &format!("Gagal memasang update:\n{e:#}"),
+                &trf!("Failed to install update:\n{e:#}", "Gagal memasang update:\n{e:#}"),
             )
             .await;
         }
@@ -264,7 +253,7 @@ async fn check_inner(app: &AppHandle, manual: bool) -> Result<()> {
             message(
                 app,
                 MessageDialogKind::Info,
-                &format!("Sudah versi terbaru ({v})."),
+                &trf!("You have the latest version ({v}).", "Sudah versi terbaru ({v})."),
             )
             .await;
         }
@@ -280,7 +269,8 @@ async fn check_inner(app: &AppHandle, manual: bool) -> Result<()> {
     {
         return Ok(());
     }
-    let mut text = format!(
+    let mut text = tr!(
+        "Version {} is available (current: {}).",
         "Versi {} tersedia (sekarang {}).",
         update.version, update.current_version
     );
@@ -293,8 +283,8 @@ async fn check_inner(app: &AppHandle, manual: bool) -> Result<()> {
         let notes: String = notes.chars().take(600).collect();
         text.push_str(&format!("\n\n{notes}"));
     }
-    text.push_str("\n\nPasang sekarang? Aplikasi akan dibuka ulang.");
-    if !ask(app, &text, "Pasang", "Nanti").await {
+    text.push_str(tr!("\n\nInstall now? The app will restart.", "\n\nPasang sekarang? Aplikasi akan dibuka ulang."));
+    if !ask(app, &text, tr!("Install", "Pasang"), tr!("Later", "Nanti")).await {
         if let Ok(mut d) = DECLINED.lock() {
             *d = Some(update.version.clone());
         }
@@ -316,7 +306,7 @@ async fn install(app: &AppHandle, update: Update) -> Result<()> {
             downloaded_bytes: 0,
             total_bytes: None,
             percent: Some(0),
-            message: Some(format!("Mengunduh update v{version}...")),
+            message: Some(trf!("Downloading update v{version}...", "Mengunduh update v{version}...")),
             error: None,
         },
     );
@@ -341,12 +331,13 @@ async fn install(app: &AppHandle, update: Update) -> Result<()> {
                 last_pct = pct;
                 last_emit = Instant::now();
                 let label = match (known_total, pct) {
-                    (Some(t), Some(p)) => format!(
+                    (Some(t), Some(p)) => tr!(
+                        "Downloading update v{v_chunk} — {} / {} ({p}%)",
                         "Mengunduh update v{v_chunk} — {} / {} ({p}%)",
                         format_mb(done),
                         format_mb(t)
                     ),
-                    _ => format!("Mengunduh update v{v_chunk} — {}", format_mb(done)),
+                    _ => tr!("Downloading update v{v_chunk} — {}", "Mengunduh update v{v_chunk} — {}", format_mb(done)),
                 };
                 set_progress(
                     app,
@@ -365,7 +356,7 @@ async fn install(app: &AppHandle, update: Update) -> Result<()> {
             || {},
         )
         .await
-        .context("mengunduh update")?;
+        .context(tr!("downloading the update", "mengunduh update"))?;
 
     set_progress(
         app,
@@ -376,7 +367,7 @@ async fn install(app: &AppHandle, update: Update) -> Result<()> {
             downloaded_bytes: done,
             total_bytes: known_total.or(Some(done)),
             percent: Some(100),
-            message: Some(format!("Memasang update v{version}...")),
+            message: Some(trf!("Installing update v{version}...", "Memasang update v{version}...")),
             error: None,
         },
     );
@@ -384,8 +375,8 @@ async fn install(app: &AppHandle, update: Update) -> Result<()> {
     // install() bisa memblok (dan di Windows memanggil on_before_exit), jadi jalankan di luar runtime async.
     tauri::async_runtime::spawn_blocking(move || update.install(bytes))
         .await
-        .context("tugas pemasangan")?
-        .context("memasang update")?;
+        .context(tr!("install task", "tugas pemasangan"))?
+        .context(tr!("installing the update", "memasang update"))?;
 
     set_progress(
         app,
@@ -396,7 +387,7 @@ async fn install(app: &AppHandle, update: Update) -> Result<()> {
             downloaded_bytes: done,
             total_bytes: known_total.or(Some(done)),
             percent: Some(100),
-            message: Some("Update terpasang, membuka ulang aplikasi...".into()),
+            message: Some(tr!("Update installed, restarting the app...", "Update terpasang, membuka ulang aplikasi...").into()),
             error: None,
         },
     );
