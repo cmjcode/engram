@@ -166,25 +166,15 @@ async fn repo_event(st: &AppState, subject: &str, event: &str, b: &HookIn) -> Ap
     }
     let project = b.project.as_deref();
     let rt = &st.rt;
-    let opt = |k: &str| b.options[k].as_bool().unwrap_or(false);
     let out = match event {
-        "repo-sync" => rb::on_repo_event(rt, subject, path, project).await?,
-        "repo-export" => rb::export_for_commit(rt, subject, path, project).await?,
-        _ => match b.options["action"].as_str().unwrap_or("") {
-            "init" => json!(rb::init_repo(rt, subject, path, project, opt("hooks")).await?),
-            "export" => json!(rb::export_with(rt, subject, path, project, opt("dry_run")).await?),
-            "import" => json!(rb::import_repo(rt, subject, path, project).await?),
-            "status" => json!(rb::status(rt, subject, path, project).await?),
-            "hooks" => json!(rb::git_hooks(&rb_root(path), opt("remove"))?),
-            other => return Err(ApiError::BadRequest(format!("aksi repo tidak dikenal: {other}"))),
-        },
+        // Hook git lama (clone yang belum migrasi): pull lewat hub, atau impor bundel read-only.
+        "repo-sync" => memory_jobs::repo_hub::on_repo_event(rt, subject, path, project, false).await?,
+        // Ekspor sebelum commit tidak dipakai lagi: memori tim tidak ditulis ke git.
+        "repo-export" => json!({"skipped": "memori tim lewat hub; tidak ada yang ditulis ke repo", "legacy": rb::BUNDLE_DIR}),
+        _ => memory_jobs::repo_hub::cli_action(rt, subject, path, project, &b.options).await?,
     };
-    Ok(Json(json!({"ok": true, "result": out})))
-}
 
-/// Akar repo git dari `path` (cadangan: `path` itu sendiri).
-fn rb_root(path: &std::path::Path) -> std::path::PathBuf {
-    memory_core::project::detect_project(path).filter(|p| p.from_git).map(|p| p.root).unwrap_or_else(|| path.to_path_buf())
+    Ok(Json(json!({"ok": true, "result": out})))
 }
 
 fn clean_client(c: &str) -> String {
@@ -218,8 +208,9 @@ async fn hook_event(State(st): State<AppState>, Path((client, event)): Path<(Str
         && let Some(cwd) = b.cwd.clone().filter(|c| !c.trim().is_empty())
     {
         let (rt, subject, project) = (st.rt.clone(), subject.clone(), project.clone());
+        let end = event == "session-end";
         tokio::spawn(async move {
-            if let Err(e) = memory_jobs::repo_bundle::on_repo_event(&rt, &subject, std::path::Path::new(&cwd), project.as_deref()).await {
+            if let Err(e) = memory_jobs::repo_hub::on_repo_event(&rt, &subject, std::path::Path::new(&cwd), project.as_deref(), end).await {
                 tracing::debug!(error = %e, "cek memori repo bersama dilewati");
             }
         });

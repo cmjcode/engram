@@ -18,6 +18,7 @@ memory-retrieve.workspace = true
 memory-jobs.workspace = true
 memory-import.workspace = true
 memory-server.workspace = true
+memory-hub = { workspace = true, default-features = false }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

@@ -6,6 +6,38 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
 ## [Unreleased]
 
 ### Added
+- **Team hub** (`engram serve --hub`, new crate `memory-hub`): shared project memory moves from the git
+  repository to a server. Sign in with Google or GitHub (same verified email = one account), JWT access tokens
+  with rotating refresh tokens, personal access tokens for CI (`ENGRAM_HUB_URL` + `ENGRAM_HUB_TOKEN`), roles
+  owner / maintainer / member / reader, join key in `.engram/repo.toml` (hashed on the hub, rotatable),
+  optional GitHub permission check, audit log, per-IP rate limits, and a web UI at `/hub`. The hub keeps a
+  per-repo change log (`seq`): devices push only changed records and pull from their cursor. It never stores
+  raw transcripts, episode text or embeddings, and rejects records that still contain redaction markers.
+  Docker: `docker/docker-compose.yml` (built from source, joins an existing nginx network) and `docker/nginx-engram.conf`; `HEALTHCHECK` via `engram health`.
+- CLI: `engram login [--hub URL] [--provider google|github]`, `engram logout`, `engram whoami`,
+  `engram repo init | join [--github] | push [--full] [--dry-run] | pull | status | migrate | rotate-key |
+  disconnect`. Teammates join automatically on their first agent session in a repo with `repo.toml`.
+- Shared memory now includes project episode titles and summaries (`[repo_share] share_episodes`).
+
+### Changed
+- Team memory no longer writes `.engram/members/`, `README.md` or git hooks: the only committed file is
+  `.engram/repo.toml`, so `git status` stays clean. `engram repo migrate` uploads existing bundles to the hub,
+  removes them and the engram git hooks. Old bundles from teammates who have not migrated are still read
+  (`legacy_import = true`), never written.
+- Shared record IDs derive from content (lesson title key, decision situation + action, fact entity +
+  predicate + object) instead of local IDs, so fact supersedes and episode compaction no longer create
+  new records plus tombstones.
+- MCP tool profile `operon` (`?profile=operon`, `engram mcp --profile operon`) for multi-tenant memory layers
+  (one engram subject per tenant): `recall`, `remember`, `who_is`, `timeline`, `principles`, `project_context`,
+  `get_episodes` only; no `family_tree`, `compact`, `memory_gaps`, `list_subjects`, `persona_context`.
+- Per-subject tokens for tenant isolation: `MEMORY_SUBJECT_TOKENS=subjectA=tokenA,subjectB=tokenB`
+  (`server.subject_tokens_env`). A subject token may only touch `/api/subjects/{s}/...` for its own subject,
+  `POST /api/subjects` with the same id (`GET` lists only that subject), `/mcp` with the `subject` argument forced
+  to it (`list_subjects` refused), and `/api/reviews/{id}` / `/api/sources/{id}` it owns; everything else answers
+  `403`. The global `MEMORY_TOKEN` keeps full access.
+- Score category `business_fact`: short, flat business statements ("Outlet Bandung tutup sejak September 2026",
+  "Target omzet Q4 naik 15%") with two business terms, or one term plus a number, are promoted to the episode
+  threshold instead of being dropped as small talk. Thresholds are unchanged; "ok makasih" is still dropped.
 - Project groups: projects sharing a tag (e.g. `#VOLTUNES`) form a group. `project_context` for one
   repo now adds an "Ekosistem grup" section: the umbrella project's shared architecture, a map of every
   sibling repo (role + tech stack), cross-repo conventions and recent group sessions. Membership also

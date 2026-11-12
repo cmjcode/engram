@@ -23,6 +23,7 @@ pub struct MemoryConfig {
     pub privacy: PrivacyConfig,
     pub inject: InjectConfig,
     pub repo_share: RepoShareConfig,
+    pub hub: HubConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,14 +286,26 @@ impl Default for ScheduleConfig {
 #[serde(default)]
 pub struct ServerConfig {
     pub bind: String,
-    /// Token bearer opsional untuk API & MCP HTTP (env var).
+    /// Token bearer opsional untuk API & MCP HTTP (env var). Token ini global:
+    /// boleh menyentuh semua subjek dan semua endpoint.
     pub token_env: Option<String>,
+    /// Nama env var berisi token per subjek untuk isolasi tenant, format
+    /// `subjekA=tokenA,subjekB=tokenB`. Request dengan token subjek hanya boleh
+    /// menyentuh subjek itu (`/api/subjects/{s}/...`, `/mcp` dengan `subject` dipaksa,
+    /// review/sumber miliknya); endpoint lain (settings, storage, update, services)
+    /// ditolak 403. Boleh dipakai tanpa `token_env` (hanya token subjek yang berlaku).
+    pub subject_tokens_env: Option<String>,
     pub max_upload_mb: usize,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { bind: "127.0.0.1:7878".into(), token_env: Some("MEMORY_TOKEN".into()), max_upload_mb: 512 }
+        Self {
+            bind: "127.0.0.1:7878".into(),
+            token_env: Some("MEMORY_TOKEN".into()),
+            subject_tokens_env: Some("MEMORY_SUBJECT_TOKENS".into()),
+            max_upload_mb: 512,
+        }
     }
 }
 
@@ -357,24 +370,124 @@ impl Default for InjectConfig {
     }
 }
 
-/// Berbagi memori proyek lewat repositori git (`<repo>/.engram/`): siapa pun yang punya
-/// akses ke repo ikut berbagi pelajaran, keputusan, dan fakta proyek.
+/// Memori proyek bersama (mode klien): repo yang punya `.engram/repo.toml` disinkronkan ke
+/// hub tim; bundel `.engram/members/` lama masih dibaca (read-only) selama satu rilis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoShareConfig {
-    /// Saklar utama; `false` = tidak ada impor/ekspor otomatis (perintah manual tetap jalan).
+    /// Saklar utama; `false` = tidak ada pull/push otomatis (perintah manual tetap jalan).
     pub enabled: bool,
-    /// Gabungkan bundel rekan tim saat sesi agent dimulai, setelah `git pull`, dan berkala.
+    /// Tarik memori rekan tim saat sesi agent dimulai dan berkala (`auto_pull`).
+    #[serde(alias = "auto_pull")]
     pub auto_import: bool,
-    /// Tulis bundel perangkat ini untuk repo yang sudah diaktifkan (`engram repo init`).
+    /// Kirim memori proyek perangkat ini saat sesi berakhir dan berkala (`auto_push`).
+    #[serde(alias = "auto_push")]
     pub auto_export: bool,
-    /// Interval cek berkala per repo yang dikenal (menit, 0 = hanya saat sesi/hook git).
+    /// Interval cek berkala per repo yang dikenal (menit, 0 = hanya saat sesi agent).
     pub interval_minutes: u64,
+    /// Hub bawaan untuk `engram login` dan `engram repo init` (mis. `https://engram.tim.id`).
+    pub hub_url: Option<String>,
+    /// Sertakan judul + ringkasan episode proyek (tanpa teks mentah) saat push.
+    pub share_episodes: bool,
+    /// Masih membaca bundel `.engram/members/` format lama milik rekan yang belum migrasi.
+    pub legacy_import: bool,
 }
 
 impl Default for RepoShareConfig {
     fn default() -> Self {
-        Self { enabled: true, auto_import: true, auto_export: true, interval_minutes: 15 }
+        Self { enabled: true, auto_import: true, auto_export: true, interval_minutes: 15, hub_url: None, share_episodes: true, legacy_import: true }
+    }
+}
+
+/// Mode server hub tim (`engram serve --hub`): akun Google/GitHub, repo bersama, change log.
+/// Rahasia (JWT, client secret OAuth) hanya dibaca dari env var yang namanya ada di sini.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HubConfig {
+    pub enabled: bool,
+    /// URL publik hub (mis. `https://engram.tim.id`); dipakai untuk redirect OAuth.
+    pub base_url: String,
+    /// Nama yang tampil di halaman login.
+    pub name: String,
+    /// Env var berisi rahasia JWT (>= 32 byte). Hub menolak start bila kosong.
+    pub jwt_secret_env: String,
+    pub google_client_id: String,
+    pub google_client_secret_env: String,
+    pub github_client_id: String,
+    pub github_client_secret_env: String,
+    /// Dasar URL callback bila berbeda dari `base_url` (di balik proxy).
+    pub redirect_base: Option<String>,
+    /// Origin yang boleh memanggil `/hub` lintas-origin; kosong = same-origin saja.
+    pub allowed_origins: Vec<String>,
+    pub access_minutes: i64,
+    pub refresh_days: i64,
+    /// Bawaan repo baru: join key saja tidak cukup, wajib verifikasi izin GitHub.
+    pub require_github_verify: bool,
+    /// Siapa pun yang login boleh membuat akun; `false` = hanya email yang sudah diundang.
+    pub open_signup: bool,
+    /// Hanya email dengan domain ini yang boleh login (kosong = semua).
+    pub allowed_email_domains: Vec<String>,
+    /// Percayai `X-Forwarded-For` hop pertama (di balik reverse proxy).
+    pub trust_proxy: bool,
+    pub max_records_per_push: usize,
+    pub max_record_bytes: usize,
+    pub max_records_per_member: usize,
+    /// Record yang sudah dicabut dihapus dari hub setelah sekian hari.
+    pub record_retention_days: u64,
+}
+
+impl Default for HubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: String::new(),
+            name: "Engram Hub".into(),
+            jwt_secret_env: "ENGRAM_HUB_JWT_SECRET".into(),
+            google_client_id: String::new(),
+            google_client_secret_env: "ENGRAM_HUB_GOOGLE_SECRET".into(),
+            github_client_id: String::new(),
+            github_client_secret_env: "ENGRAM_HUB_GITHUB_SECRET".into(),
+            redirect_base: None,
+            allowed_origins: vec![],
+            access_minutes: 60,
+            refresh_days: 30,
+            require_github_verify: false,
+            open_signup: true,
+            allowed_email_domains: vec![],
+            trust_proxy: false,
+            max_records_per_push: 2000,
+            max_record_bytes: 64 * 1024,
+            max_records_per_member: 20_000,
+            record_retention_days: 90,
+        }
+    }
+}
+
+impl HubConfig {
+    /// Timpa dengan env var (`ENGRAM_HUB_ENABLED`, `ENGRAM_HUB_BASE_URL`,
+    /// `ENGRAM_HUB_GOOGLE_CLIENT_ID`, `ENGRAM_HUB_GITHUB_CLIENT_ID`) agar Docker cukup diatur lewat env.
+    pub fn apply_env(&mut self) {
+        let get = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        if let Some(v) = get("ENGRAM_HUB_ENABLED") {
+            self.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Some(v) = get("ENGRAM_HUB_BASE_URL") {
+            self.base_url = v;
+        }
+        if let Some(v) = get("ENGRAM_HUB_GOOGLE_CLIENT_ID") {
+            self.google_client_id = v;
+        }
+        if let Some(v) = get("ENGRAM_HUB_GITHUB_CLIENT_ID") {
+            self.github_client_id = v;
+        }
+        if let Some(v) = get("ENGRAM_HUB_TRUST_PROXY") {
+            self.trust_proxy = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+    }
+
+    /// Dasar URL untuk callback OAuth (tanpa garis miring akhir).
+    pub fn redirect_base(&self) -> String {
+        self.redirect_base.as_deref().filter(|r| !r.trim().is_empty()).unwrap_or(&self.base_url).trim_end_matches('/').to_string()
     }
 }
 

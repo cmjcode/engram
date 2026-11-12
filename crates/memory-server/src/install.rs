@@ -521,7 +521,7 @@ fn rule_files(dirs: &Dirs, c: Client) -> Vec<PathBuf> {
 fn sync_client_rules(dirs: &Dirs, c: Client, uninstall: bool) {
     let block = match c.profile() {
         Profile::Full => RULE_BLOCK,
-        Profile::Coding => CODING_RULE_BLOCK,
+        Profile::Coding | Profile::Operon => CODING_RULE_BLOCK,
     };
     for f in rule_files(dirs, c) {
         if let Err(e) = upsert_rule_file(&f, block, uninstall) {

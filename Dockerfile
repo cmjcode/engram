@@ -2,6 +2,7 @@
 # engram CLI + server (UI, REST API, MCP Streamable HTTP, worker).
 #   docker run -d -p 7878:7878 -v engram-data:/data -e MEMORY_TOKEN=... ghcr.io/cmjcode/engram
 #   docker run -i --rm -v engram-data:/data ghcr.io/cmjcode/engram mcp --profile coding   # stdio
+#   Hub tim (login Google/GitHub, memori repo bersama): lihat docker/docker-compose.yml + docker/nginx-engram.conf
 FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev \
  && apt-get clean
@@ -21,6 +22,7 @@ USER engram
 WORKDIR /data
 VOLUME ["/data"]
 EXPOSE 7878
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD ["engram", "health"]
 ENV MEMORY_CONFIG=/data/memory.toml
 ENTRYPOINT ["tini", "--", "entrypoint.sh"]
 CMD ["serve", "--bind", "0.0.0.0:7878"]

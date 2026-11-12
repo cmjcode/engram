@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Multipart, Path, Query, State};
+use axum::extract::{Extension, Multipart, Path, Query, State};
 use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -17,7 +17,15 @@ use memory_extract::review::Decision;
 use memory_retrieve::RecallQuery;
 use memory_store::EpisodeFilter;
 
-use crate::{ApiError, ApiResult, AppState};
+use crate::{ApiError, ApiResult, AppState, BoundSubject};
+
+/// Tolak 403 bila request memakai token per subjek dan `subject` bukan subjek itu.
+fn ensure_bound(bound: &Option<Extension<BoundSubject>>, subject: &str) -> Result<(), ApiError> {
+    match bound {
+        Some(Extension(BoundSubject(b))) if b != subject => Err(ApiError::Forbidden(format!("token ini hanya berlaku untuk subjek {b}"))),
+        _ => Ok(()),
+    }
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -116,8 +124,13 @@ fn check(s: &str) -> Result<(), ApiError> {
     }
 }
 
-async fn list_subjects(State(st): State<AppState>) -> ApiResult<Value> {
-    let subjects = st.rt.store.list_subjects().await?;
+async fn list_subjects(State(st): State<AppState>, bound: Option<Extension<BoundSubject>>) -> ApiResult<Value> {
+    let mut subjects = st.rt.store.list_subjects().await?;
+    if let Some(Extension(BoundSubject(b))) = &bound {
+        // Token per subjek: hanya subjeknya sendiri yang terlihat.
+        subjects.retain(|s| &s.id == b);
+        return Ok(Json(json!({"subjects": subjects, "default": b})));
+    }
     let def = st.resolve_subject(None).await;
     Ok(Json(json!({"subjects": subjects, "default": def})))
 }
@@ -136,9 +149,11 @@ struct SubjectIn {
 
 async fn upsert_subject(
     State(st): State<AppState>,
+    bound: Option<Extension<BoundSubject>>,
     Json(b): Json<SubjectIn>,
 ) -> ApiResult<Subject> {
     check(&b.id)?;
+    ensure_bound(&bound, &b.id)?;
     let mut s = st.rt.pipeline.ensure_subject(&b.id, Some(&b.name)).await?;
     let parse = |d: &str| {
         chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
@@ -661,8 +676,13 @@ struct ReviewIn {
 async fn resolve_review(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    bound: Option<Extension<BoundSubject>>,
     Json(b): Json<ReviewIn>,
 ) -> ApiResult<ReviewItem> {
+    if bound.is_some() {
+        let item = st.rt.store.get_review(&id).await?.ok_or_else(|| ApiError::NotFound("review tidak ada".into()))?;
+        ensure_bound(&bound, &item.subject)?;
+    }
     Ok(Json(
         st.rt
             .pipeline
@@ -694,13 +714,14 @@ async fn sources(
     ))
 }
 
-async fn source(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+async fn source(State(st): State<AppState>, Path(id): Path<String>, bound: Option<Extension<BoundSubject>>) -> ApiResult<Value> {
     let src = st
         .rt
         .store
         .get_source(&id)
         .await?
         .ok_or_else(|| ApiError::NotFound("sumber tidak ada".into()))?;
+    ensure_bound(&bound, &src.subject)?;
     let text = st.rt.vault.read_rel(&src.path).unwrap_or_default();
     let episodes = st
         .rt
@@ -1104,13 +1125,19 @@ async fn project_meta_put(State(st): State<AppState>, Path(s): Path<String>, Jso
 #[derive(Deserialize)]
 struct ProjectShareIn {
     project: String,
-    /// `init` | `export` | `import` | `hooks` | `unhooks`
+    /// Hub: `init` | `join` | `push` | `pull` | `migrate` | `rotate-key` | `disconnect` | `status`;
+    /// bundel lama: `export` | `import` | `hooks` | `unhooks`.
     action: String,
     /// Akar repo bila belum dikenal dari sesi kerja (path absolut).
     #[serde(default)]
     root: Option<String>,
     #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
+    full: bool,
+    /// URL hub untuk `init`/`migrate` (bawaan: hub yang sedang login).
+    #[serde(default)]
+    hub_url: Option<String>,
 }
 
 async fn share_root(st: &AppState, s: &str, project: &str, root: Option<&str>) -> Result<Option<PathBuf>, ApiError> {
@@ -1133,7 +1160,8 @@ async fn project_share_get(State(st): State<AppState>, Path(s): Path<String>, Qu
         return Ok(Json(json!({"found": false, "enabled": st.rt.cfg.repo_share.enabled})));
     };
     let status = memory_jobs::repo_bundle::status(&st.rt, &s, &root, Some(name)).await?;
-    Ok(Json(json!({"found": true, "status": status})))
+    let hub = memory_jobs::repo_hub::status(&st.rt, &root, Some(name)).await?;
+    Ok(Json(json!({"found": true, "status": status, "hub": hub})))
 }
 
 async fn project_share_post(State(st): State<AppState>, Path(s): Path<String>, Json(b): Json<ProjectShareIn>) -> ApiResult<Value> {
@@ -1144,15 +1172,17 @@ async fn project_share_post(State(st): State<AppState>, Path(s): Path<String>, J
         return Err(ApiError::BadRequest("project wajib diisi".into()));
     }
     let root = share_root(&st, &s, name, b.root.as_deref()).await?.ok_or_else(|| ApiError::BadRequest("folder repo proyek ini belum diketahui; isi path repo".into()))?;
-    let result = match b.action.as_str() {
-        "init" => json!(rb::init_repo(&st.rt, &s, &root, Some(name), false).await?),
-        "export" => json!(rb::export_with(&st.rt, &s, &root, Some(name), b.dry_run).await?),
-        "import" => json!(rb::import_repo(&st.rt, &s, &root, Some(name)).await?),
-        "hooks" | "unhooks" => json!(rb::git_hooks(&root, b.action == "unhooks")?),
-        other => return Err(ApiError::BadRequest(format!("aksi tidak dikenal: {other}"))),
+    // Aksi hub (init/join/push/pull/migrate/rotate-key/disconnect) dan bundel lama
+    // (export/import/hooks) lewat satu pintu yang sama dengan `engram repo ...`.
+    let action = match b.action.as_str() {
+        "unhooks" => "hooks",
+        a => a,
     };
+    let opts = json!({"action": action, "dry_run": b.dry_run, "remove": b.action == "unhooks", "hub": b.hub_url, "full": b.full});
+    let result = memory_jobs::repo_hub::cli_action(&st.rt, &s, &root, Some(name), &opts).await?;
     let status = rb::status(&st.rt, &s, &root, Some(name)).await?;
-    Ok(Json(json!({"result": result, "status": status})))
+    let hub = memory_jobs::repo_hub::status(&st.rt, &root, Some(name)).await?;
+    Ok(Json(json!({"result": result, "status": status, "hub": hub})))
 }
 
 /// Peta berkas -> observasi yang menyentuhnya, untuk tab Berkas halaman proyek.
@@ -1268,7 +1298,11 @@ async fn interview_next(
     Ok(Json(st.rt.pipeline.next_question(&s).await?))
 }
 
-async fn retry_source(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+async fn retry_source(State(st): State<AppState>, Path(id): Path<String>, bound: Option<Extension<BoundSubject>>) -> ApiResult<Value> {
+    if bound.is_some() {
+        let src = st.rt.store.get_source(&id).await?.ok_or_else(|| ApiError::NotFound("sumber tidak ada".into()))?;
+        ensure_bound(&bound, &src.subject)?;
+    }
     let job = st.rt.retry_source(&id).await?;
     Ok(Json(json!({"job_id": job})))
 }

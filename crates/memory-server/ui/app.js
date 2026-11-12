@@ -464,11 +464,11 @@ async function viewProjects(el) {
   // Baris memori tim (.engram/) untuk proyek yang tertaut ke repo git.
   const engramRow = (p) => {
     const e = p.engram;
-    if (!e && !p.repo) return "";
-    if (e?.state === "active") return `<div class="proj-engram small"><span class="badge now">${t(".engram active")}</span><span class="muted">${t("project memory is shared through the repo")}</span></div>`;
-    const label = e?.state === "bundle" ? t("Enable .engram") : t("Set up .engram");
-    const hint = e?.state === "bundle" ? t("The repo already holds team memory; enable it so this device writes too") : e ? t("Create a .engram/ folder in {root}", { root: e.root }) : t("Repo folder unknown; enter its path on the project page");
-    return `<div class="proj-engram small"><button type="button" class="primary" data-engram="${esc(p.project)}" title="${esc(hint)}">${icon("git")} ${label}</button>${e?.state === "bundle" ? `<span class="badge warn">${t("has team memory")}</span>` : ""}</div>`;
+    if (e?.state === "hub") return `<div class="proj-engram small"><span class="badge now">${t("team memory")}</span><span class="muted">${t("synced through the team hub")}</span></div>`;
+    const legacy = e?.state === "bundle" || e?.state === "active";
+    const label = legacy ? t("Migrate to team hub") : t("Connect to team hub");
+    const hint = legacy ? t("The repo uses the old .engram/ git bundle; move it to the team hub") : e ? t("Share memory of {root} through the team hub", { root: e.root }) : t("Repo folder unknown; enter its path on the project page");
+    return `<div class="proj-engram small"><button type="button" class="primary" data-engram="${esc(p.project)}" title="${esc(hint)}">${icon("cloud")} ${label}</button>${legacy ? `<span class="badge warn">${t("old git bundle")}</span>` : ""}</div>`;
   };
   // Tag unik (tanpa membedakan huruf besar-kecil) beserta jumlah proyeknya.
   const tags = [];
@@ -522,16 +522,9 @@ async function viewProjects(el) {
     b.onclick = async (e) => {
       e.stopPropagation();
       const name = b.dataset.engram;
-      const p = r.projects.find((x) => x.project === name);
-      // Akar repo belum diketahui: buka halaman proyek, isi path di panel memori tim.
-      if (!p?.engram) { sessionStorage.setItem("share-focus", "1"); location.hash = projHref(name); return; }
-      b.disabled = true;
-      try {
-        const res = await api(`/api/subjects/${S()}/projects/share`, { method: "POST", json: { project: name, action: "init", root: p.engram.root } });
-        const ex = res.result?.export || {};
-        toast(ex.unchanged ? t(".engram/ already exists and is unchanged") : t(".engram/ created in {root}. Commit that folder so teammates receive it", { root: p.engram.root }));
-        route();
-      } catch (err) { toast(err.message); b.disabled = false; }
+      // Login & pilihan aksi ada di panel memori tim halaman proyek.
+      sessionStorage.setItem("share-focus", "1");
+      location.hash = projHref(name);
     };
   });
 }
@@ -653,54 +646,104 @@ async function projectMetaPanel(box, name) {
   show();
 }
 
-// Panel memori tim lewat repo git (.engram/): status anggota, impor/ekspor, hook git.
+// Login hub tim dari UI lokal: server lokal menjalankan alur tiket, browser dibuka ke hub.
+const PROVIDER_ICON = {
+  google: '<svg class="i brand-i" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M23 12.3c0-.8-.1-1.6-.2-2.3H12v4.4h6.2a5.3 5.3 0 0 1-2.3 3.5v2.9h3.7c2.2-2 3.4-5 3.4-8.5z"/><path fill="#34A853" d="M12 23.5c3.1 0 5.7-1 7.6-2.8l-3.7-2.9c-1 .7-2.4 1.1-3.9 1.1-3 0-5.5-2-6.4-4.7H1.8v3A11.5 11.5 0 0 0 12 23.5z"/><path fill="#FBBC05" d="M5.6 14.2a6.9 6.9 0 0 1 0-4.4v-3H1.8a11.5 11.5 0 0 0 0 10.4z"/><path fill="#EA4335" d="M12 4.6c1.7 0 3.2.6 4.4 1.7l3.3-3.3A11.5 11.5 0 0 0 1.8 6.8l3.8 3C6.5 6.6 9 4.6 12 4.6z"/></svg>',
+  github: '<svg class="i brand-i" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.2c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5z"/></svg>',
+};
+
+async function hubLogin(provider, hubUrl) {
+  const r = await api("/api/hub/login", { method: "POST", json: { provider, hub_url: hubUrl || null } });
+  if (!r.opened) window.open(r.url, "_blank", "noopener");
+  toast(t("Finish signing in in the browser…"));
+  for (let i = 0; i < 200; i++) {
+    await new Promise((res) => setTimeout(res, 1500));
+    const s = await api(`/api/hub/login/${encodeURIComponent(r.ticket)}`);
+    if (s.status === "completed") { toast(t("Signed in as {name}", { name: s.user?.name || "" })); return true; }
+    if (s.status === "error") throw new Error(s.error);
+  }
+  throw new Error(t("Sign-in timed out"));
+}
+
+function hubLoginForm(account, onDone) {
+  const hub = account?.hub || "";
+  return {
+    html: `<div class="proj-hub-login">
+      <input type="url" class="hub-url" placeholder="https://engram.team.example" value="${esc(hub)}" spellcheck="false" aria-label="${t("Team hub URL")}">
+      <button type="button" data-login="github">${PROVIDER_ICON.github} ${t("Sign in with GitHub")}</button>
+      <button type="button" data-login="google">${PROVIDER_ICON.google} ${t("Sign in with Google")}</button></div>`,
+    wire(box) {
+      box.querySelectorAll("[data-login]").forEach((b) => {
+        b.onclick = async () => {
+          b.disabled = true;
+          try { await hubLogin(b.dataset.login, $(".hub-url", box).value.trim()); await onDone(); } catch (e) { toast(e.message); b.disabled = false; }
+        };
+      });
+    },
+  };
+}
+
+// Panel memori tim: memori proyek dibagikan lewat hub tim; repo hanya memuat .engram/repo.toml.
 async function projectSharePanel(box, name) {
-  let d;
-  try { d = await api(`/api/subjects/${S()}/projects/share?project=${encodeURIComponent(name)}`); }
-  catch (e) { box.innerHTML = `<div class="card small muted">${t("Could not load team memory status:")} ${esc(e.message)}</div>`; return; }
+  let d, account;
+  try {
+    [d, account] = await Promise.all([api(`/api/subjects/${S()}/projects/share?project=${encodeURIComponent(name)}`), api("/api/hub/account").catch(() => ({ logged_in: false }))]);
+  } catch (e) { box.innerHTML = `<div class="card small muted">${t("Could not load team memory status:")} ${esc(e.message)}</div>`; return; }
+  const reload = () => projectSharePanel(box, name);
   const act = async (action, extra = {}) => {
     try {
       const res = await api(`/api/subjects/${S()}/projects/share`, { method: "POST", json: { project: name, action, ...extra } });
       const r = res.result || {};
-      const ex = r.export || r;
-      if (action === "init" || action === "export") toast(ex.unchanged ? t("Project memory unchanged") : t("Written to .engram/. Commit that folder so teammates receive it"));
-      else if (action === "import") toast(r.members && r.members.length ? t("Merged from {n} members", { n: r.members.length }) : t("No new memory from teammates"));
-      else toast(action === "hooks" ? t("Git hooks installed") : t("Git hooks removed"));
-      await projectSharePanel(box, name);
-    } catch (err) { toast(err.message); }
+      const imp = r.import || {};
+      if (action === "init" || action === "migrate") toast(t("Connected to the team hub. Commit .engram/repo.toml so teammates can join"));
+      else if (action === "push") toast(t("Sent {n} records to the hub", { n: r.pushed || 0 }));
+      else if (action === "pull" || action === "join") toast((imp.members || []).length ? t("Merged from {n} members", { n: imp.members.length }) : t("No new memory from teammates"));
+      else if (action === "rotate-key") toast(t("Join key rotated. Commit .engram/repo.toml"));
+      else toast(t("Done"));
+      await reload();
+    } catch (err) { toast(err.message); await reload(); }
   };
+  const head = (extra = "") => `<div class="proj-share-head">${icon("users")} <b>${t("Team memory")}</b> ${extra}</div>`;
   if (!d.found) {
-    box.innerHTML = `<div class="card proj-share">
-      <div class="proj-share-head">${icon("users")} <b>${t("Team memory via git repo")}</b></div>
-      <p class="small muted">${t("Anyone with access to this project's repo can share project conventions, decisions, and facts through the <code>.engram/</code> folder. The repo folder is unknown; start an agent session in that repo, or enter its path.")}</p>
-      <form class="row" id="share-root"><input type="text" id="share-path" placeholder="${t("/path/to/repo")}" autocomplete="off" spellcheck="false"><button class="primary" type="submit">${icon("git")} ${t("Set up .engram")}</button></form>
+    box.innerHTML = `<div class="card proj-share">${head()}
+      <p class="small muted">${t("Everyone with access to this project's repo can share conventions, decisions, facts, and session summaries through the team hub. The repo folder is unknown; start an agent session in that repo, or enter its path.")}</p>
+      <form class="row" id="share-root"><input type="text" id="share-path" placeholder="${t("/path/to/repo")}" autocomplete="off" spellcheck="false"><button class="primary" type="submit">${icon("cloud")} ${t("Connect to team hub")}</button></form>
     </div>`;
     $("#share-root", box).onsubmit = (e) => { e.preventDefault(); const root = $("#share-path", box).value.trim(); if (root) act("init", { root }); };
     if (sessionStorage.getItem("share-focus")) { sessionStorage.removeItem("share-focus"); box.scrollIntoView({ block: "center" }); $("#share-path", box).focus(); }
     return;
   }
-  const s = d.status;
-  const counts = (c) => t("{lessons} lessons · {decisions} decisions · {facts} facts", { lessons: c.lessons || 0, decisions: c.decisions || 0, facts: c.facts || 0 });
-  const state = s.active
-    ? `<span class="badge now">${t("active")}</span> ${t("This device's project memory is written to <code>.engram/</code>; teammates receive it after it is committed and pulled.")}`
-    : s.bundle
-      ? `<span class="badge warn">${t("receiving")}</span> ${t("The repo contains team memory that is merged automatically. Enable it so this device writes too.")}`
-      : `<span class="badge">${t("not active")}</span> ${t("Enable to start sharing project memory with anyone who has access to this repo.")}`;
-  box.innerHTML = `<div class="card proj-share">
-    <div class="proj-share-head">${icon("users")} <b>${t("Team memory via git repo")}</b> <code class="small" title="${esc(s.root)}">${esc(s.root)}</code></div>
-    <div class="small">${state}</div>
-    ${s.members.length ? `<ul class="proj-share-members">${s.members.map((m) => `<li><b>${esc(m.name)}</b> <span class="muted">${esc(m.device || "")}${m.own ? ` · ${t("this device")}` : ""}</span><span class="small muted">${counts(m.counts || {})}</span></li>`).join("")}</ul>` : ""}
-    <div class="small muted">${t("Last import: {imp} · last export: {exp} · {n} teammate records merged · git hooks: {hooks}", { imp: s.last_import_at ? esc(ago(s.last_import_at)) : t("never"), exp: s.last_export_at ? esc(ago(s.last_export_at)) : t("never"), n: s.imported, hooks: s.hooks.length ? esc(s.hooks.join(", ")) : t("none") })}</div>
-    ${s.pending_import ? `<div class="small">${icon("refresh")} ${t("There are <code>.engram/</code> changes not merged yet.")}</div>` : ""}
-    ${s.last_error ? `<div class="small bad">${icon("alert")} ${esc(s.last_error)}</div>` : ""}
-    ${!s.enabled ? `<div class="small muted">${icon("info")} ${t("Automation is turned off in memory.toml (<code>[repo_share] enabled = false</code>); the buttons below still work.")}</div>` : ""}
-    <div class="row">
-      ${s.active ? `<button type="button" data-act="export">${icon("upload")} ${t("Write now")}</button>` : `<button class="primary" type="button" data-act="init">${icon("git")} ${s.bundle ? t("Enable .engram") : t("Set up .engram")}</button>`}
-      ${s.bundle ? `<button type="button" data-act="import">${icon("download")} ${t("Merge now")}</button>` : ""}
-      ${s.hooks.length ? `<button type="button" data-act="unhooks">${icon("git")} ${t("Remove git hooks")}</button>` : `<button type="button" data-act="hooks" title="${t("post-merge & post-checkout merge after a pull; pre-commit writes the bundle before a commit")}">${icon("git")} ${t("Install git hooks")}</button>`}
-    </div>
+  const h = d.hub || {};
+  const login = hubLoginForm(account, reload);
+  const loggedIn = account.logged_in || account.pat_env;
+  const who = account.user ? `<span class="small muted">${t("signed in as {name}", { name: esc(account.user.name) })} · <a href="#" id="hub-logout">${t("Sign out")}</a></span>` : "";
+  let body;
+  if (h.mode === "hub") {
+    body = `<div class="small"><span class="badge now">${t("hub")}</span> <code>${esc(h.hub)}</code> ${h.role ? `· ${t("role")} <b>${esc(t(h.role))}</b>` : `· <span class="badge warn">${t("not joined yet")}</span>`}</div>
+      <div class="small muted">${t("Last push: {push} · last pull: {pull} · {sent} records shared · {n} teammate records merged", { push: h.last_push_at ? esc(ago(h.last_push_at)) : t("never"), pull: h.last_pull_at ? esc(ago(h.last_pull_at)) : t("never"), sent: h.pushed, n: h.imported })}</div>
+      ${h.last_error ? `<div class="small bad">${icon("alert")} ${esc(h.last_error)}</div>` : ""}
+      ${h.legacy_bundle ? `<div class="small">${icon("info")} ${t("The old <code>.engram/members/</code> bundle is still in the repo. Migrate it to the hub to stop the noisy git diffs.")}</div>` : ""}
+      ${loggedIn ? `<div class="row">
+        ${h.role ? `<button type="button" data-act="pull">${icon("download")} ${t("Pull now")}</button><button type="button" data-act="push">${icon("upload")} ${t("Push now")}</button>` : `<button class="primary" type="button" data-act="join">${icon("users")} ${t("Join team memory")}</button>`}
+        ${h.legacy_bundle ? `<button type="button" data-act="migrate">${icon("cloud")} ${t("Migrate old bundle")}</button>` : ""}
+        ${h.role === "owner" || h.role === "maintainer" ? `<button type="button" data-act="rotate-key" title="${t("The old key stops working; commit the new repo.toml")}">${icon("refresh")} ${t("Rotate join key")}</button>` : ""}
+        <a class="button ghost" href="${esc(h.hub)}/hub#hub/repo/${esc(h.repo_id)}" target="_blank" rel="noopener">${icon("external")} ${t("Open on hub")}</a>
+      </div>` : `<p class="small muted">${t("Sign in to the team hub to receive and share this repo's memory.")}</p>${login.html}`}`;
+  } else {
+    const legacy = h.mode === "legacy";
+    body = `<p class="small muted">${legacy
+        ? t("This repo still shares memory through the old <code>.engram/members/</code> git bundle, which causes large diffs. Move it to the team hub: only <code>.engram/repo.toml</code> stays in git.")
+        : t("Share this project's conventions, decisions, facts, and session summaries with everyone who has access to the repo. Memory lives on the team hub; only <code>.engram/repo.toml</code> is committed.")}</p>
+      ${loggedIn ? `<button class="primary" type="button" data-act="${legacy ? "migrate" : "init"}">${icon("cloud")} ${legacy ? t("Migrate to team hub") : t("Connect to team hub")}</button>` : login.html}`;
+  }
+  box.innerHTML = `<div class="card proj-share">${head(`<code class="small" title="${esc(h.root)}">${esc(h.root)}</code>`)}${who}${body}
+    ${!h.enabled ? `<div class="small muted">${icon("info")} ${t("Automation is turned off in memory.toml (<code>[repo_share] enabled = false</code>); the buttons below still work.")}</div>` : ""}
+    ${(h.legacy_hooks || []).length ? `<div class="small muted">${t("Old engram git hooks are still installed: {hooks}", { hooks: esc(h.legacy_hooks.join(", ")) })} <button type="button" class="ghost" data-act="unhooks">${t("Remove")}</button></div>` : ""}
   </div>`;
+  login.wire(box);
   box.querySelectorAll("[data-act]").forEach((b) => { b.onclick = () => { b.disabled = true; act(b.dataset.act); }; });
+  const lo = $("#hub-logout", box);
+  if (lo) lo.onclick = async (e) => { e.preventDefault(); await api("/api/hub/logout", { method: "POST", json: {} }); reload(); };
 }
 
 // ---------------------------------------------------------------- graf proyek

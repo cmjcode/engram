@@ -15,6 +15,10 @@ causes, personal stories) is sensitive by design, so these properties matter:
 - **Local only by default.** The server binds to `127.0.0.1:7878`. When `MEMORY_TOKEN` is set,
   every `/api` and `/mcp` request must carry `Authorization: Bearer <token>`. Binding to another
   address without a token logs a warning; do not expose the port without a token and TLS in front.
+- **Per-subject tokens.** `MEMORY_SUBJECT_TOKENS=subjectA=tokenA,subjectB=tokenB` issues tokens that may
+  only touch their own subject (`/api/subjects/{s}/...`, `/mcp` with `subject` forced, their own reviews and
+  sources); admin endpoints answer `403`. Use one engram subject per tenant and never hand a tenant the
+  global `MEMORY_TOKEN`.
 - **Client configs contain the token.** The installers write MCP client configs with mode `0600`.
 - **Secret redaction before storage.** Hooks redact API keys, tokens, PEM blocks and credentials in
   URLs (`<redacted type='…'/>`) and drop `<private>…</private>` spans before anything reaches the

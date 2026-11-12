@@ -8,3 +8,8 @@ docs
 !memory.toml.example
 build.sh
 eval
+# Vault uji & rahasia lokal tidak ikut build context.
+vault
+docker/hub.env
+*.env
+.env

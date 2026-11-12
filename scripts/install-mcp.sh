@@ -52,7 +52,7 @@ Pemakaian: $(basename "$0") [opsi]
   --client NAMA   antigravity | gemini | claude | cursor | codex | windsurf | all
                   (bawaan: antigravity; 'all' = yang terpasang di komputer ini)
   --mode MODE     http | stdio                          (bawaan: http)
-  --profile P     auto | full | coding                  (bawaan: auto, per client)
+  --profile P     auto | full | coding | operon         (bawaan: auto, per client)
   --name NAMA     nama server MCP                       (bawaan: engram)
   --token TOKEN   pakai token ini (mode http); bila kosong, pakai yang ada atau buat baru
   --config PATH   memory.toml untuk mode stdio          (bawaan: config aplikasi desktop)
@@ -89,9 +89,9 @@ case "$CLIENT" in
   *) echo "Client tidak dikenal: $CLIENT" >&2; exit 2 ;;
 esac
 case "$MODE" in http|stdio) ;; *) echo "Mode tidak dikenal: $MODE" >&2; exit 2 ;; esac
-case "$PROFILE" in auto|full|coding) ;; *) echo "Profile tidak dikenal: $PROFILE" >&2; exit 2 ;; esac
+case "$PROFILE" in auto|full|coding|operon) ;; *) echo "Profile tidak dikenal: $PROFILE" >&2; exit 2 ;; esac
 
-# profile_for CLIENT -> full | coding
+# profile_for CLIENT -> full | coding | operon
 profile_for() {
   if [[ "$PROFILE" != "auto" ]]; then echo "$PROFILE"; return; fi
   case "$1" in cursor|codex|windsurf) echo coding ;; *) echo full ;; esac

@@ -133,6 +133,29 @@ const NOISE: &[&str] = &[
     "pagi", "siang", "malam", "selamat",
 ];
 
+/// Leksikon fakta operasional bisnis (outlet, omzet, target, laporan, stok, pemasok,
+/// harga, jadwal, periode & satuan waktu). Dipakai [`business_signal`] agar fakta
+/// bisnis pendek tanpa sinyal emosi/keputusan tidak dibuang sebagai basa-basi.
+const BUSINESS: &[&str] = &[
+    // Tempat & unit usaha
+    "outlet", "cabang", "toko", "gerai", "warung", "gudang", "kantor", "pabrik", "kasir", "franchise", "mitra",
+    // Uang, harga, kinerja
+    "omzet", "omset", "revenue", "penjualan", "pendapatan", "laba", "rugi", "profit", "margin", "biaya", "harga",
+    "diskon", "promo", "tarif", "invoice", "faktur", "tagihan", "pembayaran", "bayar", "tempo", "piutang", "hutang",
+    "utang", "pajak", "ppn", "rupiah", "rp", "idr", "usd", "dolar", "persen", "target", "kpi", "kuota", "budget",
+    "anggaran", "modal", "cashflow", "kas",
+    // Laporan & operasi
+    "laporan", "report", "rekap", "stok", "stock", "inventaris", "persediaan", "supplier", "pemasok", "vendor",
+    "distributor", "pelanggan", "customer", "klien", "member", "reseller", "agen", "karyawan", "pegawai", "staf",
+    "staff", "shift", "jadwal", "sop", "prosedur", "kebijakan", "kontrak", "order", "pesanan", "po", "pengiriman",
+    "ongkir", "retur", "komplain", "tutup", "buka", "beroperasi", "operasional", "produk", "menu", "layanan", "jasa",
+    "tender", "proposal", "deadline", "tenggat", "naik", "turun", "unit", "pcs",
+    // Periode & waktu
+    "q1", "q2", "q3", "q4", "kuartal", "triwulan", "semester", "harian", "mingguan", "bulanan", "tahunan", "januari",
+    "februari", "maret", "april", "mei", "juni", "juli", "agustus", "september", "oktober", "november", "desember",
+    "senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu",
+];
+
 pub fn count_lexicon(toks: &[String], lex: &[&str]) -> usize {
     toks.iter().filter(|t| lex.contains(&t.as_str())).count()
 }
@@ -143,6 +166,17 @@ pub fn decision_signal(toks: &[String]) -> usize {
 
 pub fn emotion_signal(toks: &[String]) -> usize {
     count_lexicon(toks, EMOTION)
+}
+
+/// Jumlah token dari leksikon bisnis (lihat `BUSINESS`).
+pub fn business_signal(toks: &[String]) -> usize {
+    count_lexicon(toks, BUSINESS)
+}
+
+/// Apakah ada token angka (jumlah, harga, persen, tahun). `normalize` sudah membuang
+/// `%`, `.` dan `,`, jadi `15%`, `Rp 18.000`, `2026` semuanya menjadi token digit.
+pub fn has_number(toks: &[String]) -> bool {
+    toks.iter().any(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Pangsa token noise di antara token non-angka.

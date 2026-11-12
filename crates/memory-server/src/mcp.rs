@@ -10,13 +10,19 @@
 //! Inggris (pemilihan tool oleh LLM lebih stabil dan bisa dipakai pengguna
 //! non-Indonesia); teks hasil mengikuti bahasa isi vault.
 //!
-//! [`Profile`] memilih subset tool yang diekspos: `full` (bawaan) atau `coding`
-//! (hanya tool yang berguna di sesi koding, agar tidak membebani konteks).
+//! [`Profile`] memilih subset tool yang diekspos: `full` (bawaan), `coding`
+//! (hanya tool yang berguna di sesi koding, agar tidak membebani konteks), atau
+//! `operon` (lapisan memori multi-tenant: satu subjek per tenant, tanpa tool
+//! lintas subjek atau pemeliharaan).
+//!
+//! Bila request HTTP datang dengan token per subjek (lihat [`crate::BoundSubject`]),
+//! argumen `subject` setiap `tools/call` dipaksa ke subjek itu dan `list_subjects`
+//! ditolak, sehingga satu tenant tidak bisa membaca memori tenant lain.
 
 use std::time::Duration;
 
+use axum::extract::{Extension, Query, State};
 use axum::Json;
-use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -27,7 +33,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use memory_retrieve::RecallQuery;
 
-use crate::AppState;
+use crate::{AppState, BoundSubject};
 
 /// Versi protokol yang ditawarkan bila klien meminta versi yang tidak dikenal.
 pub const PROTOCOL_VERSION: &str = "2026-07-28";
@@ -42,18 +48,26 @@ pub enum Profile {
     /// Hanya tool untuk sesi koding: konteks proyek, recall, simpan keputusan,
     /// entitas, kronologi, prinsip kerja.
     Coding,
+    /// Lapisan memori multi-tenant (OPERON): recall, remember, entitas, kronologi,
+    /// prinsip, konteks proyek, episode. Tanpa `family_tree`, `compact`,
+    /// `memory_gaps`, `list_subjects`, `persona_context`.
+    Operon,
 }
 
 /// Tool yang masuk profil `coding`, urut sesuai prioritas pemakaian.
 pub const CODING_TOOLS: &[&str] = &["project_context", "recall", "get_episodes", "remember", "who_is", "timeline", "principles"];
 
+/// Tool yang masuk profil `operon`, urut sesuai prioritas pemakaian agen tenant.
+pub const OPERON_TOOLS: &[&str] = &["recall", "remember", "who_is", "timeline", "principles", "project_context", "get_episodes"];
+
 impl Profile {
-    pub const ALL: [Profile; 2] = [Profile::Full, Profile::Coding];
+    pub const ALL: [Profile; 3] = [Profile::Full, Profile::Coding, Profile::Operon];
 
     pub fn parse(s: &str) -> Option<Profile> {
         match s.trim().to_ascii_lowercase().as_str() {
             "" | "full" | "all" => Some(Profile::Full),
             "coding" | "code" | "dev" => Some(Profile::Coding),
+            "operon" => Some(Profile::Operon),
             _ => None,
         }
     }
@@ -62,14 +76,21 @@ impl Profile {
         match self {
             Profile::Full => "full",
             Profile::Coding => "coding",
+            Profile::Operon => "operon",
+        }
+    }
+
+    /// Daftar tool profil ini urut prioritas; `None` = semua tool (urutan definisi).
+    pub fn order(self) -> Option<&'static [&'static str]> {
+        match self {
+            Profile::Full => None,
+            Profile::Coding => Some(CODING_TOOLS),
+            Profile::Operon => Some(OPERON_TOOLS),
         }
     }
 
     pub fn includes(self, tool: &str) -> bool {
-        match self {
-            Profile::Full => true,
-            Profile::Coding => CODING_TOOLS.contains(&tool),
-        }
+        self.order().is_none_or(|list| list.contains(&tool))
     }
 }
 
@@ -351,9 +372,9 @@ fn all_tools() -> Vec<Value> {
 /// Daftar tool untuk `tools/list` sesuai profil.
 pub fn tools(profile: Profile) -> Value {
     let mut v: Vec<Value> = all_tools().into_iter().filter(|t| profile.includes(t["name"].as_str().unwrap_or(""))).collect();
-    if profile == Profile::Coding {
-        // Urutkan sesuai prioritas pemakaian di sesi koding.
-        v.sort_by_key(|t| CODING_TOOLS.iter().position(|n| Some(*n) == t["name"].as_str()).unwrap_or(usize::MAX));
+    if let Some(order) = profile.order() {
+        // Urutkan sesuai prioritas pemakaian profil.
+        v.sort_by_key(|t| order.iter().position(|n| Some(*n) == t["name"].as_str()).unwrap_or(usize::MAX));
     }
     Value::Array(v)
 }
@@ -647,6 +668,12 @@ decisions and context with remember, using source='<client>:<project>'.";
 
 /// Tangani satu pesan JSON-RPC. `None` untuk notifikasi.
 pub async fn handle(st: &AppState, profile: Profile, msg: Value) -> Option<Value> {
+    handle_bound(st, profile, None, msg).await
+}
+
+/// Seperti [`handle`], tetapi bila `bound` diisi (token per subjek) setiap
+/// `tools/call` dipaksa memakai subjek itu dan tool lintas subjek ditolak.
+pub async fn handle_bound(st: &AppState, profile: Profile, bound: Option<&str>, msg: Value) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg["method"].as_str().unwrap_or("");
     let Some(id) = id else {
@@ -672,7 +699,17 @@ pub async fn handle(st: &AppState, profile: Profile, msg: Value) -> Option<Value
         "tools/list" => json!({"tools": tools(profile)}),
         "tools/call" => {
             let name = msg["params"]["name"].as_str().unwrap_or("");
-            let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
+            let mut args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
+            if let Some(b) = bound {
+                if name == "list_subjects" {
+                    let e = format!("token ini hanya berlaku untuk subjek {b}; list_subjects tidak tersedia");
+                    return Some(json!({"jsonrpc": "2.0", "id": id, "result": {"content": [{"type": "text", "text": e}], "isError": true}}));
+                }
+                if !args.is_object() {
+                    args = json!({});
+                }
+                args["subject"] = json!(b);
+            }
             match call_tool(st, name, &args).await {
                 Ok(v) => v,
                 Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
@@ -697,21 +734,27 @@ fn bad_request(msg: &str) -> Response {
 
 /// Streamable HTTP: `POST /mcp`. Satu pesan atau batch; respons JSON
 /// (`202 Accepted` untuk notifikasi saja).
-pub async fn http_handler(State(st): State<AppState>, Query(q): Query<McpQuery>, Json(body): Json<Value>) -> Response {
+pub async fn http_handler(
+    State(st): State<AppState>,
+    Query(q): Query<McpQuery>,
+    bound: Option<Extension<BoundSubject>>,
+    Json(body): Json<Value>,
+) -> Response {
     let Some(profile) = Profile::parse(q.profile.as_deref().unwrap_or("")) else {
-        return bad_request("profile tidak dikenal (pakai 'full' atau 'coding')");
+        return bad_request("profile tidak dikenal (pakai 'full', 'coding', atau 'operon')");
     };
+    let bound = bound.as_ref().map(|b| b.0.0.as_str());
     match body {
         Value::Array(items) => {
             let mut out = Vec::new();
             for m in items {
-                if let Some(r) = handle(&st, profile, m).await {
+                if let Some(r) = handle_bound(&st, profile, bound, m).await {
                     out.push(r);
                 }
             }
             if out.is_empty() { StatusCode::ACCEPTED.into_response() } else { Json(Value::Array(out)).into_response() }
         }
-        m => match handle(&st, profile, m).await {
+        m => match handle_bound(&st, profile, bound, m).await {
             Some(r) => Json(r).into_response(),
             None => StatusCode::ACCEPTED.into_response(),
         },
@@ -788,14 +831,34 @@ mod tests {
         assert_eq!(hints("compact")["destructiveHint"], true);
     }
 
+    fn names(p: Profile) -> Vec<String> {
+        tools(p).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
     #[test]
     fn coding_profile_exposes_only_coding_tools_in_priority_order() {
-        let names: Vec<String> = tools(Profile::Coding).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names, CODING_TOOLS);
+        assert_eq!(names(Profile::Coding), CODING_TOOLS);
         assert_eq!(tools(Profile::Full).as_array().unwrap().len(), 12);
         assert_eq!(Profile::parse("coding"), Some(Profile::Coding));
         assert_eq!(Profile::parse(""), Some(Profile::Full));
         assert_eq!(Profile::parse("nope"), None);
+        for p in Profile::ALL {
+            assert_eq!(Profile::parse(p.id()), Some(p));
+        }
+    }
+
+    #[test]
+    fn operon_profile_exposes_only_tenant_safe_tools_in_priority_order() {
+        assert_eq!(names(Profile::Operon), OPERON_TOOLS);
+        assert_eq!(Profile::parse("operon"), Some(Profile::Operon));
+        assert_eq!(Profile::parse("OPERON"), Some(Profile::Operon));
+        assert_eq!(Profile::Operon.id(), "operon");
+        for t in ["family_tree", "compact", "memory_gaps", "list_subjects", "persona_context"] {
+            assert!(!Profile::Operon.includes(t), "{t} tidak boleh ada di profil operon");
+        }
+        for t in OPERON_TOOLS {
+            assert!(Profile::Full.includes(t) && Profile::Operon.includes(t), "{t}");
+        }
     }
 
     #[test]

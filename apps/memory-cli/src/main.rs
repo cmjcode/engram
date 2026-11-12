@@ -2,6 +2,7 @@
 
 mod bench;
 mod hook;
+mod hub_cmd;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -78,6 +79,31 @@ enum Cmd {
         /// Jangan jalankan worker di proses ini.
         #[arg(long)]
         no_worker: bool,
+        /// Jalankan juga hub tim (`/hub`: login Google/GitHub, repo bersama). Lihat [hub] di memory.toml.
+        #[arg(long)]
+        hub: bool,
+    },
+    /// Login ke hub tim lewat browser (Google atau GitHub). Kredensial disimpan di folder data
+    /// engram (hub.json, mode 0600) dan dipakai CLI, server lokal, dan aplikasi desktop.
+    Login {
+        /// URL hub (mis. https://engram.tim.id). Bawaan: [repo_share] hub_url / login terakhir.
+        #[arg(long)]
+        hub: Option<String>,
+        /// google | github
+        #[arg(long, default_value = "github")]
+        provider: String,
+        /// Jangan buka browser; cetak URL-nya saja.
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Keluar dari hub tim (sesi dicabut di hub, kredensial lokal dihapus).
+    Logout,
+    /// Akun hub yang sedang login dan repo bersamanya.
+    Whoami,
+    /// Periksa server lokal (`/api/health`); keluar 1 bila tidak sehat (Docker HEALTHCHECK).
+    Health {
+        #[arg(long, default_value = "http://127.0.0.1:7878")]
+        url: String,
     },
     /// Impor auto-memory Claude Code (~/.claude/projects/*/memory/*.md) langsung sebagai
     /// episode tanpa LLM: isinya sudah terdistilasi. Dry-run bawaan; pakai --apply untuk menyimpan.
@@ -111,7 +137,8 @@ enum Cmd {
     },
     /// Server MCP lewat stdio (untuk Claude Code, Codex, Cursor, dll.).
     Mcp {
-        /// Subset tool yang diekspos: full (semua) | coding (hanya tool sesi koding).
+        /// Subset tool yang diekspos: full (semua) | coding (hanya tool sesi koding)
+        /// | operon (lapisan memori multi-tenant, tanpa tool lintas subjek).
         #[arg(long, default_value = "full")]
         profile: String,
     },
@@ -284,8 +311,8 @@ enum SubjectCmd {
 
 #[derive(Subcommand)]
 enum RepoCmd {
-    /// Aktifkan berbagi memori proyek lewat repo ini: tulis .engram/config.toml, ekspor memori
-    /// proyek, dan gabungkan memori rekan tim. Setelah itu commit folder .engram/.
+    /// Hubungkan repo ini ke hub tim: buat repo bersama di hub, tulis .engram/repo.toml (satu-
+    /// satunya berkas yang di-commit), lalu kirim memori proyek. Wajib `engram login` dulu.
     Init {
         /// Folder repositori (bawaan: folder saat ini).
         #[arg(default_value = ".")]
@@ -293,35 +320,80 @@ enum RepoCmd {
         /// Nama proyek (bawaan: dari akar git / nama folder).
         #[arg(long)]
         project: Option<String>,
-        /// Pasang juga git hook lokal (post-merge, post-checkout, pre-commit).
+        /// URL hub (bawaan: hub yang sedang login / [repo_share] hub_url).
         #[arg(long)]
-        hooks: bool,
+        hub: Option<String>,
     },
-    /// Tulis memori proyek perangkat ini ke <repo>/.engram/members/<anggota>/.
-    Export {
+    /// Bergabung ke memori repo yang sudah punya .engram/repo.toml (otomatis juga saat sesi agent).
+    Join {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Verifikasi izin repo lewat GitHub (memakai `gh auth token`; token tidak disimpan hub).
         #[arg(long)]
-        project: Option<String>,
-        /// Tampilkan record yang akan ditulis tanpa menulis apa pun.
+        github: bool,
+    },
+    /// Kirim memori proyek perangkat ini ke hub (hanya yang berubah).
+    Push {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Kirim semuanya; record lain milik perangkat ini di hub dicabut.
+        #[arg(long)]
+        full: bool,
+        /// Tampilkan yang akan dikirim tanpa mengirim.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Gabungkan memori rekan tim di <repo>/.engram/ ke vault ini (tidak menghapus apa pun).
-    Import {
+    /// Tarik memori rekan tim dari hub ke vault ini.
+    Pull {
         #[arg(default_value = ".")]
         path: PathBuf,
-        #[arg(long)]
-        project: Option<String>,
     },
-    /// Status berbagi: anggota, impor/ekspor terakhir, git hook terpasang.
+    /// Status memori bersama repo ini (hub, peran, push/pull terakhir).
     Status {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
         project: Option<String>,
     },
-    /// Pasang (atau cabut dengan --remove) git hook lokal engram.
+    /// Pindahkan bundel .engram/members/ format lama ke hub, lalu bersihkan repo (hanya repo.toml
+    /// yang tersisa) dan cabut git hook engram.
+    Migrate {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        hub: Option<String>,
+    },
+    /// Ganti join key (maintainer+); key lama langsung tidak berlaku. Commit repo.toml sesudahnya.
+    #[command(name = "rotate-key")]
+    RotateKey {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Hentikan sinkronisasi repo ini di vault ini (memori yang sudah ditarik tetap ada).
+    Disconnect {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// (Lama) Tulis bundel .engram/members/ ke repo. Diganti `engram repo push`.
+    #[command(hide = true)]
+    Export {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// (Lama) Gabungkan bundel .engram/members/ rekan yang belum migrasi.
+    Import {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// (Lama) Git hook tidak dipakai lagi; `--remove` mencabut hook yang terpasang.
     Hooks {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -330,35 +402,39 @@ enum RepoCmd {
     },
 }
 
+/// Token GitHub dari `gh auth token` (untuk `engram repo join --github`).
+fn gh_token() -> Result<String> {
+    let out = std::process::Command::new("gh").args(["auth", "token"]).output().context("`gh` (GitHub CLI) tidak ditemukan; pasang lalu `gh auth login`")?;
+    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    anyhow::ensure!(out.status.success() && !t.is_empty(), "`gh auth token` gagal; jalankan `gh auth login`");
+    Ok(t)
+}
+
 impl RepoCmd {
     /// Folder, proyek, dan opsi aksi untuk server (`repo-cli`).
-    fn target(&self) -> (&PathBuf, Option<&str>, serde_json::Value) {
+    fn target(&self) -> Result<(&PathBuf, Option<&str>, serde_json::Value)> {
         use serde_json::json;
-        match self {
-            RepoCmd::Init { path, project, hooks } => (path, project.as_deref(), json!({"action": "init", "hooks": hooks})),
+        Ok(match self {
+            RepoCmd::Init { path, project, hub } => (path, project.as_deref(), json!({"action": "init", "hub": hub})),
+            RepoCmd::Join { path, github } => (path, None, json!({"action": "join", "github_token": if *github { Some(gh_token()?) } else { None }})),
+            RepoCmd::Push { path, full, dry_run } => (path, None, json!({"action": "push", "full": full, "dry_run": dry_run})),
+            RepoCmd::Pull { path } => (path, None, json!({"action": "pull"})),
+            RepoCmd::Status { path, project } => (path, project.as_deref(), json!({"action": "status"})),
+            RepoCmd::Migrate { path, project, hub } => (path, project.as_deref(), json!({"action": "migrate", "hub": hub})),
+            RepoCmd::RotateKey { path } => (path, None, json!({"action": "rotate-key"})),
+            RepoCmd::Disconnect { path } => (path, None, json!({"action": "disconnect"})),
             RepoCmd::Export { path, project, dry_run } => (path, project.as_deref(), json!({"action": "export", "dry_run": dry_run})),
             RepoCmd::Import { path, project } => (path, project.as_deref(), json!({"action": "import"})),
-            RepoCmd::Status { path, project } => (path, project.as_deref(), json!({"action": "status"})),
             RepoCmd::Hooks { path, remove } => (path, None, json!({"action": "hooks", "remove": remove})),
-        }
+        })
     }
 }
 
 /// Jalankan `engram repo ...` langsung di vault (server tidak berjalan).
 async fn repo_direct(rt: &Runtime, subject: &str, cmd: &RepoCmd) -> Result<serde_json::Value> {
-    use memory_jobs::repo_bundle as rb;
-    let (path, project, _) = cmd.target();
+    let (path, project, options) = cmd.target()?;
     let abs = std::path::absolute(path)?;
-    Ok(match cmd {
-        RepoCmd::Init { hooks, .. } => serde_json::to_value(rb::init_repo(rt, subject, &abs, project, *hooks).await?)?,
-        RepoCmd::Export { dry_run, .. } => serde_json::to_value(rb::export_with(rt, subject, &abs, project, *dry_run).await?)?,
-        RepoCmd::Import { .. } => serde_json::to_value(rb::import_repo(rt, subject, &abs, project).await?)?,
-        RepoCmd::Status { .. } => serde_json::to_value(rb::status(rt, subject, &abs, project).await?)?,
-        RepoCmd::Hooks { remove, .. } => {
-            let root = memory_core::project::detect_project(&abs).filter(|p| p.from_git).map(|p| p.root).unwrap_or(abs);
-            serde_json::to_value(rb::git_hooks(&root, *remove)?)?
-        }
-    })
+    Ok(memory_jobs::repo_hub::cli_action(rt, subject, &abs, project, &options).await?)
 }
 
 fn repo_human(cmd: &RepoCmd, v: &serde_json::Value) -> String {
@@ -367,83 +443,81 @@ fn repo_human(cmd: &RepoCmd, v: &serde_json::Value) -> String {
     let warnings = |v: &Value| list(v, "warnings").iter().map(|w| format!("\nperingatan: {w}")).collect::<String>();
     let n = |v: &Value, k: &str| v[k].as_u64().unwrap_or(0);
     let s = |v: &Value, k: &str| v[k].as_str().unwrap_or("").to_string();
-    let export_line = |v: &Value| {
-        let state = if v["unchanged"] == true { "tidak berubah".to_string() } else { format!("{} berkas diperbarui", n(v, "written")) };
-        let withdrawn = if n(v, "withdrawn") > 0 { format!(", {} ditandai ditarik", n(v, "withdrawn")) } else { String::new() };
-        let next = if v["unchanged"] == true { "" } else { "\nCommit folder .engram/ agar rekan tim menerimanya." };
-        format!("Memori proyek {} ditulis ke {}/members/{}: {} pelajaran, {} keputusan, {} fakta ({state}{withdrawn}).{next}{}", s(v, "project"), s(v, "dir"), s(v, "member"), n(v, "lessons"), n(v, "decisions"), n(v, "facts"), warnings(v))
-    };
     let import_line = |v: &Value| {
         let members = list(v, "members");
-        let body = if members.is_empty() {
-            format!("Tidak ada memori baru dari rekan tim untuk {}.", s(v, "project"))
-        } else {
-            format!(
-                "Digabung dari {}: pelajaran {} baru / {} sudah ada; keputusan {} baru / {} sudah ada; fakta {} baru; {} ditarik penulisnya.",
-                members.join(", "),
-                n(v, "lessons_new"),
-                n(v, "lessons_merged"),
-                n(v, "decisions_new"),
-                n(v, "decisions_duplicate"),
-                n(v, "facts_new"),
-                n(v, "withdrawn")
-            )
-        };
-        format!("{body}{}", warnings(v))
-    };
-    let hooks_line = |v: &Value| {
-        let mut out = Vec::new();
-        for (k, label) in [("installed", "Hook git terpasang"), ("removed", "Hook git dicabut"), ("skipped", "Dilewati")] {
-            let items = list(v, k);
-            if !items.is_empty() {
-                out.push(format!("{label}: {}", items.join("; ")));
-            }
+        if members.is_empty() {
+            return format!("Tidak ada memori baru dari rekan tim untuk {}.", s(v, "project"));
         }
-        if out.is_empty() { "Tidak ada hook git yang berubah.".to_string() } else { out.join("\n") }
+        format!(
+            "Digabung dari {}: pelajaran {} baru / {} sudah ada; keputusan {} baru; fakta {} baru; episode {} baru; {} dicabut penulisnya.",
+            members.join(", "),
+            n(v, "lessons_new"),
+            n(v, "lessons_merged"),
+            n(v, "decisions_new"),
+            n(v, "facts_new"),
+            n(v, "episodes_new"),
+            n(v, "withdrawn")
+        )
+    };
+    let sync_line = |v: &Value| {
+        let mut out = Vec::new();
+        if n(v, "pushed") + n(v, "withdrawn") > 0 || matches!(cmd, RepoCmd::Push { .. }) {
+            out.push(format!("Dikirim ke hub: {} record ({} dicabut, {} tidak berubah).", n(v, "pushed"), n(v, "withdrawn"), n(v, "unchanged")));
+        }
+        if !v["import"].is_null() {
+            out.push(import_line(&v["import"]));
+        }
+        if let Some(r) = v["role"].as_str() {
+            out.push(format!("Peran Anda: {r}."));
+        }
+        if let Some(h) = v["commit_hint"].as_str() {
+            out.push(format!("Langkah berikut: {h}"));
+        }
+        format!("{}{}", out.join("\n"), warnings(v))
     };
     match cmd {
-        RepoCmd::Export { dry_run: true, .. } => {
+        RepoCmd::Push { dry_run: true, .. } => {
             let mut lines = list(v, "preview").into_iter().map(|p| format!("  {p}")).collect::<Vec<_>>();
-            lines.push(format!("Uji coba: {} pelajaran, {} keputusan, {} fakta akan ditulis ke {}/members/{} (tidak ada yang ditulis).", n(v, "lessons"), n(v, "decisions"), n(v, "facts"), s(v, "dir"), s(v, "member")));
+            lines.push(format!("Uji coba: {} record akan dikirim, {} dicabut (tidak ada yang dikirim).", n(v, "pushed"), n(v, "withdrawn")));
             lines.join("\n")
         }
-        RepoCmd::Export { .. } => export_line(v),
+        RepoCmd::Init { .. } | RepoCmd::Migrate { .. } => format!("Repo {} terhubung ke hub {} (proyek {}).\n{}", s(v, "root"), s(v, "hub"), s(v, "project"), sync_line(v)),
+        RepoCmd::Join { .. } | RepoCmd::Push { .. } | RepoCmd::Pull { .. } | RepoCmd::RotateKey { .. } => sync_line(v),
+        RepoCmd::Disconnect { .. } => "Sinkronisasi hub repo ini dihentikan di vault ini.".into(),
         RepoCmd::Import { .. } => import_line(v),
-        RepoCmd::Init { .. } => {
-            let mut out = format!("Berbagi memori aktif untuk proyek {} di {}{}.\n{}", s(v, "project"), s(v, "root"), if v["config_created"] == true { "" } else { " (config.toml sudah ada)" }, export_line(&v["export"]));
-            if !v["import"].is_null() {
-                out.push('\n');
-                out.push_str(&import_line(&v["import"]));
-            }
-            if !v["hooks"].is_null() {
-                out.push('\n');
-                out.push_str(&hooks_line(&v["hooks"]));
-            }
-            out.push_str("\nLangkah berikut: git add .engram && git commit -m \"engram: memori proyek bersama\"");
-            out
+        RepoCmd::Export { .. } => format!("Bundel lama ditulis ke {} (tidak disarankan; pakai `engram repo push`).", s(v, "dir")),
+        RepoCmd::Hooks { .. } => {
+            let removed = list(v, "removed");
+            if removed.is_empty() { "Git hook tidak dipakai lagi; memori tim lewat hub.".into() } else { format!("Hook git dicabut: {}", removed.join(", ")) }
         }
         RepoCmd::Status { .. } => {
             let mut out = vec![format!("Repo: {} (proyek {})", s(v, "root"), s(v, "project"))];
-            out.push(if v["active"] == true { "Berbagi: aktif".into() } else if v["bundle"] == true { "Berbagi: hanya menerima (jalankan `engram repo init` untuk ikut menulis)".into() } else { "Berbagi: belum diaktifkan (jalankan `engram repo init`)".into() });
+            match v["mode"].as_str() {
+                Some("hub") => out.push(format!(
+                    "Memori tim: hub {} (repo {}), {}",
+                    s(v, "hub"),
+                    s(v, "repo_id"),
+                    v["role"].as_str().map(|r| format!("peran {r}")).unwrap_or_else(|| "belum bergabung (`engram repo join`)".into())
+                )),
+                Some("legacy") => out.push("Memori tim: bundel git lama; jalankan `engram repo migrate` untuk pindah ke hub".into()),
+                _ => out.push("Memori tim: belum aktif (`engram login`, lalu `engram repo init`)".into()),
+            }
+            if v["logged_in"] == false {
+                out.push("Belum login ke hub: `engram login --hub <url>`".into());
+            }
+            out.push(format!("Push terakhir: {}; pull terakhir: {}; cursor {}; {} record dikirim; {} record rekan tergabung", v["last_push_at"].as_str().unwrap_or("-"), v["last_pull_at"].as_str().unwrap_or("-"), n(v, "cursor"), n(v, "pushed"), n(v, "imported")));
             if v["enabled"] == false {
                 out.push("Otomatisasi dimatikan di memory.toml ([repo_share] enabled = false).".into());
             }
-            for m in v["members"].as_array().into_iter().flatten() {
-                let c = |k: &str| m["counts"][k].as_u64().unwrap_or(0);
-                out.push(format!("  - {} ({}){}: {} pelajaran, {} keputusan, {} fakta", s(m, "name"), s(m, "device"), if m["own"] == true { " [perangkat ini]" } else { "" }, c("lessons"), c("decisions"), c("facts")));
-            }
-            out.push(format!("Impor terakhir: {}; ekspor terakhir: {}; {} record rekan tergabung", v["last_import_at"].as_str().unwrap_or("-"), v["last_export_at"].as_str().unwrap_or("-"), n(v, "imported")));
-            let hooks = list(v, "hooks");
-            out.push(format!("Hook git: {}", if hooks.is_empty() { "tidak ada (opsional: `engram repo hooks`)".to_string() } else { hooks.join(", ") }));
-            if v["pending_import"] == true {
-                out.push("Ada perubahan .engram/ yang belum digabung: jalankan `engram repo import`.".into());
+            let hooks = list(v, "legacy_hooks");
+            if !hooks.is_empty() {
+                out.push(format!("Git hook lama masih terpasang ({}); cabut: `engram repo hooks --remove`", hooks.join(", ")));
             }
             if let Some(e) = v["last_error"].as_str() {
                 out.push(format!("Galat terakhir: {e}"));
             }
             out.join("\n")
         }
-        RepoCmd::Hooks { .. } => hooks_line(v),
     }
 }
 
@@ -667,6 +741,14 @@ async fn main() -> Result<()> {
         println!("Vault siap di {} dengan subjek '{}' ({}).", rt.vault.root().display(), s.name, s.id);
         return Ok(());
     }
+    // Perintah akun hub tidak membuka vault (aman dijalankan saat server/desktop berjalan).
+    match &cli.cmd {
+        Cmd::Login { hub, provider, no_browser } => return hub_cmd::login(&cli.config, hub.as_deref(), provider, *no_browser, cli.json).await,
+        Cmd::Logout => return hub_cmd::logout(cli.json).await,
+        Cmd::Whoami => return hub_cmd::whoami(cli.json).await,
+        Cmd::Health { url } => return hub_cmd::health(url).await,
+        _ => {}
+    }
     if let Cmd::Hook { client, event } = &cli.cmd {
         if let Err(e) = hook::run(&cli.config, client, event).await {
             eprintln!("engram hook: {e}");
@@ -676,7 +758,7 @@ async fn main() -> Result<()> {
     }
     if let Cmd::Repo { cmd } = &cli.cmd {
         // Server yang sedang berjalan memegang kunci database: kirim lewat server bila ada.
-        let (path, project, options) = cmd.target();
+        let (path, project, options) = cmd.target()?;
         let abs = std::path::absolute(path)?;
         if let Some(res) = hook::repo_via_server(&cli.config, cli.subject.as_deref(), &abs, project, options).await {
             let v = res.map_err(anyhow::Error::msg)?;
@@ -715,7 +797,7 @@ async fn main() -> Result<()> {
     let j = cli.json;
 
     match cli.cmd {
-        Cmd::Init { .. } | Cmd::Bench { .. } | Cmd::Vault { .. } | Cmd::Hook { .. } => unreachable!(),
+        Cmd::Init { .. } | Cmd::Bench { .. } | Cmd::Vault { .. } | Cmd::Hook { .. } | Cmd::Login { .. } | Cmd::Logout | Cmd::Whoami | Cmd::Health { .. } => unreachable!(),
         Cmd::Subject { cmd } => match cmd {
             SubjectCmd::List => {
                 let subs = rt.store.list_subjects().await?;
@@ -799,7 +881,7 @@ async fn main() -> Result<()> {
                 let _ = h.await;
             }
         }
-        Cmd::Serve { bind, no_worker } => {
+        Cmd::Serve { bind, no_worker, hub } => {
             let stop = shutdown_signal();
             let hs = if no_worker { vec![] } else { background(&rt, &stop, true).await };
             let mut st = memory_server::AppState::new(rt.clone(), importer(&rt));
@@ -812,13 +894,22 @@ async fn main() -> Result<()> {
             if st.token.is_none() && bind.as_deref().is_some_and(|b| !b.starts_with("127.") && !b.starts_with("localhost")) {
                 tracing::warn!("server terbuka ke jaringan tanpa token; set env MEMORY_TOKEN");
             }
+            let mut hub_cfg = rt.cfg.hub.clone();
+            hub_cfg.apply_env();
+            if hub || hub_cfg.enabled {
+                hub_cfg.enabled = true;
+                let hs = memory_server::hub_state(&rt, hub_cfg).await.map_err(|e| anyhow::anyhow!("hub tim tidak bisa dijalankan: {e}"))?;
+                let _sweeper = hs.spawn_sweeper();
+                tracing::info!(providers = ?hs.providers(), base = %hs.cfg.base_url, "hub tim aktif di /hub");
+                st.hub = Some(hs);
+            }
             memory_server::serve(st, &addr, stop).await?;
             for h in hs {
                 let _ = h.await;
             }
         }
         Cmd::Mcp { profile } => {
-            let profile = memory_server::mcp::Profile::parse(&profile).ok_or_else(|| anyhow::anyhow!("profile tidak dikenal: {profile} (pakai 'full' atau 'coding')"))?;
+            let profile = memory_server::mcp::Profile::parse(&profile).ok_or_else(|| anyhow::anyhow!("profile tidak dikenal: {profile} (pakai 'full', 'coding', atau 'operon')"))?;
             let stop = shutdown_signal();
             let _hs = background(&rt, &stop, false).await;
             memory_server::mcp::serve_stdio(memory_server::AppState::new(rt.clone(), importer(&rt)), profile).await?;

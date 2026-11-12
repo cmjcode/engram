@@ -25,18 +25,8 @@ struct Conn {
     data_dir: PathBuf,
 }
 
-fn data_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("ENGRAM_DATA_DIR") {
-        return PathBuf::from(d);
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    if cfg!(target_os = "macos") {
-        home.join("Library").join("Application Support").join("id.engram.ai")
-    } else if cfg!(target_os = "windows") {
-        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or(home).join("id.engram.ai")
-    } else {
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local").join("share")).join("id.engram.ai")
-    }
+pub(crate) fn data_dir() -> PathBuf {
+    memory_core::paths::data_dir()
 }
 
 /// Alamat & token server: env `ENGRAM_URL`/`MEMORY_TOKEN`, lalu `connection.json`

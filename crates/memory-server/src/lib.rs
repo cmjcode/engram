@@ -2,9 +2,18 @@
 //!
 //! Default hanya mendengarkan di 127.0.0.1. Bila env var token (default
 //! `MEMORY_TOKEN`) diisi, semua `/api` dan `/mcp` wajib `Authorization: Bearer`.
+//!
+//! Isolasi tenant: env var `MEMORY_SUBJECT_TOKENS` (`subjekA=tokenA,subjekB=tokenB`)
+//! memberi token yang hanya berlaku untuk satu subjek. Token global tetap bisa
+//! semua; token subjek hanya boleh menyentuh `/api/subjects/{s}/...` dengan `s`
+//! yang sama, `/api/subjects` (POST id yang sama, GET hanya subjeknya), `/mcp`
+//! (argumen `subject` dipaksa), serta `/api/reviews/{id}` dan `/api/sources/{id}`
+//! milik subjek itu. Request lain (settings, storage, update, services, dll.)
+//! ditolak 403.
 
 pub mod api;
 pub mod hooks;
+pub mod hub_local;
 pub mod install;
 pub mod mcp;
 pub mod settings;
@@ -27,6 +36,8 @@ pub struct AppState {
     pub rt: Runtime,
     pub importer: Importer,
     pub token: Option<Arc<String>>,
+    /// Token per subjek (isolasi tenant): token → id subjek. Lihat [`parse_subject_tokens`].
+    pub subject_tokens: Arc<std::collections::BTreeMap<String, String>>,
     /// Alamat MCP HTTP server ini (mis. `http://127.0.0.1:7878/mcp`). Bila diisi, UI bisa
     /// memasang server ke config agent AI di komputer ini (lihat [`install`]).
     pub mcp_url: Option<String>,
@@ -38,6 +49,11 @@ pub struct AppState {
     pub config_path: Option<std::path::PathBuf>,
     /// Event hook terakhir per client (untuk panel kesehatan integrasi), hanya di memori.
     pub hook_stats: Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
+    /// Mode hub tim (`engram serve --hub` / `[hub] enabled`): rute `/hub/*`, akun Google/GitHub,
+    /// repo bersama. Kosong = server pribadi biasa.
+    pub hub: Option<memory_hub::HubState>,
+    /// Alur login hub yang sedang ditunggu (UI lokal/desktop): tiket -> status.
+    pub hub_logins: Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
 }
 
 /// Status satu layanan latar untuk ditampilkan di UI.
@@ -118,10 +134,37 @@ pub trait ServiceControl: Send + Sync {
     }
 }
 
+/// Subjek yang terikat ke token request saat ini (dipasang middleware [`auth`] untuk
+/// token per subjek; tidak ada untuk token global / tanpa token).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundSubject(pub String);
+
+/// Urai isi env `MEMORY_SUBJECT_TOKENS`: `subjekA=tokenA,subjekB=tokenB` (spasi di
+/// sekitar koma/`=` diabaikan; pasangan tanpa `=`, subjek tidak valid, atau token
+/// kosong dilewati dengan peringatan). Hasil: token → subjek.
+pub fn parse_subject_tokens(raw: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for pair in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let Some((subject, token)) = pair.split_once('=').map(|(s, t)| (s.trim(), t.trim())) else {
+            tracing::warn!(pair, "MEMORY_SUBJECT_TOKENS: pasangan tanpa '=' dilewati");
+            continue;
+        };
+        if !memory_core::ids::is_valid_id(subject) || token.is_empty() {
+            tracing::warn!(subject, "MEMORY_SUBJECT_TOKENS: subjek tidak valid atau token kosong, dilewati");
+            continue;
+        }
+        if map.insert(token.to_string(), subject.to_string()).is_some() {
+            tracing::warn!(subject, "MEMORY_SUBJECT_TOKENS: token yang sama dipakai dua subjek; yang terakhir menang");
+        }
+    }
+    map
+}
+
 impl AppState {
     pub fn new(rt: Runtime, importer: Importer) -> Self {
         let token = rt.cfg.server.token_env.as_deref().and_then(|k| std::env::var(k).ok()).filter(|t| !t.is_empty()).map(Arc::new);
-        Self { rt, importer, token, mcp_url: None, services: None, config_path: None, hook_stats: Arc::default() }
+        let subject_tokens = rt.cfg.server.subject_tokens_env.as_deref().and_then(|k| std::env::var(k).ok()).map(|v| parse_subject_tokens(&v)).unwrap_or_default();
+        Self { rt, importer, token, subject_tokens: Arc::new(subject_tokens), mcp_url: None, services: None, config_path: None, hook_stats: Arc::default(), hub: None, hub_logins: Arc::default() }
     }
 
     pub fn default_subject(&self) -> String {
@@ -154,6 +197,9 @@ pub enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     NotFound(String),
+    /// Token per subjek mencoba menyentuh subjek/record lain.
+    #[error("{0}")]
+    Forbidden(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -174,6 +220,7 @@ impl IntoResponse for ApiError {
         let status = match &self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -185,18 +232,38 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = std::result::Result<axum::Json<T>, ApiError>;
 
-async fn auth(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    if let Some(token) = &st.token {
-        let ok = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .is_some_and(|t| t == token.as_str());
-        if !ok {
-            return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "token tidak valid"}))).into_response();
-        }
+/// Apakah path boleh disentuh token yang terikat ke `subject`. Path `/api/subjects`,
+/// `/mcp`, `/api/reviews/{id}` dan `/api/sources/{id}...` diloloskan ke handler, yang
+/// memeriksa sendiri lewat [`BoundSubject`] (id body / argumen MCP / pemilik record).
+fn subject_token_allows(path: &str, subject: &str) -> bool {
+    if path == "/mcp" || path == "/api/subjects" {
+        return true;
     }
+    if let Some(rest) = path.strip_prefix("/api/subjects/") {
+        return rest.split('/').next() == Some(subject);
+    }
+    let is_record = |prefix: &str| path.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && rest.split('/').next().is_some_and(|id| !id.is_empty()));
+    is_record("/api/reviews/") || is_record("/api/sources/")
+}
+
+async fn auth(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
+    if st.token.is_none() && st.subject_tokens.is_empty() {
+        return next.run(req).await;
+    }
+    let bearer = req.headers().get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer "));
+    let Some(bearer) = bearer else {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "token tidak valid"}))).into_response();
+    };
+    if st.token.as_deref().is_some_and(|t| t == bearer) {
+        return next.run(req).await;
+    }
+    let Some(subject) = st.subject_tokens.get(bearer).cloned() else {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "token tidak valid"}))).into_response();
+    };
+    if !subject_token_allows(req.uri().path(), &subject) {
+        return (StatusCode::FORBIDDEN, axum::Json(json!({"error": format!("token ini hanya berlaku untuk subjek {subject}")}))).into_response();
+    }
+    req.extensions_mut().insert(BoundSubject(subject));
     next.run(req).await
 }
 
@@ -206,6 +273,8 @@ const APP_CSS: &str = include_str!("../ui/app.css");
 const I18N_JS: &str = include_str!("../ui/i18n.js");
 const LIQUID_GLASS_JS: &str = include_str!("../ui/liquid-glass.js");
 const GRAPH_JS: &str = include_str!("../ui/graph.js");
+const HUB_JS: &str = include_str!("../ui/hub.js");
+const HUB_HTML: &str = include_str!("../ui/hub.html");
 const LOGO_PNG: &[u8] = include_bytes!("../ui/logo.png");
 
 fn asset(body: &'static str, ctype: &'static str) -> Response {
@@ -219,10 +288,11 @@ pub fn router(state: AppState) -> Router {
     let max = state.rt.cfg.server.max_upload_mb * 1024 * 1024;
     let protected = api::routes()
         .merge(hooks::routes())
+        .merge(hub_local::routes())
         .route("/mcp", post(mcp::http_handler).get(mcp::http_get))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(axum::extract::DefaultBodyLimit::max(max));
-    Router::new()
+    let r: Router<AppState> = Router::new()
         .route("/", get(|| async { asset(INDEX_HTML, "text/html; charset=utf-8") }))
         .route("/app.js", get(|| async { asset(APP_JS, "text/javascript; charset=utf-8") }))
         .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8") }))
@@ -234,8 +304,19 @@ pub fn router(state: AppState) -> Router {
             get(|| async { ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=86400")], LOGO_PNG) }),
         )
         .route("/api/health", get(|| async { axum::Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})) }))
-        .merge(protected)
-        .with_state(state)
+        .route("/hub.js", get(|| async { asset(HUB_JS, "text/javascript; charset=utf-8") }))
+        .merge(protected);
+    let r = match state.hub.clone() {
+        // Rute hub di luar middleware `MEMORY_TOKEN`: tiap handler memeriksa JWT/PAT sendiri.
+        Some(hub) => r.nest("/hub", memory_hub::router(hub, HUB_HTML)),
+        None => r,
+    };
+    r.with_state(state)
+}
+
+/// Hub tim di atas store vault ini (tabel `hub_*`, migrasi sendiri). Rahasia dari env.
+pub async fn hub_state(rt: &Runtime, cfg: memory_core::config::HubConfig) -> Result<memory_hub::HubState, memory_hub::server::HubError> {
+    memory_hub::HubState::init(rt.store.clone(), cfg).await
 }
 
 /// Jalankan server sampai `shutdown` bernilai true.
@@ -247,7 +328,8 @@ pub async fn serve(state: AppState, bind: &str, shutdown: tokio::sync::watch::Re
 /// Seperti [`serve`], tetapi dengan listener yang sudah dibuka (dipakai aplikasi desktop).
 pub async fn serve_listener(state: AppState, listener: tokio::net::TcpListener, mut shutdown: tokio::sync::watch::Receiver<bool>) -> std::io::Result<()> {
     tracing::info!("UI & API: http://{}", listener.local_addr()?);
-    axum::serve(listener, router(state))
+    // ConnectInfo: IP klien untuk pembatas laju & audit hub.
+    axum::serve(listener, router(state).into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(async move {
             let _ = shutdown.changed().await;
         })

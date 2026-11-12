@@ -52,10 +52,20 @@ async fn spawn(token: Option<&str>) -> (String, AppState, tempfile::TempDir) {
 }
 
 async fn spawn_with(token: Option<&str>, services: Option<Arc<dyn ServiceControl>>) -> (String, AppState, tempfile::TempDir) {
-    spawn_full(token, services, None).await
+    spawn_full(token, services, None, &[]).await
 }
 
-async fn spawn_full(token: Option<&str>, services: Option<Arc<dyn ServiceControl>>, config_path: Option<std::path::PathBuf>) -> (String, AppState, tempfile::TempDir) {
+/// Server dengan token global opsional dan token per subjek `(subjek, token)`.
+async fn spawn_tenant(token: Option<&str>, subject_tokens: &[(&str, &str)]) -> (String, AppState, tempfile::TempDir) {
+    spawn_full(token, None, None, subject_tokens).await
+}
+
+async fn spawn_full(
+    token: Option<&str>,
+    services: Option<Arc<dyn ServiceControl>>,
+    config_path: Option<std::path::PathBuf>,
+    subject_tokens: &[(&str, &str)],
+) -> (String, AppState, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = MemoryConfig::for_tests(DIM);
     cfg.vault.path = dir.path().to_path_buf();
@@ -65,6 +75,7 @@ async fn spawn_full(token: Option<&str>, services: Option<Arc<dyn ServiceControl
     let importer = Importer::new(rt.pipeline.clone(), None);
     let mut st = AppState::new(rt, importer);
     st.token = token.map(|t| Arc::new(t.to_string()));
+    st.subject_tokens = Arc::new(subject_tokens.iter().map(|(s, t)| (t.to_string(), s.to_string())).collect());
     st.services = services;
     st.config_path = config_path;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -300,6 +311,111 @@ async fn token_is_enforced_for_api_and_mcp_but_not_ui() {
     assert_eq!(ok.status(), 200);
 }
 
+#[test]
+fn subject_tokens_env_is_parsed_leniently() {
+    let m = crate::parse_subject_tokens(" tenant_a=tok-a, tenant_b = tok-b ,tanpa-sama-dengan, Subjek Tidak Valid=x, kosong= ");
+    assert_eq!(m.len(), 2, "{m:?}");
+    assert_eq!(m.get("tok-a").map(String::as_str), Some("tenant_a"));
+    assert_eq!(m.get("tok-b").map(String::as_str), Some("tenant_b"));
+    assert!(crate::parse_subject_tokens("").is_empty());
+}
+
+#[tokio::test]
+async fn subject_token_is_scoped_to_its_own_subject() {
+    let (base, st, _d) = spawn_tenant(Some("global"), &[("tenant_a", "tok-a"), ("tenant_b", "tok-b")]).await;
+    let c = reqwest::Client::new();
+    let status_get = |path: &str, tok: &str| {
+        let (c, url, tok) = (c.clone(), format!("{base}{path}"), tok.to_string());
+        async move { c.get(&url).bearer_auth(tok).send().await.unwrap().status().as_u16() }
+    };
+    let status_post = |path: &str, tok: &str, body: Value| {
+        let (c, url, tok) = (c.clone(), format!("{base}{path}"), tok.to_string());
+        async move { c.post(&url).bearer_auth(tok).json(&body).send().await.unwrap().status().as_u16() }
+    };
+
+    // Tanpa token / token salah: 401 seperti biasa.
+    assert_eq!(c.get(format!("{base}/api/subjects")).send().await.unwrap().status(), 401);
+    assert_eq!(status_get("/api/subjects", "tok-salah").await, 401);
+
+    // Token global bisa semua: buat dua tenant.
+    for s in ["tenant_a", "tenant_b"] {
+        assert_eq!(status_post("/api/subjects", "global", json!({"id": s, "name": s})).await, 200, "{s}");
+    }
+
+    // Token A: subjeknya sendiri boleh, subjek B dan endpoint admin ditolak 403.
+    assert_eq!(status_get("/api/subjects/tenant_a/stats", "tok-a").await, 200);
+    assert_eq!(status_get("/api/subjects/tenant_b/stats", "tok-a").await, 403);
+    assert_eq!(status_post("/api/subjects/tenant_b/remember", "tok-a", json!({"text": "x"})).await, 403);
+    for p in ["/api/settings", "/api/jobs", "/api/storage", "/api/services", "/api/about", "/api/mcp/clients"] {
+        assert_eq!(status_get(p, "tok-a").await, 403, "{p}");
+    }
+    assert_eq!(status_post("/api/pick-folder", "tok-a", json!({})).await, 403);
+    assert_eq!(status_post("/api/update/check", "tok-a", json!({})).await, 403);
+
+    // POST /api/subjects hanya untuk id yang sama; GET hanya memperlihatkan subjeknya.
+    assert_eq!(status_post("/api/subjects", "tok-a", json!({"id": "tenant_b", "name": "B"})).await, 403);
+    assert_eq!(status_post("/api/subjects", "tok-a", json!({"id": "tenant_a", "name": "Tenant A"})).await, 200);
+    let list: Value = c.get(format!("{base}/api/subjects")).bearer_auth("tok-a").send().await.unwrap().json().await.unwrap();
+    let ids: Vec<&str> = list["subjects"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["tenant_a"]);
+    assert_eq!(list["default"], "tenant_a");
+    let all: Value = c.get(format!("{base}/api/subjects")).bearer_auth("global").send().await.unwrap().json().await.unwrap();
+    assert_eq!(all["subjects"].as_array().unwrap().len(), 2);
+
+    // MCP dengan token A: argumen subject=tenant_b dipaksa jadi tenant_a; list_subjects ditolak.
+    let mcp = |tok: &str, body: Value| {
+        let (c, url, tok) = (c.clone(), format!("{base}/mcp?profile=operon"), tok.to_string());
+        async move {
+            let r = c.post(&url).bearer_auth(tok).json(&body).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            r.json::<Value>().await.unwrap()
+        }
+    };
+    let r = mcp("tok-a", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "remember",
+        "arguments": {"subject": "tenant_b", "text": "Pakde Karno membuka toko batik di Solo waktu saya kecil.", "source": "uji"}}})).await;
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    let r = mcp("tok-a", json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list_subjects", "arguments": {}}})).await;
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    let r = mcp("tok-a", json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})).await;
+    let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, crate::mcp::OPERON_TOOLS);
+    st.rt.drain().await.unwrap();
+    let stats = |s: &str| {
+        let (c, url) = (c.clone(), format!("{base}/api/subjects/{s}/stats"));
+        async move { c.get(&url).bearer_auth("global").send().await.unwrap().json::<Value>().await.unwrap()["stats"]["episodes"].clone() }
+    };
+    assert_eq!(stats("tenant_a").await, 1);
+    assert_eq!(stats("tenant_b").await, 0);
+    // recall lewat token A dengan subject=tenant_b tetap membaca tenant_a.
+    let r = mcp("tok-a", json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "recall", "arguments": {"subject": "tenant_b", "query": "toko batik"}}})).await;
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("batik"), "{r}");
+    let r = mcp("tok-b", json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "recall", "arguments": {"query": "toko batik"}}})).await;
+    assert!(!r["result"]["content"][0]["text"].as_str().unwrap().contains("batik"), "{r}");
+
+    // Record lintas subjek: sumber milik A tidak bisa dibaca token B, bisa oleh A dan global.
+    let sources: Value = c.get(format!("{base}/api/subjects/tenant_a/sources")).bearer_auth("global").send().await.unwrap().json().await.unwrap();
+    let src_id = sources.as_array().and_then(|a| a.first()).or_else(|| sources["sources"].as_array().and_then(|a| a.first())).and_then(|s| s["id"].as_str()).unwrap().to_string();
+    assert_eq!(status_get(&format!("/api/sources/{src_id}"), "tok-b").await, 403);
+    assert_eq!(status_get(&format!("/api/sources/{src_id}"), "tok-a").await, 200);
+    assert_eq!(status_get(&format!("/api/sources/{src_id}"), "global").await, 200);
+    assert_eq!(status_post("/api/reviews/tidak-ada", "tok-a", json!({"decision": "approve"})).await, 404);
+
+    // Token global tetap bisa semua.
+    assert_eq!(status_get("/api/subjects/tenant_b/stats", "global").await, 200);
+    assert_eq!(status_get("/api/jobs", "global").await, 200);
+}
+
+#[tokio::test]
+async fn subject_tokens_work_without_global_token() {
+    let (base, _st, _d) = spawn_tenant(None, &[("tenant_a", "tok-a")]).await;
+    let c = reqwest::Client::new();
+    assert_eq!(c.get(format!("{base}/api/subjects")).send().await.unwrap().status(), 401);
+    assert_eq!(c.get(format!("{base}/api/subjects")).bearer_auth("tok-a").send().await.unwrap().status(), 200);
+    assert_eq!(c.get(format!("{base}/api/subjects/tenant_b/stats")).bearer_auth("tok-a").send().await.unwrap().status(), 403);
+    assert_eq!(c.get(format!("{base}/api/health")).send().await.unwrap().status(), 200);
+}
+
 #[tokio::test]
 async fn mcp_install_disabled_without_local_url() {
     let (base, _st, _d) = spawn(None).await;
@@ -491,7 +607,7 @@ async fn about_and_settings_api() {
     let cfg_dir = tempfile::tempdir().unwrap();
     let path = cfg_dir.path().join("memory.toml");
     std::fs::write(&path, "[llm]\nbase_url = \"http://localhost:5211/v1\"\n\n[index]\nhnsw_m = 24\n").unwrap();
-    let (base, _st, _d) = spawn_full(None, None, Some(path.clone())).await;
+    let (base, _st, _d) = spawn_full(None, None, Some(path.clone()), &[]).await;
     let c = reqwest::Client::new();
 
     let a: Value = c.get(format!("{base}/api/about")).send().await.unwrap().json().await.unwrap();
@@ -710,4 +826,62 @@ async fn project_graph_api_and_episode_backlinks() {
 
     let bad = c.get(format!("{base}/api/subjects/budi/projects/graph?project={}", "x".repeat(201))).send().await.unwrap();
     assert_eq!(bad.status(), 400);
+}
+
+#[tokio::test]
+async fn hub_routes_mount_only_when_enabled_and_bypass_memory_token() {
+    // Tanpa hub: /hub tidak ada.
+    let (base, _st, _d) = spawn(Some("rahasia-lokal")).await;
+    let c = reqwest::Client::new();
+    // Tanpa hub: path tak dikenal ditolak middleware token lokal (401) atau tidak ditemukan (404).
+    let none = c.get(format!("{base}/hub")).send().await.unwrap().status().as_u16();
+    assert!(none == 401 || none == 404, "{none}");
+    assert_eq!(c.get(format!("{base}/hub/api/info")).bearer_auth("rahasia-lokal").send().await.unwrap().status(), 404);
+    // Rute akun hub lokal tetap di balik MEMORY_TOKEN.
+    assert_eq!(c.get(format!("{base}/api/hub/account")).send().await.unwrap().status(), 401);
+    let acc: Value = c.get(format!("{base}/api/hub/account")).bearer_auth("rahasia-lokal").send().await.unwrap().json().await.unwrap();
+    assert_eq!(acc["serving_hub"], false);
+
+    // Dengan hub: halaman & API hub terbuka tanpa MEMORY_TOKEN, API terautentikasi menolak tanpa JWT.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = MemoryConfig::for_tests(DIM);
+    cfg.vault.path = dir.path().to_path_buf();
+    cfg.server.token_env = None;
+    let rt = Runtime::open_with(cfg, Arc::new(ScriptedLlm::new(llm)), Arc::new(HashEmbedder::new(DIM))).await.unwrap();
+    let hub_cfg = memory_core::config::HubConfig { enabled: true, base_url: "http://127.0.0.1:1".into(), github_client_id: "gh".into(), ..Default::default() };
+    let http = reqwest::Client::new();
+    let hub = memory_hub::HubState::with_parts(
+        rt.store.clone(),
+        hub_cfg,
+        memory_hub::HubSecrets::for_tests(),
+        http.clone(),
+        Arc::new(memory_hub::server::ReqwestProviderClient::new(http.clone())),
+        Arc::new(memory_hub::server::ReqwestGithub::new(http)),
+    )
+    .await
+    .unwrap();
+    let importer = Importer::new(rt.pipeline.clone(), None);
+    let mut st = AppState::new(rt, importer);
+    st.token = Some(Arc::new("rahasia-lokal".into()));
+    st.hub = Some(hub);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(st);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = format!("http://{addr}");
+    let page = c.get(format!("{base}/hub")).send().await.unwrap().text().await.unwrap();
+    assert!(page.contains("/hub.js"), "{page}");
+    assert!(c.get(format!("{base}/hub.js")).send().await.unwrap().text().await.unwrap().contains("hubApi"));
+    let info: Value = c.get(format!("{base}/hub/api/info")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(info["providers"], json!(["github"]));
+    assert_eq!(c.get(format!("{base}/hub/api/repos")).send().await.unwrap().status(), 401);
+    assert_eq!(c.get(format!("{base}/hub/api/repos")).bearer_auth("rahasia-lokal").send().await.unwrap().status(), 401, "token lokal bukan kredensial hub");
+    // Login GitHub mengalihkan ke github.com dengan callback ke hub ini.
+    let nr = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let r = nr.get(format!("{base}/hub/auth/login/github")).send().await.unwrap();
+    assert_eq!(r.status(), 307);
+    let loc = r.headers()["location"].to_str().unwrap();
+    assert!(loc.starts_with("https://github.com/login/oauth/authorize") && loc.contains("hub%2Fauth%2Fcallback%2Fgithub"), "{loc}");
+    // Google tidak dikonfigurasi: pesan jelas.
+    assert_eq!(nr.get(format!("{base}/hub/auth/login/google")).send().await.unwrap().status(), 400);
 }

@@ -16,6 +16,7 @@
 //!     lessons/<id>.json       satu berkas JSON per record
 //!     decisions/<id>.json
 //!     facts/<id>.json
+//!     episodes/<id>.json      judul + ringkasan episode proyek
 //! ```
 //!
 //! Tiap perangkat hanya menulis foldernya sendiri, jadi `git merge` antar anggota tidak
@@ -36,6 +37,7 @@ use serde_json::{Value, json};
 use memory_core::ids::{new_id, now_rfc3339};
 use memory_core::model::{EpisodeStatus, Job, Lesson, LessonKind};
 use memory_core::project::{detect_project, same_project};
+use memory_core::text::normalize;
 use memory_extract::ingest::DistilledDoc;
 use memory_extract::{Vault, det_id};
 use memory_store::EpisodeFilter;
@@ -51,11 +53,11 @@ pub const SHARED_CONCEPT: &str = "repo-share";
 pub const REPO_IMPORT: &str = "repo_import";
 pub const REPO_EXPORT: &str = "repo_export";
 
-const MEMBERS_DIR: &str = "members";
-const MEMBER_FILE: &str = "member.json";
-const MANIFEST: &str = "manifest.json";
+pub(crate) const MEMBERS_DIR: &str = "members";
+pub(crate) const MEMBER_FILE: &str = "member.json";
+pub(crate) const MANIFEST: &str = "manifest.json";
 const STATE_FILE: &str = "repo_share.json";
-const KINDS: [&str; 3] = ["lessons", "decisions", "facts"];
+const KINDS: [&str; 4] = ["lessons", "decisions", "facts", "episodes"];
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_FILES_PER_MEMBER: usize = 20_000;
 const HOOK_START: &str = "# >>> engram repo share >>>";
@@ -88,12 +90,15 @@ pub struct BundleReport {
     pub lessons: u32,
     pub decisions: u32,
     pub facts: u32,
+    /// Ringkasan episode proyek (tanpa teks mentah).
+    pub episodes: u32,
     /// Hanya saat impor.
     pub lessons_new: u32,
     pub lessons_merged: u32,
     pub decisions_new: u32,
     pub decisions_duplicate: u32,
     pub facts_new: u32,
+    pub episodes_new: u32,
     /// Record yang ditarik penulisnya (impor) atau ditandai ditarik (ekspor).
     pub withdrawn: u32,
     /// Anggota yang datanya digabung (impor).
@@ -123,7 +128,7 @@ impl Default for BundleConfig {
 }
 
 impl BundleConfig {
-    fn shares(&self, kind: &str) -> bool {
+    pub(crate) fn shares(&self, kind: &str) -> bool {
         self.share.iter().any(|s| s.trim().eq_ignore_ascii_case(kind))
     }
 }
@@ -197,41 +202,43 @@ pub struct InitReport {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct ShareState {
-    device_id: String,
-    machine: String,
+pub(crate) struct ShareState {
+    pub(crate) device_id: String,
+    pub(crate) machine: String,
     /// Kunci: path absolut akar repo.
-    repos: BTreeMap<String, RepoState>,
+    pub(crate) repos: BTreeMap<String, RepoState>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct RepoState {
-    project: String,
-    subject: String,
+pub(crate) struct RepoState {
+    pub(crate) project: String,
+    pub(crate) subject: String,
     /// Sidik `.engram/` (path, ukuran, waktu ubah) saat impor terakhir.
-    fingerprint: Option<String>,
+    pub(crate) fingerprint: Option<String>,
     /// Hash isi folder anggota lain yang sudah digabung.
-    pulled: BTreeMap<String, String>,
-    /// `<anggota>/<jenis>/<id record>` -> ID lokal yang dibuat impor.
-    imported: BTreeMap<String, String>,
+    pub(crate) pulled: BTreeMap<String, String>,
+    /// `<penulis>/<jenis>/<id record>` -> ID lokal yang dibuat impor.
+    pub(crate) imported: BTreeMap<String, String>,
     /// Record rekan yang menguatkan pelajaran milik sendiri (dihitung sekali).
-    confirmed: BTreeSet<String>,
-    last_import_at: Option<String>,
-    last_export_at: Option<String>,
-    last_error: Option<String>,
+    pub(crate) confirmed: BTreeSet<String>,
+    pub(crate) last_import_at: Option<String>,
+    pub(crate) last_export_at: Option<String>,
+    pub(crate) last_error: Option<String>,
+    /// Sinkronisasi lewat hub tim (`.engram/repo.toml`).
+    pub(crate) hub: Option<crate::repo_hub::HubRepoState>,
 }
 
 /// Satu penulisan berkas status pada satu waktu.
 static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Satu impor/ekspor pada satu waktu (worker paralel, hook, UI).
-static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn state_path(v: &Vault) -> PathBuf {
     v.root().join(STATE_FILE)
 }
 
-fn with_state<R>(v: &Vault, f: impl FnOnce(&mut ShareState) -> R) -> Result<R> {
+pub(crate) fn with_state<R>(v: &Vault, f: impl FnOnce(&mut ShareState) -> R) -> Result<R> {
     let _g = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = state_path(v);
     let raw = std::fs::read(&path).ok();
@@ -252,7 +259,7 @@ fn with_state<R>(v: &Vault, f: impl FnOnce(&mut ShareState) -> R) -> Result<R> {
     Ok(r)
 }
 
-fn key_of(root: &Path) -> String {
+pub(crate) fn key_of(root: &Path) -> String {
     root.to_string_lossy().to_string()
 }
 
@@ -262,15 +269,15 @@ fn short_hash(s: &str) -> String {
 
 // ---------------------------------------------------------------- repo & identitas
 
-struct Target {
-    root: PathBuf,
-    dir: PathBuf,
-    project: String,
+pub(crate) struct Target {
+    pub(crate) root: PathBuf,
+    pub(crate) dir: PathBuf,
+    pub(crate) project: String,
 }
 
 /// Akar repo, folder bundel, dan nama proyek. Nama lokal (akar git) diutamakan agar memori
 /// impor menyatu dengan sesi kerja di komputer ini; `manifest.json` hanya cadangan.
-fn resolve_target(repo: &Path, project: Option<&str>) -> Result<Target> {
+pub(crate) fn resolve_target(repo: &Path, project: Option<&str>) -> Result<Target> {
     let repo = std::path::absolute(repo).unwrap_or_else(|_| repo.to_path_buf());
     let base = if repo.file_name().is_some_and(|n| n == BUNDLE_DIR) { repo.parent().map(Path::to_path_buf).unwrap_or_else(|| repo.clone()) } else { repo.clone() };
     let detected = detect_project(&base).filter(|p| p.from_git);
@@ -300,7 +307,7 @@ pub fn load_bundle_config(dir: &Path) -> BundleConfig {
 }
 
 /// Folder git (common dir untuk worktree) dari akar repo.
-fn git_dir_of(root: &Path) -> Option<PathBuf> {
+pub(crate) fn git_dir_of(root: &Path) -> Option<PathBuf> {
     let git = root.join(".git");
     if git.is_dir() {
         return Some(git);
@@ -378,7 +385,7 @@ fn valid_member_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn record_id_of(file_name: &str) -> Option<&str> {
+pub(crate) fn record_id_of(file_name: &str) -> Option<&str> {
     let id = file_name.strip_suffix(".json")?;
     (!id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric())).then_some(id)
 }
@@ -389,7 +396,7 @@ struct Me {
     device: String,
 }
 
-fn device_name() -> String {
+pub(crate) fn device_name() -> String {
     static N: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     N.get_or_init(crate::sync::host_name).clone()
 }
@@ -411,11 +418,11 @@ async fn member_identity(rt: &Runtime, subject: &str, root: &Path, device_id: &s
 
 // ---------------------------------------------------------------- baca bundel
 
-struct MemberDir {
-    id: String,
-    info: MemberInfo,
+pub(crate) struct MemberDir {
+    pub(crate) id: String,
+    pub(crate) info: MemberInfo,
     /// `<jenis>/<id>.json` -> isi.
-    records: BTreeMap<String, Value>,
+    pub(crate) records: BTreeMap<String, Value>,
     raw: BTreeMap<String, Vec<u8>>,
     hash: String,
 }
@@ -431,7 +438,7 @@ fn hash_files(files: &BTreeMap<String, Vec<u8>>) -> String {
     h.finalize().to_hex()[..32].to_string()
 }
 
-fn read_member(path: &Path, id: &str) -> MemberDir {
+pub(crate) fn read_member(path: &Path, id: &str) -> MemberDir {
     let info: MemberInfo = std::fs::read(path.join(MEMBER_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let mut records = BTreeMap::new();
     let mut raw = BTreeMap::new();
@@ -463,7 +470,7 @@ fn read_member(path: &Path, id: &str) -> MemberDir {
     MemberDir { id: id.to_string(), info, records, raw, hash }
 }
 
-fn list_member_ids(dir: &Path) -> Vec<String> {
+pub(crate) fn list_member_ids(dir: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(dir.join(MEMBERS_DIR)) else { return vec![] };
     let mut out: Vec<String> = rd
         .flatten()
@@ -508,13 +515,13 @@ fn fingerprint(dir: &Path) -> Option<String> {
 
 // ---------------------------------------------------------------- ekspor
 
-struct Record {
-    kind: &'static str,
-    id: String,
-    body: Value,
+pub(crate) struct Record {
+    pub(crate) kind: &'static str,
+    pub(crate) id: String,
+    pub(crate) body: Value,
 }
 
-fn canonical(v: &Value) -> Vec<u8> {
+pub(crate) fn canonical(v: &Value) -> Vec<u8> {
     let mut b = serde_json::to_vec_pretty(v).unwrap_or_default();
     b.push(b'\n');
     b
@@ -555,7 +562,7 @@ impl Cleaner<'_> {
 }
 
 /// ID lokal pelajaran yang berasal dari impor (untuk proyek ini): tidak diekspor ulang.
-fn imported_lessons(st: &ShareState, project: &str) -> BTreeSet<String> {
+pub(crate) fn imported_lessons(st: &ShareState, project: &str) -> BTreeSet<String> {
     st.repos
         .values()
         .filter(|r| same_project(&r.project, project))
@@ -563,7 +570,7 @@ fn imported_lessons(st: &ShareState, project: &str) -> BTreeSet<String> {
         .collect()
 }
 
-async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[String], cfg: &BundleConfig, skip_lessons: &BTreeSet<String>) -> Result<Vec<Record>> {
+pub(crate) async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[String], cfg: &BundleConfig, skip_lessons: &BTreeSet<String>) -> Result<Vec<Record>> {
     let cl = Cleaner {
         privacy: &rt.cfg.privacy,
         exclude: cfg.exclude.iter().map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect(),
@@ -572,6 +579,10 @@ async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[String], cfg:
     };
     let cap = cfg.max_records.max(1);
     let mut out: Vec<Record> = Vec::new();
+    // ID record diturunkan dari ISI (kunci judul, situasi+aksi, entitas+predikat+objek), bukan
+    // dari ID lokal, sehingga supersede fakta atau kompaksi episode tidak melahirkan record baru
+    // + tombstone. Dua sumber dengan isi sama menghasilkan satu record (yang terbaru menang).
+    let mut seen: BTreeSet<String> = BTreeSet::new();
 
     if cfg.shares("lessons") {
         let mut n = 0;
@@ -584,24 +595,37 @@ async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[String], cfg:
                 continue;
             }
             let key = if l.title_key.is_empty() { Lesson::title_key_of(&l.title) } else { l.title_key.clone() };
+            let id = det_id(&["repo-lesson", &key]);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
             let status = if l.status == "archived" { "archived" } else { "active" };
             out.push(Record {
                 kind: "lessons",
-                id: det_id(&["repo-lesson", &key]),
+                id,
                 body: json!({"kind": l.kind, "title": title, "title_key": key, "detail": detail, "occurrences": l.occurrences, "status": status}),
             });
             n += 1;
         }
     }
 
-    if cfg.shares("decisions") {
-        let eps = rt
-            .store
+    let eps = if cfg.shares("decisions") || cfg.shares("episodes") {
+        rt.store
             .list_episodes(subject, &EpisodeFilter { status: Some(EpisodeStatus::Active), projects: names.to_vec(), newest_first: true, limit: 5000, ..Default::default() })
-            .await?;
+            .await?
+            .into_iter()
+            // Episode hasil impor memori bersama tidak dipantulkan balik.
+            .filter(|e| !e.concepts.iter().any(|c| c == SHARED_CONCEPT))
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+    let date_of = |e: &memory_core::model::Episode| -> String { e.time_start.clone().unwrap_or_else(|| e.created_at.clone()).chars().take(10).collect() };
+
+    if cfg.shares("decisions") {
         let mut n = 0;
-        'eps: for e in eps.iter().filter(|e| !e.concepts.iter().any(|c| c == SHARED_CONCEPT)) {
-            for (i, d) in e.decisions.iter().enumerate() {
+        'eps: for e in &eps {
+            for d in &e.decisions {
                 if n >= cap {
                     break 'eps;
                 }
@@ -616,14 +640,45 @@ async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[String], cfg:
                 if sit.is_empty() || act.is_empty() {
                     continue;
                 }
-                let date = e.time_start.clone().unwrap_or_else(|| e.created_at.chars().take(10).collect());
+                let id = det_id(&["repo-decision", &normalize(&sit), &normalize(&act)]);
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
                 out.push(Record {
                     kind: "decisions",
-                    id: det_id(&["repo-decision", &e.id, &i.to_string()]),
-                    body: json!({"date": date.chars().take(10).collect::<String>(), "title": title, "obs_type": e.obs_type, "situation": sit, "action": act, "reason": reason, "status": "active"}),
+                    id,
+                    body: json!({"date": date_of(e), "title": title, "obs_type": e.obs_type, "situation": sit, "action": act, "reason": reason, "status": "active"}),
                 });
                 n += 1;
             }
+        }
+    }
+
+    if cfg.shares("episodes") {
+        let mut n = 0;
+        // Episode yang memuat keputusan sudah dibagikan lewat jenis `decisions`; jangan dobel.
+        for e in eps.iter().filter(|e| e.decisions.is_empty() || !cfg.shares("decisions")) {
+            if n >= cap {
+                break;
+            }
+            let (Some(title), Some(summary)) = (cl.clean(&e.title), cl.clean(&e.summary)) else { continue };
+            if title.is_empty() || summary.is_empty() {
+                continue;
+            }
+            let id = det_id(&["repo-episode", &e.id]);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let concepts: Vec<String> = e.concepts.iter().filter_map(|c| cl.clean(c)).filter(|c| !c.is_empty()).take(12).collect();
+            out.push(Record {
+                kind: "episodes",
+                id,
+                body: json!({
+                    "date": date_of(e), "title": memory_core::text::truncate_chars(&title, 160), "summary": memory_core::text::truncate_chars(&summary, 600),
+                    "obs_type": e.obs_type, "concepts": concepts, "status": "active",
+                }),
+            });
+            n += 1;
         }
     }
 
@@ -640,7 +695,11 @@ async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[String], cfg:
         // Fakta yang seluruh buktinya berasal dari impor bundel milik rekan, bukan milik sendiri.
         let ev_ids: Vec<String> = facts.iter().flat_map(|f| f.evidence.iter().map(|e| e.episode_id.clone())).collect::<BTreeSet<_>>().into_iter().collect();
         let shared: BTreeSet<String> = rt.store.episodes_by_ids(&ev_ids).await?.into_iter().filter(|e| e.concepts.iter().any(|c| c == SHARED_CONCEPT)).map(|e| e.id).collect();
-        for f in facts.iter().take(cap) {
+        let mut n = 0;
+        for f in &facts {
+            if n >= cap {
+                break;
+            }
             if !f.evidence.is_empty() && f.evidence.iter().all(|e| shared.contains(&e.episode_id)) {
                 continue;
             }
@@ -648,15 +707,20 @@ async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[String], cfg:
             if pred.is_empty() || obj.is_empty() {
                 continue;
             }
+            let id = det_id(&["repo-fact", &normalize(&ent.name), &normalize(&pred), &normalize(&obj)]);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
             out.push(Record {
                 kind: "facts",
-                id: det_id(&["repo-fact", &f.id]),
+                id,
                 body: json!({
                     "entity": ent.name, "predicate": pred, "object": obj, "object_is_entity": f.object_entity.is_some(),
                     "category": f.category, "kind": f.kind, "exclusive": f.exclusive, "valid_from": f.valid_from,
                     "statement": format!("{} {pred} {obj}", ent.name), "confidence": (f.confidence * 100.0).round() / 100.0, "status": "active",
                 }),
             });
+            n += 1;
         }
     }
     Ok(out)
@@ -808,13 +872,13 @@ async fn export_locked(rt: &Runtime, subject: &str, t: &Target, dry_run: bool) -
     let me = member_identity(rt, subject, &t.root, &device_id).await;
     let records = collect(rt, subject, t, &names, &cfg, &skip).await?;
     let count = |k: &str| records.iter().filter(|r| r.kind == k).count() as u32;
-    let mut rep = BundleReport { dir: t.dir.clone(), project: t.project.clone(), member: me.id.clone(), lessons: count("lessons"), decisions: count("decisions"), facts: count("facts"), dry_run, ..Default::default() };
+    let mut rep = BundleReport { dir: t.dir.clone(), project: t.project.clone(), member: me.id.clone(), lessons: count("lessons"), decisions: count("decisions"), facts: count("facts"), episodes: count("episodes"), dry_run, ..Default::default() };
     if dry_run {
         rep.preview = records
             .iter()
             .map(|r| {
                 let text = match r.kind {
-                    "lessons" => r.body["title"].as_str().unwrap_or("").to_string(),
+                    "lessons" | "episodes" => r.body["title"].as_str().unwrap_or("").to_string(),
                     "decisions" => format!("{} -> {}", r.body["situation"].as_str().unwrap_or(""), r.body["action"].as_str().unwrap_or("")),
                     _ => r.body["statement"].as_str().unwrap_or("").to_string(),
                 };
@@ -922,143 +986,203 @@ async fn import_locked(rt: &Runtime, subject: &str, t: &Target, force: bool) -> 
 }
 
 async fn import_member(rt: &Runtime, subject: &str, project: &str, m: &MemberDir, rs: &mut RepoState, rep: &mut BundleReport) -> Result<()> {
-    let who = if m.info.name.trim().is_empty() { m.id.clone() } else { m.info.name.trim().to_string() };
-    let now = now_rfc3339();
+    let who = Author { key: m.id.clone(), name: m.info.name.clone(), device: m.info.device.clone() };
     for (rel, row) in &m.records {
         let Some((kind, file)) = rel.split_once('/') else { continue };
         let Some(rid) = record_id_of(file) else { continue };
-        let rkey = format!("{}/{kind}/{rid}", m.id);
-        let s = |k: &str| row[k].as_str().map(str::trim).unwrap_or("").to_string();
-        if s("status") == "withdrawn" {
-            if let Some(local) = rs.imported.get(&rkey).cloned()
-                && withdraw(rt, kind, &local).await?
-            {
-                rep.withdrawn += 1;
-            }
-            continue;
+        apply_record(rt, subject, project, &who, kind, rid, row, rs, rep).await?;
+    }
+    Ok(())
+}
+
+/// Penulis record bersama: folder anggota bundel legacy (`<nama>-<hash>`) atau pengguna hub
+/// (`hub:<user_id>:<device_id>`). Kuncinya menjadi prefiks peta `RepoState.imported`.
+pub(crate) struct Author {
+    pub(crate) key: String,
+    pub(crate) name: String,
+    pub(crate) device: String,
+}
+
+impl Author {
+    fn display(&self) -> String {
+        if self.name.trim().is_empty() { self.key.clone() } else { self.name.trim().to_string() }
+    }
+    fn is_hub(&self) -> bool {
+        self.key.starts_with("hub:")
+    }
+    /// Keterangan jalur di teks episode hasil impor.
+    fn channel(&self) -> &'static str {
+        if self.is_hub() { "lewat hub tim" } else { "lewat repositori git" }
+    }
+    fn via(&self) -> &'static str {
+        if self.is_hub() { "hub" } else { "repo-bundle" }
+    }
+    fn origin(&self) -> String {
+        if self.is_hub() { self.key.clone() } else { format!("{BUNDLE_DIR}/{MEMBERS_DIR}/{}", self.key) }
+    }
+}
+
+/// Terapkan satu record rekan (bundel legacy atau hub) ke vault ini: pelajaran digabung per
+/// kunci judul, keputusan/fakta/episode menjadi episode terdistilasi bertanda `repo-share`,
+/// tombstone (`status: withdrawn`) mengarsipkan/mengkarantina/menutup record lokalnya.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_record(rt: &Runtime, subject: &str, project: &str, who: &Author, kind: &str, rid: &str, row: &Value, rs: &mut RepoState, rep: &mut BundleReport) -> Result<()> {
+    let now = now_rfc3339();
+    let rkey = format!("{}/{kind}/{rid}", who.key);
+    let s = |k: &str| row[k].as_str().map(str::trim).unwrap_or("").to_string();
+    if s("status") == "withdrawn" {
+        if let Some(local) = rs.imported.get(&rkey).cloned()
+            && withdraw(rt, kind, &local).await?
+        {
+            rep.withdrawn += 1;
         }
-        match kind {
-            "lessons" => {
-                let title = s("title");
-                if title.is_empty() {
-                    continue;
-                }
-                rep.lessons += 1;
-                let key = Some(s("title_key")).filter(|k| !k.is_empty()).unwrap_or_else(|| Lesson::title_key_of(&title));
-                let archived = s("status") == "archived";
-                let occ = row["occurrences"].as_u64().unwrap_or(1).clamp(1, 10_000) as u32;
-                match rt.store.lesson_by_key(subject, Some(project), &key).await? {
-                    Some(mut local) => {
-                        rep.lessons_merged += 1;
-                        let before = local.clone();
-                        if rs.imported.get(&rkey) == Some(&local.id) {
-                            // Pelajaran milik rekan: ikuti status & hitungan penulisnya.
-                            local.status = if archived { "archived".into() } else if local.status == "archived" { "active".into() } else { local.status.clone() };
-                            local.occurrences = local.occurrences.max(occ);
-                        } else if !archived && rs.confirmed.insert(rkey.clone()) {
-                            // Rekan menemukan pelajaran yang sama: dikuatkan sekali.
-                            local.occurrences += 1;
-                        }
-                        if local.detail.trim().is_empty() {
-                            local.detail = s("detail");
-                        }
-                        if local != before {
-                            local.updated_at = now.clone();
-                            rt.store.put_lesson(&local).await?;
-                        }
+        return Ok(());
+    }
+    match kind {
+        "lessons" => {
+            let title = s("title");
+            if title.is_empty() {
+                return Ok(());
+            }
+            rep.lessons += 1;
+            let key = Some(s("title_key")).filter(|k| !k.is_empty()).unwrap_or_else(|| Lesson::title_key_of(&title));
+            let archived = s("status") == "archived";
+            let occ = row["occurrences"].as_u64().unwrap_or(1).clamp(1, 10_000) as u32;
+            match rt.store.lesson_by_key(subject, Some(project), &key).await? {
+                Some(mut local) => {
+                    rep.lessons_merged += 1;
+                    let before = local.clone();
+                    if rs.imported.get(&rkey) == Some(&local.id) {
+                        // Pelajaran milik rekan: ikuti status & hitungan penulisnya.
+                        local.status = if archived { "archived".into() } else if local.status == "archived" { "active".into() } else { local.status.clone() };
+                        local.occurrences = local.occurrences.max(occ);
+                    } else if !archived && rs.confirmed.insert(rkey.clone()) {
+                        // Rekan menemukan pelajaran yang sama: dikuatkan sekali.
+                        local.occurrences += 1;
                     }
-                    None if archived => {}
-                    None => {
-                        let l = Lesson {
-                            id: det_id(&["lesson", subject, project, &key]),
-                            subject: subject.to_string(),
-                            project: Some(project.to_string()),
-                            kind: LessonKind::parse(&s("kind")),
-                            title,
-                            title_key: key,
-                            detail: s("detail"),
-                            occurrences: occ,
-                            evidence: vec![],
-                            status: "active".into(),
-                            promoted_to: None,
-                            created_at: now.clone(),
-                            updated_at: now.clone(),
-                        };
-                        rt.store.put_lesson(&l).await?;
-                        rs.imported.insert(rkey, l.id);
-                        rep.lessons_new += 1;
+                    if local.detail.trim().is_empty() {
+                        local.detail = s("detail");
+                    }
+                    if local != before {
+                        local.updated_at = now.clone();
+                        rt.store.put_lesson(&local).await?;
                     }
                 }
-            }
-            "decisions" => {
-                let (sit, act) = (s("situation"), s("action"));
-                if sit.is_empty() || act.is_empty() {
-                    continue;
-                }
-                rep.decisions += 1;
-                if let Some(local) = rs.imported.get(&rkey) {
-                    reactivate(rt, local).await?;
-                    rep.decisions_duplicate += 1;
-                    continue;
-                }
-                let date = Some(s("date")).filter(|d| !d.is_empty()).unwrap_or_else(|| "tanggal tidak diketahui".into());
-                let reason = Some(s("reason")).filter(|r| !r.is_empty());
-                let text = format!(
-                    "Keputusan proyek {project} ({date}), dibagikan {who} lewat repositori git.\nSituasi: {sit}\nKeputusan: {act}{}",
-                    reason.as_deref().map(|r| format!("\nAlasan: {r}")).unwrap_or_default()
-                );
-                let title = Some(s("title")).filter(|x| !x.is_empty()).unwrap_or_else(|| memory_core::text::truncate_chars(&sit, 100));
-                let extraction = json!({
-                    "obs_type": "decision",
-                    "concepts": [SHARED_CONCEPT],
-                    "decisions": [{"situation": sit, "action": act, "reason": reason}],
-                });
-                let (ep, dup) = ingest_shared(rt, subject, project, &title, &act, &text, m, rid, extraction).await?;
-                rs.imported.insert(rkey, ep);
-                if dup {
-                    rep.decisions_duplicate += 1;
-                } else {
-                    rep.decisions_new += 1;
+                None if archived => {}
+                None => {
+                    let l = Lesson {
+                        id: det_id(&["lesson", subject, project, &key]),
+                        subject: subject.to_string(),
+                        project: Some(project.to_string()),
+                        kind: LessonKind::parse(&s("kind")),
+                        title,
+                        title_key: key,
+                        detail: s("detail"),
+                        occurrences: occ,
+                        evidence: vec![],
+                        status: "active".into(),
+                        promoted_to: None,
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    };
+                    rt.store.put_lesson(&l).await?;
+                    rs.imported.insert(rkey, l.id);
+                    rep.lessons_new += 1;
                 }
             }
-            "facts" => {
-                let (statement, pred, obj) = (s("statement"), s("predicate"), s("object"));
-                if statement.is_empty() || pred.is_empty() || obj.is_empty() {
-                    continue;
-                }
-                rep.facts += 1;
-                if let Some(local) = rs.imported.get(&rkey) {
-                    reactivate(rt, local).await?;
-                    continue;
-                }
-                let entity = Some(s("entity")).filter(|e| !e.is_empty()).unwrap_or_else(|| project.to_string());
-                let since = Some(s("valid_from")).filter(|v| !v.is_empty()).map(|v| format!(" (berlaku sejak {v})")).unwrap_or_default();
-                let text = format!("Fakta proyek {project}, dibagikan {who} lewat repositori git: {statement}.{since}");
-                let aliases: Vec<String> = if same_project(&entity, project) { vec![] } else { vec![project.to_string()] };
-                let extraction = json!({
-                    "obs_type": "discovery",
-                    "concepts": [SHARED_CONCEPT],
-                    "entities": [{"name": entity, "kind": "project", "aliases": aliases}],
-                    "facts": [{
-                        "subject": entity, "predicate": pred, "object": obj, "object_is_entity": row["object_is_entity"].as_bool().unwrap_or(false),
-                        "category": s("category"), "kind": s("kind"), "exclusive": row["exclusive"].as_bool().unwrap_or(false),
-                        "time": {"kind": "current"}, "quote": statement, "confidence": row["confidence"].as_f64().map(|c| c.clamp(0.0, 1.0)),
-                    }],
-                });
-                let (ep, dup) = ingest_shared(rt, subject, project, &memory_core::text::truncate_chars(&statement, 100), &statement, &text, m, rid, extraction).await?;
-                rs.imported.insert(rkey, ep);
-                if !dup {
-                    rep.facts_new += 1;
-                }
-            }
-            _ => {}
         }
+        "decisions" => {
+            let (sit, act) = (s("situation"), s("action"));
+            if sit.is_empty() || act.is_empty() {
+                return Ok(());
+            }
+            rep.decisions += 1;
+            if let Some(local) = rs.imported.get(&rkey) {
+                reactivate(rt, local).await?;
+                rep.decisions_duplicate += 1;
+                return Ok(());
+            }
+            let date = Some(s("date")).filter(|d| !d.is_empty()).unwrap_or_else(|| "tanggal tidak diketahui".into());
+            let reason = Some(s("reason")).filter(|r| !r.is_empty());
+            let text = format!(
+                "Keputusan proyek {project} ({date}), dibagikan {} {}.\nSituasi: {sit}\nKeputusan: {act}{}",
+                who.display(),
+                who.channel(),
+                reason.as_deref().map(|r| format!("\nAlasan: {r}")).unwrap_or_default()
+            );
+            let title = Some(s("title")).filter(|x| !x.is_empty()).unwrap_or_else(|| memory_core::text::truncate_chars(&sit, 100));
+            let extraction = json!({
+                "obs_type": "decision",
+                "concepts": [SHARED_CONCEPT],
+                "decisions": [{"situation": sit, "action": act, "reason": reason}],
+            });
+            let (ep, dup) = ingest_shared(rt, subject, project, &title, &act, &text, who, rid, extraction).await?;
+            rs.imported.insert(rkey, ep);
+            if dup {
+                rep.decisions_duplicate += 1;
+            } else {
+                rep.decisions_new += 1;
+            }
+        }
+        "facts" => {
+            let (statement, pred, obj) = (s("statement"), s("predicate"), s("object"));
+            if statement.is_empty() || pred.is_empty() || obj.is_empty() {
+                return Ok(());
+            }
+            rep.facts += 1;
+            if let Some(local) = rs.imported.get(&rkey) {
+                reactivate(rt, local).await?;
+                return Ok(());
+            }
+            let entity = Some(s("entity")).filter(|e| !e.is_empty()).unwrap_or_else(|| project.to_string());
+            let since = Some(s("valid_from")).filter(|v| !v.is_empty()).map(|v| format!(" (berlaku sejak {v})")).unwrap_or_default();
+            let text = format!("Fakta proyek {project}, dibagikan {} {}: {statement}.{since}", who.display(), who.channel());
+            let aliases: Vec<String> = if same_project(&entity, project) { vec![] } else { vec![project.to_string()] };
+            let extraction = json!({
+                "obs_type": "discovery",
+                "concepts": [SHARED_CONCEPT],
+                "entities": [{"name": entity, "kind": "project", "aliases": aliases}],
+                "facts": [{
+                    "subject": entity, "predicate": pred, "object": obj, "object_is_entity": row["object_is_entity"].as_bool().unwrap_or(false),
+                    "category": s("category"), "kind": s("kind"), "exclusive": row["exclusive"].as_bool().unwrap_or(false),
+                    "time": {"kind": "current"}, "quote": statement, "confidence": row["confidence"].as_f64().map(|c| c.clamp(0.0, 1.0)),
+                }],
+            });
+            let (ep, dup) = ingest_shared(rt, subject, project, &memory_core::text::truncate_chars(&statement, 100), &statement, &text, who, rid, extraction).await?;
+            rs.imported.insert(rkey, ep);
+            if !dup {
+                rep.facts_new += 1;
+            }
+        }
+        "episodes" => {
+            let (title, summary) = (s("title"), s("summary"));
+            if title.is_empty() || summary.is_empty() {
+                return Ok(());
+            }
+            rep.episodes += 1;
+            if let Some(local) = rs.imported.get(&rkey) {
+                reactivate(rt, local).await?;
+                return Ok(());
+            }
+            let date = Some(s("date")).filter(|d| !d.is_empty()).unwrap_or_else(|| "tanggal tidak diketahui".into());
+            let text = format!("Observasi proyek {project} ({date}), dibagikan {} {}.\n{title}\n{summary}", who.display(), who.channel());
+            let mut concepts = vec![SHARED_CONCEPT.to_string()];
+            concepts.extend(row["concepts"].as_array().into_iter().flatten().filter_map(|c| c.as_str()).map(str::trim).filter(|c| !c.is_empty() && *c != SHARED_CONCEPT).take(12).map(str::to_string));
+            let obs_type = Some(s("obs_type")).filter(|o| !o.is_empty()).unwrap_or_else(|| "discovery".into());
+            let extraction = json!({"obs_type": obs_type, "concepts": concepts});
+            let (ep, dup) = ingest_shared(rt, subject, project, &title, &summary, &text, who, rid, extraction).await?;
+            rs.imported.insert(rkey, ep);
+            if !dup {
+                rep.episodes_new += 1;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn ingest_shared(rt: &Runtime, subject: &str, project: &str, title: &str, summary: &str, text: &str, m: &MemberDir, rid: &str, extraction: Value) -> Result<(String, bool)> {
+async fn ingest_shared(rt: &Runtime, subject: &str, project: &str, title: &str, summary: &str, text: &str, who: &Author, rid: &str, extraction: Value) -> Result<(String, bool)> {
     let out = rt
         .pipeline
         .ingest_distilled(DistilledDoc {
@@ -1067,8 +1191,8 @@ async fn ingest_shared(rt: &Runtime, subject: &str, project: &str, title: &str, 
             summary: memory_core::text::truncate_chars(summary, 300),
             text: text.to_string(),
             project: Some(project.to_string()),
-            original_name: Some(format!("{BUNDLE_DIR}/{MEMBERS_DIR}/{}", m.id)),
-            meta: json!({"via": "repo-bundle", "member": m.id, "author": m.info.name, "record": rid, "extraction": extraction}),
+            original_name: Some(who.origin()),
+            meta: json!({"via": who.via(), "member": who.key, "author": who.name, "device": who.device, "record": rid, "extraction": extraction}),
         })
         .await?;
     let ep = out.episode_id.unwrap_or_else(|| det_id(&[&out.source_id, "ep", "0", "0"]));
@@ -1184,7 +1308,7 @@ async fn import_v1(rt: &Runtime, subject: &str, dir: &Path, project: &str) -> Re
 
 // ---------------------------------------------------------------- otomatisasi
 
-fn repo_root_of(cwd: &Path) -> Option<(PathBuf, String)> {
+pub(crate) fn repo_root_of(cwd: &Path) -> Option<(PathBuf, String)> {
     let p = detect_project(cwd)?;
     p.from_git.then_some((p.root, p.name))
 }
@@ -1193,6 +1317,16 @@ fn repo_root_of(cwd: &Path) -> Option<(PathBuf, String)> {
 /// `post-checkout`): mendaftarkan repo dan mengantre impor (bila `.engram/` berubah)
 /// serta ekspor (bila repo sudah diaktifkan). Tidak pernah memproses langsung.
 pub async fn on_repo_event(rt: &Runtime, subject: &str, cwd: &Path, project: Option<&str>) -> Result<Value> {
+    on_repo_event_with(rt, subject, cwd, project, true).await
+}
+
+/// Seperti [`on_repo_event`] tanpa ekspor: dipakai saat memori tim sudah lewat hub, sehingga
+/// bundel lama rekan yang belum migrasi masih terbaca tetapi folder `.engram/` tidak ditulis.
+pub async fn on_repo_event_import_only(rt: &Runtime, subject: &str, cwd: &Path, project: Option<&str>) -> Result<Value> {
+    on_repo_event_with(rt, subject, cwd, project, false).await
+}
+
+async fn on_repo_event_with(rt: &Runtime, subject: &str, cwd: &Path, project: Option<&str>, export: bool) -> Result<Value> {
     if !rt.cfg.repo_share.enabled {
         return Ok(json!({"enabled": false}));
     }
@@ -1223,7 +1357,7 @@ pub async fn on_repo_event(rt: &Runtime, subject: &str, cwd: &Path, project: Opt
         Some(r.fingerprint.clone())
     })?;
     let Some(prev) = prev else { return Ok(json!({"repo": root, "bundle": false})) };
-    queue_for(rt, subject, &root, &project, fp.as_deref(), prev.as_deref(), active).await
+    queue_for(rt, subject, &root, &project, fp.as_deref(), prev.as_deref(), active && export).await
 }
 
 async fn queue_for(rt: &Runtime, subject: &str, root: &Path, project: &str, fp: Option<&str>, prev: Option<&str>, active: bool) -> Result<Value> {
@@ -1286,6 +1420,15 @@ pub async fn run_job(rt: &Runtime, kind: &str, payload: &Value) -> Result<Value>
 
 /// Pemeriksaan berkala semua repo yang dikenal (menangkap `git pull` di luar sesi agent).
 pub async fn schedule_due(rt: &Runtime) -> Result<u32> {
+    schedule_due_with(rt, true).await
+}
+
+/// Pemeriksaan berkala bundel lama tanpa ekspor (repo yang belum pindah ke hub tetap terbaca).
+pub async fn schedule_due_import_only(rt: &Runtime) -> Result<u32> {
+    schedule_due_with(rt, false).await
+}
+
+async fn schedule_due_with(rt: &Runtime, export: bool) -> Result<u32> {
     if !rt.cfg.repo_share.enabled {
         return Ok(0);
     }
@@ -1293,12 +1436,12 @@ pub async fn schedule_due(rt: &Runtime) -> Result<u32> {
     let mut n = 0;
     for (root, rs) in repos {
         let root = PathBuf::from(root);
-        if rs.subject.is_empty() || !root.join(".git").exists() {
+        if rs.subject.is_empty() || !root.join(".git").exists() || root.join(BUNDLE_DIR).join(crate::repo_hub::REPO_TOML).is_file() {
             continue;
         }
         let dir = root.join(BUNDLE_DIR);
         let (fp, active) = tokio::task::spawn_blocking(move || (fingerprint(&dir), dir.join(CONFIG_FILE).is_file())).await.map_err(|e| JobError::Invalid(e.to_string()))?;
-        let v = queue_for(rt, &rs.subject, &root, &rs.project, fp.as_deref(), rs.fingerprint.as_deref(), active).await?;
+        let v = queue_for(rt, &rs.subject, &root, &rs.project, fp.as_deref(), rs.fingerprint.as_deref(), active && export).await?;
         n += u32::from(v["import_queued"] == true) + u32::from(v["export_queued"] == true);
     }
     Ok(n)
@@ -1398,7 +1541,9 @@ pub fn quick_share_state(known: &[(PathBuf, String)], name: &str, cwds: &[String
         .next()
         .or_else(|| cwds.iter().filter_map(|c| detect_project(Path::new(c))).find(|p| p.from_git && same_project(&p.name, name)).map(|p| p.root))?;
     let dir = root.join(BUNDLE_DIR);
-    let state = if dir.join(CONFIG_FILE).is_file() {
+    let state = if dir.join(crate::repo_hub::REPO_TOML).is_file() {
+        "hub"
+    } else if dir.join(CONFIG_FILE).is_file() {
         "active"
     } else if dir.join(MANIFEST).is_file() {
         "bundle"
@@ -1457,7 +1602,7 @@ fn hooks_dir(root: &Path) -> std::result::Result<PathBuf, String> {
     git_dir_of(root).map(|g| g.join("hooks")).ok_or_else(|| "folder .git tidak ditemukan".into())
 }
 
-fn installed_hooks(root: &Path) -> Vec<String> {
+pub(crate) fn installed_hooks(root: &Path) -> Vec<String> {
     let Ok(dir) = hooks_dir(root) else { return vec![] };
     HOOK_NAMES.iter().filter(|n| std::fs::read_to_string(dir.join(n)).is_ok_and(|t| t.contains(HOOK_START))).map(|n| n.to_string()).collect()
 }
@@ -1692,6 +1837,65 @@ mod tests {
         for j in r.store.list_jobs(None, 20).await.unwrap().iter().filter(|j| j.kind == REPO_EXPORT || j.kind == REPO_IMPORT) {
             run_job(&r, &j.kind, &j.payload).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn record_ids_follow_content_not_local_ids() {
+        let base = tempfile::tempdir().unwrap();
+        let repo = clone_repo(base.path(), "svc", "Budi");
+        let r = rt(&base.path().join("vault")).await;
+        r.pipeline.ensure_subject("budi", Some("Budi")).await.unwrap();
+        // Keputusan yang sama dari dua episode berbeda -> satu record; ID-nya tidak bergantung ID episode.
+        let dec = json!({"obs_type": "decision", "decisions": [{"situation": "Butuh antrean job", "action": "Pakai tabel job SurrealDB", "reason": null}]});
+        let e1 = r.pipeline.ingest_distilled(doc("svc", "Antrean", "Kami memilih tabel job SurrealDB sebagai antrean.", dec.clone())).await.unwrap();
+        let e2 = r.pipeline.ingest_distilled(doc("svc", "Antrean (ulang)", "Diskusi ulang: tetap pakai tabel job SurrealDB untuk antrean.", dec)).await.unwrap();
+        assert_ne!(e1.episode_id, e2.episode_id);
+        let fact_ep = r
+            .pipeline
+            .ingest_distilled(doc(
+                "svc",
+                "Cache",
+                "svc memakai Redis untuk cache sesi.",
+                json!({"entities": [{"name": "svc", "kind": "project"}], "facts": [{"subject": "svc", "predicate": "memakai", "object": "Redis untuk cache sesi", "category": "teknologi_cache", "time": {"kind": "current"}, "quote": "svc memakai Redis untuk cache sesi", "confidence": 0.9}]}),
+            ))
+            .await
+            .unwrap()
+            .episode_id
+            .unwrap();
+        std::fs::create_dir_all(repo.join(BUNDLE_DIR)).unwrap();
+        std::fs::write(repo.join(BUNDLE_DIR).join(CONFIG_FILE), "share = [\"lessons\", \"decisions\", \"facts\", \"episodes\"]\n").unwrap();
+        let ex = export_repo(&r, "budi", &repo, Some("svc")).await.unwrap();
+        // Dua episode keputusan dibagikan sebagai satu keputusan; ringkasan episode hanya untuk episode lain.
+        assert_eq!((ex.decisions, ex.facts, ex.episodes), (1, 1, 1), "{ex:?}");
+        let mdir = repo.join(BUNDLE_DIR).join(MEMBERS_DIR).join(&ex.member);
+        let dec_id = det_id(&["repo-decision", &normalize("Butuh antrean job"), &normalize("Pakai tabel job SurrealDB")]);
+        assert!(mdir.join("decisions").join(format!("{dec_id}.json")).is_file());
+        let fact_id = det_id(&["repo-fact", &normalize("svc"), &normalize("memakai"), &normalize("Redis untuk cache sesi")]);
+        assert!(mdir.join("facts").join(format!("{fact_id}.json")).is_file());
+        assert!(!mdir.join("episodes").join(format!("{}.json", det_id(&["repo-episode", e1.episode_id.as_deref().unwrap()]))).exists());
+        let ep_file = mdir.join("episodes").join(format!("{}.json", det_id(&["repo-episode", &fact_ep])));
+        let ep: Value = serde_json::from_slice(&std::fs::read(&ep_file).unwrap()).unwrap();
+        assert_eq!((ep["title"].as_str(), ep["status"].as_str()), (Some("Cache"), Some("active")));
+        assert!(ep["summary"].as_str().is_some_and(|s| !s.is_empty()) && ep.get("text").is_none(), "{ep}");
+
+        // Keyakinan fakta berubah: isi record berubah tetapi ID tetap -> tidak ada tombstone.
+        let ent = r.retriever.find_entity("budi", "svc").await.unwrap().unwrap();
+        for f in r.store.facts_for_entity(&ent.id).await.unwrap() {
+            r.store.patch("fact", &f.id, json!({"confidence": 0.75})).await.unwrap();
+        }
+        let ex2 = export_repo(&r, "budi", &repo, Some("svc")).await.unwrap();
+        assert_eq!((ex2.facts, ex2.withdrawn, ex2.written), (1, 0, 1), "{ex2:?}");
+
+        // Ringkasan episode rekan masuk ke vault lain sebagai episode bertanda repo-share.
+        let repo_b = clone_repo(base.path(), "svc-b", "Sari");
+        sync_bundle(&repo, &repo_b);
+        let b = rt(&base.path().join("vault-b")).await;
+        b.pipeline.ensure_subject("sari", Some("Sari")).await.unwrap();
+        let im = import_repo(&b, "sari", &repo_b, Some("svc")).await.unwrap();
+        assert_eq!((im.decisions_new, im.facts_new, im.episodes_new), (1, 1, 1), "{im:?}");
+        let eps = b.store.list_episodes("sari", &EpisodeFilter { projects: vec!["svc".into()], limit: 20, ..Default::default() }).await.unwrap();
+        assert_eq!(eps.iter().filter(|e| e.concepts.iter().any(|c| c == SHARED_CONCEPT)).count(), 3, "{}", eps.len());
+        assert!(eps.iter().any(|e| e.title == "Antrean" && e.text.contains("dibagikan Budi lewat repositori git")));
     }
 
     #[test]

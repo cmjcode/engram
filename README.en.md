@@ -33,7 +33,8 @@ Claude Code, Codex CLI, Cursor, Windsurf, Antigravity, Gemini CLI and VS Code.
 
 MCP compliance: stateless Streamable HTTP (spec 2026-07-28; clients speaking 2024-11-05 through 2025-11-25 are
 accepted), `tools/list` with `title`, `annotations` (`readOnlyHint` etc.) and `outputSchema` for every tool,
-`structuredContent` in results, plus a `coding` tool profile so coding sessions are not flooded with life-memory tools.
+`structuredContent` in results, plus a `coding` tool profile so coding sessions are not flooded with life-memory tools
+and an `operon` profile for multi-tenant memory layers (one subject per tenant, per-subject tokens).
 
 ## Install
 
@@ -95,7 +96,10 @@ What `scripts/install-mcp.sh` sets up:
    `principles`, `persona_context`, `family_tree`, `memory_gaps`, `list_subjects` and `compact` over Streamable HTTP
    (`http://127.0.0.1:7878/mcp`) with a fixed `MEMORY_TOKEN`. Append `?profile=coding` (or `engram mcp --profile coding`
    for stdio) to load only the seven coding-session tools: `project_context`, `recall`, `get_episodes`, `remember`,
-   `who_is`, `timeline`, `principles`. Codex uses `~/.codex/config.toml` (`[mcp_servers.engram]`), Windsurf
+   `who_is`, `timeline`, `principles`. The `operon` profile (`?profile=operon` / `engram mcp --profile operon`) is
+   meant for multi-tenant applications that keep one engram subject per tenant: only `recall`, `remember`, `who_is`,
+   `timeline`, `principles`, `project_context`, `get_episodes` (no `family_tree`, `compact`, `memory_gaps`,
+   `list_subjects`, `persona_context`); pair it with per-subject tokens (see [Security](#security)). Codex uses `~/.codex/config.toml` (`[mcp_servers.engram]`), Windsurf
    `~/.codeium/windsurf/mcp_config.json`.
 2. **Global rule** (`GEMINI.md`, `CLAUDE.md`, `AGENTS.md`, `global_rules.md`): instructs the agent to call
    `project_context`/`recall` at the start of a task and `remember` after important decisions. Coding clients get a
@@ -125,28 +129,32 @@ blocks, credentials in URLs) are replaced by `<redacted type='…'/>` before the
 
 ```sh
 engram import-claude-memory --all --apply   # Claude Code auto-memory (~/.claude/projects/*/memory/*.md) -> episodes, no LLM
-engram repo init [--hooks]                  # share project memory through this repo (.engram/), then commit the folder
-engram repo status                          # members, last import/export, installed git hooks
-engram repo export [--dry-run]              # write this device's project memory to .engram/members/<member>/
-engram repo import                          # merge teammates' memory into this vault (never deletes)
+engram login --hub https://engram.team.dev  # sign in to the team hub in the browser (Google / GitHub)
+engram repo init                            # connect this repo to the hub; commit .engram/repo.toml
+engram repo join [--github]                 # join a repo that already has .engram/repo.toml
+engram repo push | pull | status            # send / fetch / inspect (automatic every session & 15 min)
+engram repo migrate                         # move the old .engram/members/ bundle to the hub, clean the repo
 ```
 
-### Team memory through the git repository
+### Team memory through the hub
 
-Everyone with access to a repository shares its project memory: conventions and pitfalls, decisions and
-architecture facts. No server, account or extra cost; access follows repository access.
+Everyone with access to a repository shares its project memory: conventions and pitfalls, decisions,
+architecture facts and episode summaries. Memory lives on a **team hub** (`engram serve --hub`, sign in
+with Google or GitHub), not in git: the only file in the repo is `.engram/repo.toml`, so `git status`
+stays clean.
 
-- **Storage stays embedded SurrealDB** in each member's vault, so `recall` speed is unchanged. The
-  `.engram/` folder is only a transport of distilled text (no embeddings, no transcripts), typically tens
-  of KB per project.
-- **No merge conflicts**: each member, per device, only writes `.engram/members/<name>-<hash>/`, one JSON
-  file per record.
-- **Automatic**: when an agent session starts, engram merges `.engram/` changes (for example after
-  `git pull`) and writes the latest memory; `engram repo hooks` adds `post-merge`, `post-checkout` and
-  `pre-commit` git hooks. engram never runs `git commit` itself.
-- **Privacy**: only memory that belongs to that project; text containing secrets or `<private>` blocks
-  is skipped, and phrases listed under `exclude` in `.engram/config.toml` are never exported. Preview with
-  `engram repo export --dry-run`.
+- **Access follows the repo**: `repo.toml` carries a join key; anyone who can clone the repo and sign in
+  joins automatically on their first agent session. Optional: require a GitHub permission check,
+  invite/remove members, owner / maintainer / member / reader roles, join-key rotation.
+- **Incremental**: the hub keeps a per-repo change log (`seq`); each device sends only changed records
+  and pulls from its last cursor. Record IDs derive from content, so fact supersedes or episode
+  compaction do not create new records.
+- **Vaults stay local**: recall still runs on each member's embedded SurrealDB; the hub never stores raw
+  transcripts or embeddings. Secrets and `<private>` blocks are filtered before sending, and the hub
+  rejects records that still contain redaction markers.
+- **CI & cloud agents**: personal access tokens (`ENGRAM_HUB_URL` + `ENGRAM_HUB_TOKEN`).
+
+Running a hub behind your existing nginx: [docker/docker-compose.yml](docker/docker-compose.yml) (built from source) and [docker/nginx-engram.conf](docker/nginx-engram.conf).
 
 ## Benchmark
 
@@ -182,6 +190,28 @@ gold set: `engram bench export-gold --out cases/`, label `important` in `gold.to
 
 engram's niche: data sovereignty for 50+ years, a *wisdom layer* (principles, not just facts), and first-class support
 for Indonesian storytelling and extended-family kinship, while remaining a drop-in MCP memory for coding agents.
+
+## Security
+
+- The server listens on `127.0.0.1:7878` only. When `MEMORY_TOKEN` (env name set by `server.token_env`) is set,
+  every `/api` and `/mcp` request must carry `Authorization: Bearer <token>`. That token is **global**: it may touch
+  every subject and every endpoint.
+- **Per-subject tokens (tenant isolation).** `MEMORY_SUBJECT_TOKENS` (env name set by `server.subject_tokens_env`)
+  holds `subjectA=tokenA,subjectB=tokenB`. A request with a subject token may only touch that subject:
+  `/api/subjects/{s}/...` with the same `s`, `POST /api/subjects` only for the same id (`GET` shows only that
+  subject), `/mcp` with the `subject` argument forced to it (`list_subjects` is refused), and `/api/reviews/{id}` /
+  `/api/sources/{id}` owned by it. Everything else (settings, storage, update, services, pick-folder, hooks) answers
+  `403`. The global token keeps working for everything.
+
+  ```bash
+  MEMORY_TOKEN="$(openssl rand -hex 24)" \
+  MEMORY_SUBJECT_TOKENS="tenant_a=$(openssl rand -hex 24),tenant_b=$(openssl rand -hex 24)" \
+  engram serve
+  # tenant_a's agent calls POST /mcp?profile=operon with tenant_a's bearer token
+  ```
+
+- Secrets (API keys, tokens, PEM blocks, URL credentials) are redacted before anything reaches the vault
+  (`[privacy]`); Drive sync is `age`-encrypted. Full policy: [SECURITY.md](SECURITY.md).
 
 ## Development
 

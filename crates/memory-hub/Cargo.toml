@@ -1,0 +1,31 @@
+[package]
+name = "memory-hub"
+description = "Hub tim engram: akun Google/GitHub, repo bersama, change log push/pull, beserta klien HTTP-nya."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["server"]
+# Sisi server (axum + SurrealDB). Tanpa fitur ini crate hanya berisi tipe wire & klien HTTP.
+server = ["dep:axum", "dep:tower-http", "dep:jsonwebtoken", "dep:memory-store"]
+
+[dependencies]
+memory-core.workspace = true
+memory-store = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+blake3.workspace = true
+rand.workspace = true
+async-trait.workspace = true
+axum = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

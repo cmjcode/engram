@@ -1,5 +1,11 @@
 //! Skor kepentingan: menentukan apakah segmen menjadi episode, masuk antrean
 //! review (zona abu-abu), atau hanya disimpan di working memory (luruh).
+//!
+//! Kategori `business_fact`: kalimat operasional bisnis yang pendek dan datar
+//! ("Outlet Bandung tutup sejak September 2026", "Target omzet Q4 naik 15%")
+//! tidak punya sinyal emosi/keputusan sehingga skornya rendah. Bila sinyal
+//! bisnisnya kuat ([`is_business_fact`]), kepentingannya dinaikkan ke ambang
+//! promosi tanpa menurunkan ambang global; basa-basi tetap dibuang.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +32,9 @@ pub struct ScoreFeatures {
     pub back_refs: f32,
     pub length: f32,
     pub noise_ratio: f32,
+    /// Sinyal fakta bisnis 0..1; 1.0 = kategori `business_fact` (lihat [`is_business_fact`]).
+    #[serde(default)]
+    pub business_fact: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -46,12 +55,35 @@ pub struct ScoreInput<'a> {
     pub significance: Option<f32>,
 }
 
+/// Kategori skor `business_fact`.
+pub const BUSINESS_FACT: &str = "business_fact";
+
+/// Sinyal fakta bisnis 0..1. Bernilai 1.0 hanya bila ada istilah bisnis DAN jangkar
+/// konkret: angka (jumlah/harga/persen/tahun) atau nama diri (outlet, orang, pemasok).
+/// Tanpa jangkar (mis. "rapat mingguan membahas jadwal") sinyal maksimal 0.5, sehingga
+/// rutinitas generik tidak ikut dipromosikan.
+pub fn business_fact_signal(toks: &[String], proper_nouns: usize) -> f32 {
+    let hits = text::business_signal(toks);
+    if hits == 0 {
+        return 0.0;
+    }
+    if text::has_number(toks) || proper_nouns > 0 { 1.0 } else { (hits as f32 / 4.0).min(0.5) }
+}
+
+/// Apakah teks termasuk kategori `business_fact`: sinyal bisnis penuh dan bukan
+/// didominasi noise.
+pub fn is_business_fact(text: &str, cfg: &ScoreConfig) -> bool {
+    let toks = text::tokens(text);
+    business_fact_signal(&toks, text::proper_noun_count(text)) >= 1.0 && text::noise_ratio(&toks) < cfg.max_noise_ratio
+}
+
 pub fn score(input: &ScoreInput<'_>, cfg: &ScoreConfig) -> ScoreResult {
     let toks = text::tokens(input.text);
     let n = toks.len().max(1) as f32;
     let noise = text::noise_ratio(&toks);
     let proper = text::proper_noun_count(input.text) as f32;
     let de = (text::decision_signal(&toks) + text::emotion_signal(&toks)) as f32;
+    let business = business_fact_signal(&toks, proper as usize);
     let f = ScoreFeatures {
         significance: input.significance.unwrap_or(0.5).clamp(0.0, 1.0),
         novelty: input.novelty.clamp(0.0, 1.0),
@@ -60,6 +92,7 @@ pub fn score(input: &ScoreInput<'_>, cfg: &ScoreConfig) -> ScoreResult {
         back_refs: (input.back_refs as f32 / 3.0).min(1.0),
         length: (n / 60.0).min(1.0),
         noise_ratio: noise,
+        business_fact: business,
     };
     let raw = 0.35 * f.significance
         + 0.20 * f.novelty
@@ -67,10 +100,16 @@ pub fn score(input: &ScoreInput<'_>, cfg: &ScoreConfig) -> ScoreResult {
         + 0.15 * f.decision_emotion
         + 0.10 * f.back_refs
         + 0.05 * f.length;
-    let importance = (raw * (1.0 - noise)).clamp(0.0, 1.0);
+    let mut importance = (raw * (1.0 - noise)).clamp(0.0, 1.0);
+    // Kategori business_fact: fakta operasional datar (tanpa emosi/keputusan) tetap
+    // dipromosikan; ambang global tidak diturunkan, hanya skor kalimat ini yang dinaikkan.
+    let business_fact = f.business_fact >= 1.0 && noise < cfg.max_noise_ratio;
+    if business_fact {
+        importance = importance.max(cfg.promote_threshold);
+    }
 
     let too_short = input.text.chars().count() < cfg.min_chars;
-    let route = if noise >= cfg.max_noise_ratio || (too_short && f.decision_emotion == 0.0 && f.entity_signal == 0.0) {
+    let route = if noise >= cfg.max_noise_ratio || (too_short && f.decision_emotion == 0.0 && f.entity_signal == 0.0 && !business_fact) {
         Route::Drop
     } else if input.kind.is_biographic() {
         if importance >= cfg.biographic_threshold { Route::Episode } else { Route::Stream }
@@ -124,6 +163,35 @@ mod tests {
         let t = "Rumah kami dulu di dekat sawah, setiap pagi saya membantu ibu menimba air sebelum berangkat sekolah.";
         let r = score(&ScoreInput { text: t, kind: SourceKind::Interview, novelty: 0.5, back_refs: 0, significance: Some(0.4) }, &cfg());
         assert_eq!(r.route, Route::Episode, "{r:?}");
+    }
+
+    #[test]
+    fn business_facts_are_promoted_but_small_talk_is_still_dropped() {
+        let cfg = cfg();
+        let business = [
+            "Outlet Bandung tutup sejak September 2026",
+            "Pak Budi lebih suka laporan mingguan tiap Senin dalam Rupiah",
+            "Target omzet Q4 naik 15%",
+            "Harga jual kopi susu naik jadi Rp 18.000 mulai bulan depan",
+            "Supplier tepung utama sekarang PT Sumber Pangan, pembayaran tempo 30 hari",
+            "Stok gudang Surabaya dicek setiap Jumat sore oleh Mbak Rina",
+        ];
+        for t in business {
+            assert!(is_business_fact(t, &cfg), "{t}: harus terdeteksi business_fact");
+            let r = score(&ScoreInput { text: t, kind: SourceKind::Chat, novelty: 0.8, back_refs: 0, significance: None }, &cfg);
+            assert!(r.importance >= cfg.promote_threshold, "{t}: importance {} < promote", r.importance);
+            assert_eq!(r.route, Route::Episode, "{t}: {r:?}");
+            assert!((r.features.business_fact - 1.0).abs() < f32::EPSILON, "{t}");
+        }
+        for t in ["ok makasih", "siap pak", "halo"] {
+            assert!(!is_business_fact(t, &cfg), "{t}");
+            let r = score(&ScoreInput { text: t, kind: SourceKind::Chat, novelty: 0.8, back_refs: 0, significance: None }, &cfg);
+            assert_eq!(r.route, Route::Drop, "{t}: {r:?}");
+        }
+        // Rutinitas generik tanpa jangkar konkret (angka/nama diri) bukan business_fact.
+        assert!(!is_business_fact("rapat mingguan seperti biasa, membahas jadwal minggu depan dan pembagian tugas tim", &cfg));
+        // Ambang global tidak berubah.
+        assert!((cfg.promote_threshold - 0.55).abs() < f32::EPSILON && (cfg.gray_threshold - 0.42).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -1446,3 +1446,21 @@ button.graph-legend-item.active { border-color: var(--accent); box-shadow: 0 0 0
   .top { top: 8px; margin: 8px 8px 0; border-radius: 18px; }
   .drawer { border-radius: 0; }
 }
+
+/* ---------------------------------------------------------------- hub tim (/hub) */
+.hub-content { max-width: 1040px; margin: 0 auto; }
+.hub-content .top { gap: 16px; }
+.hub-nav { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-left: auto; }
+.hub-nav a { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+.hub-login { max-width: 560px; margin: 48px auto; text-align: center; }
+.provider-row { justify-content: center; gap: 12px; margin: 18px 0; }
+.provider-btn { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
+.brand-i { width: 18px; height: 18px; stroke: none; }
+.hub-repos { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.hub-repo { display: flex; flex-direction: column; gap: 6px; text-decoration: none; color: inherit; }
+.hub-records { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.hub-activity { list-style: none; padding: 0; line-height: 1.9; }
+.hub-table { width: 100%; border-collapse: collapse; }
+.hub-table th, .hub-table td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line, rgba(127, 127, 127, 0.2)); vertical-align: top; }
+.hub-key pre { white-space: pre-wrap; word-break: break-all; }
+.proj-hub-login { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }

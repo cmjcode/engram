@@ -8,6 +8,7 @@ pub mod config;
 pub mod ids;
 pub mod kin;
 pub mod model;
+pub mod paths;
 pub mod privacy;
 pub mod project;
 pub mod score;

@@ -3444,6 +3444,21 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
+]
+
+[[package]]
+name = "jsonwebtoken"
 version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
@@ -3806,6 +3821,7 @@ dependencies = [
  "futures",
  "memory-core",
  "memory-extract",
+ "memory-hub",
  "memory-import",
  "memory-jobs",
  "memory-llm",
@@ -3882,6 +3898,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory-hub"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "blake3",
+ "chrono",
+ "jsonwebtoken 9.3.1",
+ "memory-core",
+ "memory-store",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
 name = "memory-import"
 version = "0.3.0"
 dependencies = [
@@ -3904,14 +3942,17 @@ version = "0.3.0"
 dependencies = [
  "age",
  "async-trait",
+ "axum",
  "blake3",
  "chrono",
  "flate2",
  "memory-core",
  "memory-extract",
+ "memory-hub",
  "memory-llm",
  "memory-retrieve",
  "memory-store",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tar",
@@ -3966,6 +4007,7 @@ dependencies = [
  "futures",
  "memory-core",
  "memory-extract",
+ "memory-hub",
  "memory-import",
  "memory-jobs",
  "memory-llm",
@@ -6851,7 +6893,7 @@ dependencies = [
  "hex",
  "http",
  "ipnet",
- "jsonwebtoken",
+ "jsonwebtoken 10.4.0",
  "md-5",
  "memchr",
  "mime",
@@ -7001,7 +7043,7 @@ dependencies = [
  "half",
  "hex",
  "http",
- "jsonwebtoken",
+ "jsonwebtoken 10.4.0",
  "lexicmp",
  "quick_cache",
  "rand 0.9.5",

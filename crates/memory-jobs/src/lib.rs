@@ -5,6 +5,9 @@
 pub mod archive;
 pub mod remap;
 pub mod repo_bundle;
+pub mod repo_hub;
+#[cfg(test)]
+mod repo_hub_tests;
 pub mod storage;
 pub mod sync;
 pub mod watch;
@@ -47,6 +50,9 @@ pub enum JobError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Invalid(String),
+    /// Galat hub tim; `retry` = sementara (jaringan, 5xx, 429), diulang lewat backoff antrean.
+    #[error("{msg}")]
+    Hub { msg: String, retry: bool },
 }
 
 pub type Result<T> = std::result::Result<T, JobError>;
@@ -161,6 +167,7 @@ impl Runtime {
             EXPORT => json!(archive::export(self, None).await?.display().to_string()),
             AUTO_REVIEW => json!(watch::auto_review(self, &s("subject")?).await?),
             repo_bundle::REPO_IMPORT | repo_bundle::REPO_EXPORT => repo_bundle::run_job(self, &job.kind, &job.payload).await?,
+            repo_hub::REPO_PUSH | repo_hub::REPO_PULL => repo_hub::run_job(self, &job.kind, &job.payload).await?,
             REVIEW => {
                 let d = match job.payload["decision"].as_str() {
                     Some("approve") => Decision::Approve,
@@ -477,7 +484,7 @@ impl Runtime {
             return;
         }
         *last = Some(std::time::Instant::now());
-        match repo_bundle::schedule_due(self).await {
+        match repo_hub::schedule_due(self).await {
             Ok(n) if n > 0 => tracing::info!(jobs = n, "memori repo bersama diantrekan"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "pemeriksaan memori repo bersama gagal"),

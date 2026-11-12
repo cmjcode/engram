@@ -83,11 +83,35 @@ observations = 30           # baris indeks observasi terbaru
 sessions = 3                # ringkasan sesi terakhir
 include_all_clients = true
 
-[repo_share]                 # memori tim lewat repo git (<repo>/.engram/); aktifkan per repo: `engram repo init`
-enabled = true              # false = tanpa impor/ekspor otomatis (perintah manual tetap jalan)
-auto_import = true          # gabungkan memori rekan saat sesi agent dimulai, setelah git pull, dan berkala
-auto_export = true          # tulis memori proyek perangkat ini ke .engram/members/<anggota>/ di repo yang aktif
-interval_minutes = 15       # pemeriksaan berkala repo yang dikenal (0 = hanya saat sesi/hook git)
+[repo_share]                 # memori tim lewat hub; per repo: `engram login` lalu `engram repo init` / `join`
+enabled = true              # false = tanpa pull/push otomatis (perintah manual tetap jalan)
+auto_import = true          # (auto_pull) tarik memori rekan saat sesi agent dimulai dan berkala
+auto_export = true          # (auto_push) kirim memori proyek perangkat ini saat sesi berakhir dan berkala
+interval_minutes = 15       # pemeriksaan berkala repo yang dikenal (0 = hanya saat sesi agent)
+# hub_url = "https://engram.tim.id"   # hub bawaan untuk `engram login` & `engram repo init`
+share_episodes = true       # ikut kirim judul + ringkasan episode proyek (tanpa teks mentah)
+legacy_import = true        # masih baca bundel .engram/members/ milik rekan yang belum migrasi
+
+# Mode server hub tim (`engram serve --hub` atau ENGRAM_HUB_ENABLED=1). Rahasia HANYA dari env.
+[hub]
+enabled = false
+# base_url = "https://engram.tim.id"        # URL publik (callback OAuth: <base_url>/hub/auth/callback/<provider>)
+name = "Engram Hub"
+jwt_secret_env = "ENGRAM_HUB_JWT_SECRET"    # isi env: openssl rand -hex 32
+# google_client_id = "...apps.googleusercontent.com"
+google_client_secret_env = "ENGRAM_HUB_GOOGLE_SECRET"
+# github_client_id = "Iv1...."
+github_client_secret_env = "ENGRAM_HUB_GITHUB_SECRET"
+access_minutes = 60
+refresh_days = 30
+require_github_verify = false   # bawaan repo baru: join key saja tidak cukup, wajib izin GitHub
+open_signup = true              # false = akun baru ditolak
+allowed_email_domains = []      # mis. ["tim.id"]; kosong = semua domain
+trust_proxy = false             # true bila di balik reverse proxy (X-Forwarded-For)
+max_records_per_push = 2000
+max_record_bytes = 65536
+max_records_per_member = 20000
+record_retention_days = 90      # record yang dicabut dihapus dari hub setelah N hari
 
 [schedule]
 consolidate_hours = 24
@@ -100,7 +124,8 @@ retry_failed_max = 20       # batas proses ulang otomatis per sumber
 
 [server]
 bind = "127.0.0.1:7878"
-token_env = "MEMORY_TOKEN"  # bila env ini diisi, API & MCP wajib Bearer token
+token_env = "MEMORY_TOKEN"  # bila env ini diisi, API & MCP wajib Bearer token (global: semua subjek)
+subject_tokens_env = "MEMORY_SUBJECT_TOKENS"  # token per subjek: "subjekA=tokenA,subjekB=tokenB" (isolasi tenant)
 max_upload_mb = 512
 
 [transcription]              # opsional: Whisper OpenAI-compatible untuk audio

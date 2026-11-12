@@ -75,6 +75,9 @@ server berjalan di 127.0.0.1.
 hanya `project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles` yang dimuat, sehingga konteks
 agent tidak terisi tool memori hidup (`family_tree`, `persona_context`, `memory_gaps`, `compact`, `list_subjects`).
 Antigravity dan Claude Code memakai profil `full`. Untuk stdio: `engram mcp --profile coding`.
+Profil `operon` (`?profile=operon`) untuk aplikasi multi-tenant yang memakai satu subjek per tenant: `recall`,
+`remember`, `who_is`, `timeline`, `principles`, `project_context`, `get_episodes` saja; gabungkan dengan token per
+subjek (`MEMORY_SUBJECT_TOKENS`, lihat di bawah).
 
 Lewat terminal (Antigravity, Gemini CLI, Claude Code, Cursor, Codex, Windsurf):
 
@@ -105,6 +108,12 @@ claude mcp add engram -- /path/ke/engram --config /path/ke/memory.toml mcp
 
 Atau lewat HTTP: `POST http://127.0.0.1:7878/mcp` (pakai header
 `Authorization: Bearer $MEMORY_TOKEN` bila token diset).
+
+**Token per subjek (isolasi tenant).** Selain token global, env `MEMORY_SUBJECT_TOKENS`
+(`server.subject_tokens_env`) berisi `subjekA=tokenA,subjekB=tokenB`. Token subjek hanya boleh menyentuh
+`/api/subjects/{s}/...` dengan `s` yang sama, `POST /api/subjects` untuk id yang sama, `/mcp` (argumen `subject`
+dipaksa ke subjek itu, `list_subjects` ditolak), serta review/sumber milik subjek itu; endpoint admin (settings,
+storage, update, services) dijawab `403`. Token global tetap bisa semua.
 
 Transport HTTP mengikuti Streamable HTTP tanpa sesi (spesifikasi MCP 2026-07-28; versi 2024-11-05 s/d
 2025-11-25 tetap dinegosiasikan). `GET /mcp` dengan `Accept: text/event-stream` membuka stream keep-alive.
@@ -255,78 +264,100 @@ komputer lain digabungkan per record:
 Kata sandi disimpan di `<vault>/sync.key` (atau env `ENGRAM_SYNC_PASSPHRASE`). Lupa kata sandi
 berarti salinan di Drive tidak bisa dibuka; data lokal tetap aman.
 
-## Memori tim lewat repositori git
+## Memori tim lewat hub
 
 Siapa pun yang punya akses ke sebuah repo dan memakai engram otomatis berbagi memori proyek itu:
-konvensi & jebakan, keputusan, dan fakta arsitektur. Hak akses mengikuti akses repo; tidak ada
-server atau akun tambahan.
+konvensi & jebakan, keputusan, fakta arsitektur, dan judul + ringkasan episode. Memori disimpan di
+**hub tim**, bukan di git. Di repo hanya ada satu berkas kecil, `.engram/repo.toml`, yang berubah
+hanya saat join key dirotasi.
 
-**Mengaktifkan (sekali per repo, oleh satu orang):**
+**1. Menjalankan hub (sekali per tim).** Hub adalah `engram serve --hub` biasa. Cara termudah:
+[docker/docker-compose.yml](../docker/docker-compose.yml) yang membangun image dari source dan bergabung ke network Docker nginx Anda, plus contoh blok server [docker/nginx-engram.conf](../docker/nginx-engram.conf).
+
+1. Buat OAuth app:
+   - Google Cloud Console, *Credentials*, *OAuth client ID* (Web), redirect
+     `https://<domain>/hub/auth/callback/google`.
+   - GitHub, *Settings*, *Developer settings*, *OAuth Apps*, callback
+     `https://<domain>/hub/auth/callback/github`.
+2. Salin `docker/hub.env.example` ke `docker/hub.env`, isi domain, `ENGRAM_HUB_JWT_SECRET`
+   (`openssl rand -hex 32`), client id dan secret.
+3. Isi `NGINX_NETWORK` dengan network container nginx (`docker network ls`), lalu
+   `docker compose -f docker/docker-compose.yml --env-file docker/hub.env up -d --build`.
+4. Salin `docker/nginx-engram.conf` ke conf.d nginx, ganti `server_name` dan path sertifikat,
+   lalu `nginx -t && nginx -s reload`.
+
+Halaman web hub ada di `https://<domain>/hub`: daftar repo, anggota & peran, aktivitas, pengaturan,
+rotasi join key, dan personal access token.
+
+**2. Menghubungkan repo (sekali per repo, oleh satu orang):**
 
 ```sh
+engram login --hub https://<domain>   # browser terbuka, pilih Google atau GitHub
 cd /path/ke/repo
-engram repo export --dry-run   # lihat dulu apa yang akan dibagikan
-engram repo init --hooks       # tulis .engram/, ekspor memori proyek, pasang git hook lokal
-git add .engram && git commit -m "engram: memori proyek bersama"
-git push
+engram repo push --dry-run            # (opsional) lihat dulu apa yang akan dibagikan
+engram repo init                      # buat repo di hub, tulis .engram/repo.toml, kirim memori
+git add .engram/repo.toml && git commit -m "engram: hubungkan memori tim ke hub" && git push
 ```
 
-Di UI: buka halaman proyek, panel **Memori tim lewat repo git**, tombol *Aktifkan*.
+Di UI lokal atau aplikasi desktop: halaman proyek, panel **Memori tim**, login lalu
+*Hubungkan ke hub tim*.
 
-**Anggota lain** cukup `git pull`. Saat sesi agent berikutnya dimulai di repo itu, engram
-menggabungkan memori rekan ke vault-nya dan, karena `.engram/config.toml` sudah ada di repo, ikut
-menulis memori proyeknya sendiri. Commit perubahan `.engram/` seperti berkas lain. Git hook bersifat
-lokal (tidak ikut di-clone); tiap anggota yang mau memasangnya menjalankan `engram repo hooks`.
-
-**Isi folder:**
-
-```text
-.engram/
-  config.toml           apa yang dibagikan (share, max_records, exclude); adanya berkas ini = repo aktif
-  manifest.json         format, versi, nama proyek
-  README.md             ringkasan untuk manusia (dibuat ulang)
-  members/<nama>-<hash>/
-    member.json         nama dari git config user.name, nama perangkat, hash isi (email tidak ditulis)
-    lessons/<id>.json   satu berkas per record
-    decisions/<id>.json
-    facts/<id>.json
-```
+**3. Anggota lain** cukup `git pull` dan `engram login` sekali. Sesi agent berikutnya di repo itu
+otomatis bergabung (join key dari `repo.toml`), menarik memori rekan, dan di akhir sesi mengirim
+memori proyeknya sendiri. Manual: `engram repo join`, `engram repo pull`, `engram repo push`.
 
 **Cara kerjanya:**
 
-- Database tetap SurrealDB embedded di vault masing-masing; `.engram/` hanya teks terdistilasi
-  tanpa embedding dan tanpa transkrip. Embedding record rekan dihitung lokal saat digabung.
-- Tiap perangkat hanya menulis folder `members/` miliknya, sehingga `git merge` tidak konflik.
-  Ekspor tanpa perubahan tidak menulis apa pun (diff kosong).
-- Impor tidak menghapus. Keputusan rekan menjadi episode bertipe keputusan, faktanya masuk ke
-  fakta proyek lewat rekonsiliasi biasa, dan pelajaran yang sama dengan milik sendiri dihitung
-  sebagai penguatan. Memori hasil impor tidak diekspor ulang.
-- Record yang dicabut penulisnya ditulis sebagai tombstone (`"status": "withdrawn"`); penerima
-  mengkarantina episodenya dan menutup faktanya dengan `valid_to` (riwayat tetap ada).
-- Pemicu otomatis: awal dan akhir sesi agent, git hook `post-merge`/`post-checkout` (gabung) dan
-  `pre-commit` (tulis lalu `git add .engram`), serta pemeriksaan berkala. Semuanya hanya
-  mengantre job; engram tidak pernah `git commit`.
-- Bila aplikasi atau `engram serve` sedang berjalan, perintah `engram repo ...` dikirim lewat
-  server sehingga tidak berebut kunci database.
+- Database tetap SurrealDB embedded di vault masing-masing; embedding record rekan dihitung lokal.
+- Hub menyimpan record per (repo, anggota, perangkat) dengan change log `seq`. Push hanya mengirim
+  record yang isinya berubah; pull menarik sejak cursor terakhir. Pencabutan (record yang hilang di
+  vault penulis, atau anggota yang keluar) mengalir sebagai perubahan: penerima mengkarantina
+  episodenya dan menutup faktanya dengan `valid_to`.
+- ID record diturunkan dari isinya (kunci judul pelajaran, situasi + keputusan, entitas + predikat
+  + objek fakta), sehingga kompaksi atau rekonsiliasi lokal tidak membuat record baru.
+- Keputusan rekan menjadi episode keputusan, faktanya masuk lewat rekonsiliasi biasa, pelajaran yang
+  sama dengan milik sendiri dihitung sebagai penguatan. Memori hasil impor tidak dikirim ulang.
+- Pemicu otomatis: awal sesi agent (pull), akhir sesi (push), dan pemeriksaan tiap 15 menit. Hub
+  tidak terjangkau = job diulang dengan backoff; belum login = dilewati dengan catatan di status.
 
-**Privasi.** Hanya memori yang tercatat untuk proyek itu yang diekspor, bukan fakta pribadi. Teks
-yang memuat rahasia atau blok `<private>` dilewati utuh, path absolut repo dan home dipendekkan, dan
-record yang memuat frasa di `exclude` pada `.engram/config.toml` tidak diekspor. Hapus jenis dari
-`share` untuk berhenti membagikannya.
+**Akses & keamanan.**
+
+- Peran: owner, maintainer (atur anggota, rotasi key, pengaturan), member (baca + kirim), reader.
+- `repo.toml` di repo = siapa pun yang bisa clone boleh bergabung. Untuk repo GitHub privat,
+  maintainer bisa menyalakan *Wajibkan pemeriksaan izin GitHub*; anggota lalu bergabung dengan
+  `engram repo join --github` (token `gh auth token` dipakai sekali, tidak disimpan hub).
+- Join key, refresh token, dan PAT disimpan di hub sebagai hash. Kredensial login lokal ada di
+  folder data engram (`hub.json`, mode 0600), dipakai bersama CLI, server lokal, dan aplikasi desktop.
+- Akun Google dan GitHub dengan email terverifikasi yang sama otomatis menjadi satu akun.
+- Hub tidak pernah menyimpan transkrip mentah, teks episode, embedding, atau daftar berkas.
+
+**Pindah dari bundel git lama (`.engram/members/`):**
+
+```sh
+engram login --hub https://<domain>
+engram repo migrate                   # kirim semua bundel anggota ke hub, hapus members/, cabut hook
+git rm -r --cached --ignore-unmatch .engram && git add .engram/repo.toml
+git commit -m "engram: pindahkan memori tim ke hub"
+```
+
+Selama masa transisi engram masih membaca bundel lama rekan yang belum migrasi (tanpa menulis ke
+repo). Matikan dengan `legacy_import = false`.
 
 **Pengaturan lokal** (`memory.toml`):
 
 ```toml
 [repo_share]
-enabled = true          # false = tanpa impor/ekspor otomatis (perintah manual tetap jalan)
-auto_import = true      # gabungkan memori rekan saat sesi dimulai, setelah pull, dan berkala
-auto_export = true      # tulis memori perangkat ini untuk repo yang sudah aktif
-interval_minutes = 15   # pemeriksaan berkala repo yang dikenal (0 = hanya saat sesi/hook)
+enabled = true          # false = tanpa pull/push otomatis (perintah manual tetap jalan)
+auto_import = true      # tarik memori rekan saat sesi dimulai dan berkala
+auto_export = true      # kirim memori perangkat ini saat sesi berakhir dan berkala
+interval_minutes = 15
+hub_url = "https://<domain>"   # hub bawaan untuk login & init
+share_episodes = true   # sertakan judul + ringkasan episode proyek
+legacy_import = true    # baca bundel .engram/members/ lama
 ```
 
-Status lokal (repo yang dikenal, record yang sudah digabung) ada di `<vault>/repo_share.json`.
-`engram repo status` menampilkan anggota, waktu impor/ekspor terakhir, dan hook terpasang;
-`engram repo hooks --remove` mencabut hook tanpa menyentuh isi hook milik Anda.
+**CI dan agent cloud.** Buat personal access token di halaman *Token akses* hub, lalu set
+`ENGRAM_HUB_URL` dan `ENGRAM_HUB_TOKEN`; `engram repo pull` tidak memerlukan browser.
 
 ## Kedaulatan data
 
@@ -404,4 +435,4 @@ untuk melihat blok yang akan disuntik; `ENGRAM_HOOK_DEBUG=1` membuat hook mencet
 - `engram import-claude-memory` (tanpa `--apply` hanya menampilkan) mengimpor auto-memory Claude Code
   langsung sebagai episode, tanpa LLM, karena isinya sudah terdistilasi.
 - Memori proyek bisa dibagikan ke tim lewat repo git: lihat
-  [Memori tim lewat repositori git](#memori-tim-lewat-repositori-git).
+  [Memori tim lewat hub](#memori-tim-lewat-hub).

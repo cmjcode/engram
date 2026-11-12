@@ -33,7 +33,8 @@ Codex, Cursor, Antigravity, Gemini CLI, Windsurf, atau VS Code.
 
 Kepatuhan MCP: Streamable HTTP tanpa sesi (spesifikasi 2026-07-28; klien 2024-11-05 s/d 2025-11-25 tetap diterima),
 `tools/list` dengan `title`, `annotations` (`readOnlyHint` dkk.) dan `outputSchema` untuk tiap tool, `structuredContent`
-pada hasil, plus profil tool `coding` agar sesi koding tidak dipenuhi tool memori hidup.
+pada hasil, plus profil tool `coding` agar sesi koding tidak dipenuhi tool memori hidup dan profil `operon` untuk
+lapisan memori multi-tenant (satu subjek per tenant, token per subjek).
 
 ## Instalasi
 
@@ -93,7 +94,7 @@ sama lewat installer bawaan `engram` (`crates/memory-server/src/install.rs`, jug
 
 Apa saja yang dipasang oleh `scripts/install-mcp.sh`:
 
-1. **Server MCP (`engram`)**: Menyediakan tool `project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles`, `persona_context`, `family_tree`, `memory_gaps`, `list_subjects`, dan `compact` lewat Streamable HTTP (`http://127.0.0.1:7878/mcp`) dengan token tetap `MEMORY_TOKEN` (`LaunchAgent` `id.engram.ai.token`). Tambahkan `?profile=coding` (atau `engram mcp --profile coding` untuk stdio) agar hanya tujuh tool sesi koding yang dimuat: `project_context`, `recall`, `get_episodes`, `remember`, `who_is`, `timeline`, `principles`. Codex memakai `~/.codex/config.toml` (`[mcp_servers.engram]`), Windsurf `~/.codeium/windsurf/mcp_config.json`.
+1. **Server MCP (`engram`)**: Menyediakan tool `project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles`, `persona_context`, `family_tree`, `memory_gaps`, `list_subjects`, dan `compact` lewat Streamable HTTP (`http://127.0.0.1:7878/mcp`) dengan token tetap `MEMORY_TOKEN` (`LaunchAgent` `id.engram.ai.token`). Tambahkan `?profile=coding` (atau `engram mcp --profile coding` untuk stdio) agar hanya tujuh tool sesi koding yang dimuat: `project_context`, `recall`, `get_episodes`, `remember`, `who_is`, `timeline`, `principles`. Profil `operon` (`?profile=operon` / `engram mcp --profile operon`) ditujukan untuk aplikasi multi-tenant seperti OPERON yang memakai satu subjek engram per tenant: hanya `recall`, `remember`, `who_is`, `timeline`, `principles`, `project_context`, `get_episodes` (tanpa `family_tree`, `compact`, `memory_gaps`, `list_subjects`, `persona_context`); padukan dengan token per subjek (lihat [Keamanan](#keamanan)). Codex memakai `~/.codex/config.toml` (`[mcp_servers.engram]`), Windsurf `~/.codeium/windsurf/mcp_config.json`.
 2. **Global Rule (`GEMINI.md`, `CLAUDE.md`, `AGENTS.md`, `global_rules.md`)**: Menginstruksikan agent di `~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, `~/.claude/CLAUDE.md` (rule penuh), serta `~/.codex/AGENTS.md` dan `~/.codeium/windsurf/memories/global_rules.md` (rule ringkas profil coding) agar proaktif memanggil `project_context`/`recall` di awal tugas dan `remember` setelah keputusan penting.
 3. **Hook Otomatis (`~/.local/bin/engram-auto-remember`)**:
    * Dipasang pada event `Stop` di Antigravity (`~/.gemini/config/hooks.json`) dan Claude Code (`~/.claude/settings.json`), serta `AfterAgent` di Gemini CLI (`~/.gemini/settings.json`).
@@ -184,33 +185,58 @@ Perintah terkait:
 
 ```sh
 engram import-claude-memory --all --apply   # auto-memory Claude Code (~/.claude/projects/*/memory/*.md) -> episode, tanpa LLM
-engram repo init [--hooks]                  # aktifkan memori tim lewat repo ini (.engram/), lalu commit foldernya
-engram repo status                          # anggota, impor/ekspor terakhir, git hook terpasang
-engram repo export [--dry-run]              # tulis memori proyek perangkat ini ke .engram/members/<anggota>/
-engram repo import                          # gabungkan memori rekan tim ke vault ini (tidak menghapus)
+engram login --hub https://engram.tim.id     # login hub tim lewat browser (Google / GitHub)
+engram repo init                            # hubungkan repo ini ke hub; commit .engram/repo.toml
+engram repo join [--github]                 # bergabung ke repo yang sudah punya .engram/repo.toml
+engram repo push | pull | status            # kirim / tarik / lihat status (otomatis tiap sesi & 15 menit)
+engram repo migrate                         # pindahkan bundel .engram/members/ lama ke hub, bersihkan repo
 ```
 
-### Memori tim lewat repositori git
+### Memori tim lewat hub
 
 Siapa pun yang punya akses ke repo otomatis berbagi memori proyeknya: konvensi & jebakan, keputusan,
-dan fakta arsitektur. Tidak perlu server, akun, atau biaya tambahan; hak akses mengikuti akses repo.
+fakta arsitektur, dan ringkasan episode. Memori disimpan di **hub tim** (`engram serve --hub`, login
+Google atau GitHub), bukan di git: satu-satunya berkas di repo adalah `.engram/repo.toml`, jadi
+`git status` tetap bersih.
 
-- **Penyimpanan tetap SurrealDB embedded** di vault tiap anggota, jadi kecepatan `recall` tidak berubah.
-  Folder `.engram/` di repo hanya jalur kirim-terima berisi teks terdistilasi (tanpa embedding,
-  tanpa transkrip), biasanya puluhan KB per proyek.
-- **Tanpa konflik merge**: tiap anggota per perangkat hanya menulis `.engram/members/<nama>-<hash>/`,
-  satu berkas JSON per record.
-- **Otomatis**: saat sesi agent dimulai engram menggabungkan perubahan `.engram/` (misalnya setelah
-  `git pull`) dan menulis memori terbaru; `engram repo hooks` menambah git hook `post-merge`,
-  `post-checkout`, dan `pre-commit`. engram tidak pernah melakukan `git commit` sendiri.
-- **Privasi**: hanya memori milik proyek itu; teks yang memuat rahasia atau blok `<private>`
-  dilewati, dan frasa di `exclude` pada `.engram/config.toml` tidak diekspor. Cek dulu dengan
-  `engram repo export --dry-run`.
+- **Akses mengikuti repo**: `repo.toml` memuat join key; siapa pun yang bisa clone repo dan login ke
+  hub otomatis bergabung saat sesi agent pertama. Opsional: wajib verifikasi izin GitHub, undang/cabut
+  anggota, peran owner / maintainer / member / reader, rotasi join key.
+- **Inkremental**: hub menyimpan change log per repo (`seq`); tiap perangkat hanya mengirim record
+  yang berubah dan menarik sejak cursor terakhir. ID record diturunkan dari isinya, jadi supersede
+  fakta atau kompaksi episode tidak menimbulkan record baru.
+- **Vault tetap lokal**: recall tetap di SurrealDB embedded masing-masing; hub tidak pernah menyimpan
+  transkrip mentah maupun embedding. Rahasia dan blok `<private>` disaring sebelum dikirim, dan hub
+  menolak record yang masih memuat penanda redaksi.
+- **CI & agent cloud**: personal access token (`ENGRAM_HUB_URL` + `ENGRAM_HUB_TOKEN`).
 
-Panduan lengkap ada di [docs/PANDUAN.md](docs/PANDUAN.md#memori-tim-lewat-repositori-git).
+Menjalankan hub di balik nginx yang sudah ada: [docker/docker-compose.yml](docker/docker-compose.yml) (dibangun dari source) dan [docker/nginx-engram.conf](docker/nginx-engram.conf).
+Panduan lengkap ada di [docs/PANDUAN.md](docs/PANDUAN.md#memori-tim-lewat-hub).
 
 Tampilan **Sesi & pelajaran** di UI memperlihatkan sesi, observasi, dan konvensi/koreksi/jebakan per proyek.
 Pelajaran yang berulang di ≥ 2 proyek diangkat `engram distill` menjadi kandidat prinsip kerja (menunggu konfirmasi di Review).
+
+## Keamanan
+
+- Server hanya mendengarkan di `127.0.0.1:7878`. Bila env `MEMORY_TOKEN` (nama env diatur `server.token_env`) diisi,
+  semua `/api` dan `/mcp` wajib `Authorization: Bearer <token>`. Token ini **global**: boleh menyentuh semua subjek
+  dan semua endpoint.
+- **Token per subjek (isolasi tenant).** Env `MEMORY_SUBJECT_TOKENS` (nama env diatur `server.subject_tokens_env`)
+  berisi `subjekA=tokenA,subjekB=tokenB`. Request dengan token subjek hanya boleh menyentuh subjek itu:
+  `/api/subjects/{s}/...` dengan `s` yang sama, `POST /api/subjects` hanya untuk id yang sama (`GET` hanya
+  memperlihatkan subjeknya), `/mcp` dengan argumen `subject` yang dipaksa ke subjek itu (`list_subjects` ditolak),
+  serta `/api/reviews/{id}` dan `/api/sources/{id}` milik subjek itu. Endpoint lain (settings, storage, update,
+  services, pick-folder, hooks) dijawab `403`. Token global tetap berlaku untuk semua. Contoh untuk dua tenant OPERON:
+
+  ```bash
+  MEMORY_TOKEN="$(openssl rand -hex 24)" \
+  MEMORY_SUBJECT_TOKENS="tenant_a=$(openssl rand -hex 24),tenant_b=$(openssl rand -hex 24)" \
+  engram serve
+  # agen tenant_a memakai POST /mcp?profile=operon dengan Bearer token tenant_a
+  ```
+
+- Rahasia (API key, token, PEM, kredensial URL) disamarkan sebelum masuk vault (`[privacy]`), sinkronisasi Drive
+  dienkripsi `age`. Kebijakan lengkap: [SECURITY.md](SECURITY.md).
 
 ## Pengembangan
 

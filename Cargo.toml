@@ -17,6 +17,7 @@ memory-retrieve = { path = "crates/memory-retrieve" }
 memory-jobs = { path = "crates/memory-jobs" }
 memory-import = { path = "crates/memory-import" }
 memory-server = { path = "crates/memory-server" }
+memory-hub = { path = "crates/memory-hub", default-features = false }
 
 anyhow = "1"
 thiserror = "2"
@@ -45,6 +46,7 @@ age = "0.11"
 tar = "0.4"
 flate2 = "1"
 rand = "0.9"
+jsonwebtoken = "9"
 
 [profile.dev]
 debug = "line-tables-only"
