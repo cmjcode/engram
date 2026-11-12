@@ -227,6 +227,34 @@ pub async fn restore(rt: &Runtime, archive: &Path, identity_file: Option<&Path>)
     Ok(RestoreReport { rows, source_files: files, reembedded })
 }
 
+/// Hasil migrasi vault v0.3 (RocksDB) ke v0.4 (SurrealKV).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MigrateReport {
+    #[serde(flatten)]
+    pub restore: RestoreReport,
+    /// Folder RocksDB lama yang diarsipkan (`db-rocksdb-v3.bak/`), bila ada.
+    pub archived_legacy_db: Option<PathBuf>,
+}
+
+/// Migrasi vault v0.3: isi database SurrealKV (`db-skv/`) dari backup yang dibuat
+/// `engram backup` versi 0.3, hitung ulang embedding, lalu arsipkan `db/` lama.
+/// `rt` dibuka dengan [`Runtime::open_for_migration`] di vault yang sama.
+pub async fn migrate_v3(rt: &Runtime, archive: &Path, identity_file: Option<&Path>) -> Result<MigrateReport> {
+    let restore = restore(rt, archive, identity_file).await?;
+    let legacy = rt.vault.legacy_db_dir();
+    let archived_legacy_db = if legacy.is_dir() {
+        let mut target = rt.vault.root().join("db-rocksdb-v3.bak");
+        if target.exists() {
+            target = rt.vault.root().join(format!("db-rocksdb-v3.bak-{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ")));
+        }
+        std::fs::rename(&legacy, &target)?;
+        Some(target)
+    } else {
+        None
+    };
+    Ok(MigrateReport { restore, archived_legacy_db })
+}
+
 fn walk(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir)? {

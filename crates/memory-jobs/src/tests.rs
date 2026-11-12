@@ -374,3 +374,50 @@ async fn remap_projects_dry_run_then_apply() {
     assert_eq!(remap_projects(&r, &clear, true).await.unwrap().changes.len(), 1);
     assert_eq!(r.store.get_source(&out.source.id).await.unwrap().unwrap().project, None);
 }
+
+#[tokio::test]
+async fn v3_rocksdb_vault_is_refused_then_migrated_from_backup() {
+    // Vault sumber (v0.4) dengan satu subjek, lalu backup logis (format yang sama dengan v0.3).
+    let src = tempfile::tempdir().unwrap();
+    let r = rt(src.path()).await;
+    r.store.upsert("subject", "uji", &json!({"name": "Subjek Uji", "created_at": "2026-11-12T00:00:00Z"}), None).await.unwrap();
+    let backup = crate::archive::backup(&r, &src.path().join("v3.tar.gz"), None).await.unwrap();
+
+    // Vault tujuan berisi RocksDB v0.3 di db/ (cukup berkas CURRENT).
+    let dst = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dst.path().join("db")).unwrap();
+    std::fs::write(dst.path().join("db/CURRENT"), "MANIFEST-000001\n").unwrap();
+    let mut cfg = MemoryConfig::for_tests(DIM);
+    cfg.vault.path = dst.path().to_path_buf();
+    cfg.vault.engine = "surrealkv".into();
+    let mk = || (Arc::new(ScriptedLlm::new(llm)) as Arc<dyn memory_llm::LlmProvider>, Arc::new(HashEmbedder::new(DIM)) as Arc<dyn memory_llm::Embedder>);
+
+    let (l, e) = mk();
+    let err = Runtime::open_with(cfg.clone(), l, e).await.err().expect("vault v0.3 harus ditolak").to_string();
+    assert!(err.contains("migrate-v3"), "{err}");
+
+    let (l, e) = mk();
+    let m = Runtime::open_for_migration_with(cfg.clone(), l, e).await.unwrap();
+    let rep = crate::archive::migrate_v3(&m, &backup, None).await.unwrap();
+    assert!(rep.restore.rows >= 1);
+    assert!(rep.archived_legacy_db.as_ref().is_some_and(|p| p.join("CURRENT").exists()));
+    assert!(!dst.path().join("db").exists());
+    assert!(m.store.list_subjects().await.unwrap().iter().any(|s| s.id == "uji"));
+    drop(m);
+
+    // Setelah migrasi vault terbuka normal; "rocksdb" lama diterima sebagai alias.
+    cfg.vault.engine = "rocksdb".into();
+    let mut opened = None;
+    for _ in 0..50 {
+        let (l, e) = mk();
+        match Runtime::open_with(cfg.clone(), l, e).await {
+            Ok(r) => {
+                opened = Some(r);
+                break;
+            }
+            Err(e) if e.to_string().to_lowercase().contains("lock") => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert!(opened.unwrap().store.list_subjects().await.unwrap().iter().any(|s| s.id == "uji"));
+}

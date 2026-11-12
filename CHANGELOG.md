@@ -5,7 +5,23 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
+### Breaking
+- **SurrealDB 4 + SurrealKV.** Storage moves from SurrealDB 3.3 (RocksDB) to SurrealDB 4.0 with the pure-Rust
+  SurrealKV engine (RocksDB was removed in SurrealDB 4). The database now lives in `<vault>/db-skv/`; a vault
+  that still has a v0.3 RocksDB `db/` refuses to open with a message explaining the migration.
+  `vault.engine = "rocksdb"` is accepted as an alias of `"surrealkv"` with a warning.
+- **Vault migration from v0.3:** with engram 0.3 run `engram backup vault-v3.tar.gz`, then with engram 0.4
+  run `engram vault migrate-v3 vault-v3.tar.gz`. Records are restored, embeddings recomputed, and the old
+  `db/` is renamed to `db-rocksdb-v3.bak/` (delete it once everything works). Hub tables (`hub_*`) are not part
+  of the backup; a hub server re-creates them empty.
+
 ### Added
+- Embedding engram in another Rust application: `memory_store::Store::from_db`, `memory_server::AppState::embedded`
+  (no bearer token, for in-process calls of `memory_server::router`), and `memory-server` features `ui` (web UI)
+  and `hub` (team hub), both on by default. `default-features = false` keeps only `/api/*`, `/mcp` and `/api/health`.
+- Dual licence: AGPL-3.0-or-later, or the internal commercial licence in `LICENSE-COMMERCIAL`.
 - **Team hub** (`engram serve --hub`, new crate `memory-hub`): shared project memory moves from the git
   repository to a server. Sign in with Google or GitHub (same verified email = one account), JWT access tokens
   with rotating refresh tokens, personal access tokens for CI (`ENGRAM_HUB_URL` + `ENGRAM_HUB_TOKEN`), roles
@@ -20,6 +36,7 @@ versions follow SemVer (pre-1.0: minor bumps may break the MCP surface).
 - Shared memory now includes project episode titles and summaries (`[repo_share] share_episodes`).
 
 ### Changed
+- Dependencies aligned with OPERON: `reqwest` 0.13, `tower-http` 0.7.
 - Team memory no longer writes `.engram/members/`, `README.md` or git hooks: the only committed file is
   `.engram/repo.toml`, so `git status` stays clean. `engram repo migrate` uploads existing bundles to the hub,
   removes them and the engram git hooks. Old bundles from teammates who have not migrated are still read

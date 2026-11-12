@@ -6,7 +6,7 @@ path = "vault"              # satu folder = seluruh memori (db, sumber asli, inb
                             # pindah: `engram vault move <folder>`; JANGAN di folder Google Drive
                             # sync antar komputer: `engram sync setup --dir <folder Drive>` (disimpan di <vault>/sync.json)
 default_subject = "bapak"
-engine = "rocksdb"          # "rocksdb" (produksi) | "mem" (uji)
+engine = "surrealkv"        # "surrealkv" (produksi, v0.4+) | "mem" (uji); "rocksdb" lama = alias surrealkv
 
 [llm]                        # endpoint OpenAI-compatible (vLLM lokal)
 base_url = "http://localhost:5211/v1"

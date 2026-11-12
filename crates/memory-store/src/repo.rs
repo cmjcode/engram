@@ -114,7 +114,7 @@ impl Store {
     }
 
     pub async fn list_subjects(&self) -> Result<Vec<Subject>> {
-        self.rows_as("SELECT * FROM subject ORDER BY name;", binds! {}).await
+        self.rows_as("SELECT * FROM subject ORDER BY name, id;", binds! {}).await
     }
 
     // ----------------------------------------------------------------- source
@@ -139,7 +139,7 @@ impl Store {
             None => ("", String::new()),
         };
         self.rows_as(
-            &format!("SELECT * FROM source WHERE subject = $s{cond} ORDER BY created_at DESC LIMIT {limit} START {offset};"),
+            &format!("SELECT * FROM source WHERE subject = $s{cond} ORDER BY created_at DESC, id LIMIT {limit} START {offset};"),
             binds! {"s" => subject, "st" => st},
         )
         .await
@@ -147,11 +147,11 @@ impl Store {
 
     /// Sumber berstatus gagal di semua subjek, terlama dulu.
     pub async fn failed_sources(&self, limit: usize) -> Result<Vec<Source>> {
-        self.rows_as(&format!("SELECT * FROM source WHERE status = 'failed' ORDER BY created_at ASC LIMIT {limit};"), binds! {}).await
+        self.rows_as(&format!("SELECT * FROM source WHERE status = 'failed' ORDER BY created_at ASC, id LIMIT {limit};"), binds! {}).await
     }
 
     pub async fn sources_for_batch(&self, batch_id: &str) -> Result<Vec<Source>> {
-        self.rows_as("SELECT * FROM source WHERE batch_id = $b ORDER BY created_at;", binds! {"b" => batch_id}).await
+        self.rows_as("SELECT * FROM source WHERE batch_id = $b ORDER BY created_at, id;", binds! {"b" => batch_id}).await
     }
 
     pub async fn set_source_status(&self, id: &str, status: SourceStatus, error: Option<String>) -> Result<()> {
@@ -170,7 +170,7 @@ impl Store {
     pub async fn stream_items(&self, subject: &str, only_open: bool, limit: usize) -> Result<Vec<StreamItem>> {
         let cond = if only_open { " AND (promoted_to = NONE OR promoted_to = NULL)" } else { "" };
         self.rows_as(
-            &format!("SELECT * FROM stream_item WHERE subject = $s{cond} ORDER BY created_at DESC LIMIT {limit};"),
+            &format!("SELECT * FROM stream_item WHERE subject = $s{cond} ORDER BY created_at DESC, id LIMIT {limit};"),
             binds! {"s" => subject},
         )
         .await
@@ -247,7 +247,8 @@ impl Store {
             b.insert("from".into(), json!(from));
         }
         let limit = if f.limit == 0 { 100 } else { f.limit };
-        let order = if f.newest_first { "created_at DESC" } else { "time_start ASC, created_at ASC" };
+        // `id` = pemutus seri: SurrealDB 4 tidak lagi menjamin urutan kunci untuk nilai ORDER BY yang sama.
+        let order = if f.newest_first { "created_at DESC, id" } else { "time_start ASC, created_at ASC, id" };
         self.rows_as(
             &format!("{EP} WHERE {cond} ORDER BY {order} LIMIT {limit} START {};", f.offset),
             b,
@@ -266,10 +267,10 @@ impl Store {
             b.insert("projs".into(), json!(projects));
         }
         let mut prev: Vec<Episode> = self
-            .rows_as(&format!("{EP} WHERE {cond} AND created_at <= $at AND id != type::record('episode', $aid) ORDER BY created_at DESC LIMIT {};", before.max(1)), b.clone())
+            .rows_as(&format!("{EP} WHERE {cond} AND created_at <= $at AND id != type::record('episode', $aid) ORDER BY created_at DESC, id LIMIT {};", before.max(1)), b.clone())
             .await?;
         let next: Vec<Episode> = self
-            .rows_as(&format!("{EP} WHERE {cond} AND created_at >= $at AND id != type::record('episode', $aid) ORDER BY created_at ASC LIMIT {};", after.max(1)), b)
+            .rows_as(&format!("{EP} WHERE {cond} AND created_at >= $at AND id != type::record('episode', $aid) ORDER BY created_at ASC, id LIMIT {};", after.max(1)), b)
             .await?;
         prev.reverse();
         prev.truncate(before);
@@ -287,7 +288,7 @@ impl Store {
         let rows: Vec<Episode> = self
             .rows_as(
                 &format!(
-                    "{EP} WHERE subject = $s AND status = 'active' AND (array::any(files_modified, |$f| string::ends_with($f, $tail)) OR array::any(files_read, |$f| string::ends_with($f, $tail))) ORDER BY created_at DESC LIMIT {};",
+                    "{EP} WHERE subject = $s AND status = 'active' AND (array::any(files_modified, |$f| string::ends_with($f, $tail)) OR array::any(files_read, |$f| string::ends_with($f, $tail))) ORDER BY created_at DESC, id LIMIT {};",
                     (limit * 3).max(10)
                 ),
                 binds! {"s" => subject, "tail" => tail},
@@ -316,7 +317,7 @@ impl Store {
             cond.push_str(" AND project IN $projs");
             b.insert("projs".into(), json!(projects));
         }
-        self.rows_as(&format!("SELECT * FROM session WHERE {cond} ORDER BY last_activity_at DESC LIMIT {limit};"), b).await
+        self.rows_as(&format!("SELECT * FROM session WHERE {cond} ORDER BY last_activity_at DESC, id LIMIT {limit};"), b).await
     }
 
     // ----------------------------------------------------------- project_meta
@@ -325,7 +326,7 @@ impl Store {
     }
 
     pub async fn list_project_meta(&self, subject: &str) -> Result<Vec<ProjectMeta>> {
-        self.rows_as("SELECT * FROM project_meta WHERE subject = $s ORDER BY project ASC;", binds! {"s" => subject}).await
+        self.rows_as("SELECT * FROM project_meta WHERE subject = $s ORDER BY project ASC, id;", binds! {"s" => subject}).await
     }
 
     /// Metadata proyek `name`: kunci persis lebih dulu, lalu varian (`BACKEND/api-x` ~ `api-x`).
@@ -404,7 +405,7 @@ impl Store {
             cond.push_str(" AND status = $st");
             b.insert("st".into(), json!(st));
         }
-        self.rows_as(&format!("SELECT * FROM lesson WHERE {cond} ORDER BY occurrences DESC, updated_at DESC LIMIT {limit};"), b).await
+        self.rows_as(&format!("SELECT * FROM lesson WHERE {cond} ORDER BY occurrences DESC, updated_at DESC, id LIMIT {limit};"), b).await
     }
 
     /// Judul & ringkasan episode aktif dari proyek-proyek `projects` (terbaru dulu), tanpa teks.
@@ -423,7 +424,7 @@ impl Store {
 
     pub async fn episodes_mentioning(&self, entity_id: &str, limit: usize) -> Result<Vec<Episode>> {
         self.rows_as(
-            &format!("{EP} WHERE entity_ids CONTAINS $e AND status != 'retelling' ORDER BY time_start ASC LIMIT {limit};"),
+            &format!("{EP} WHERE entity_ids CONTAINS $e AND status != 'retelling' ORDER BY time_start ASC, id LIMIT {limit};"),
             binds! {"e" => entity_id},
         )
         .await
@@ -435,7 +436,7 @@ impl Store {
             return Ok(vec![]);
         }
         self.rows_as(
-            &format!("{EP} WHERE entity_ids CONTAINSANY $eids AND status != 'retelling' ORDER BY time_start ASC LIMIT {limit};"),
+            &format!("{EP} WHERE entity_ids CONTAINSANY $eids AND status != 'retelling' ORDER BY time_start ASC, id LIMIT {limit};"),
             binds! {"eids" => entity_ids},
         )
         .await
@@ -561,7 +562,7 @@ impl Store {
             None => ("", String::new()),
         };
         self.rows_as(
-            &format!("{EN} WHERE subject = $s AND status != 'merged'{cond} ORDER BY mention_count DESC, name ASC LIMIT {limit} START {offset};"),
+            &format!("{EN} WHERE subject = $s AND status != 'merged'{cond} ORDER BY mention_count DESC, name ASC, id LIMIT {limit} START {offset};"),
             binds! {"s" => subject, "k" => k},
         )
         .await
@@ -586,7 +587,7 @@ impl Store {
     /// Semua fakta di mana entitas menjadi pelaku atau objek, urut waktu.
     pub async fn facts_for_entity(&self, entity_id: &str) -> Result<Vec<Fact>> {
         self.rows_as(
-            "SELECT * FROM fact WHERE (entity_id = $e OR object_entity = $e) AND status != 'rejected' ORDER BY valid_from ASC, observed_at ASC;",
+            "SELECT * FROM fact WHERE (entity_id = $e OR object_entity = $e) AND status != 'rejected' ORDER BY valid_from ASC, observed_at ASC, id;",
             binds! {"e" => entity_id},
         )
         .await
@@ -598,7 +599,7 @@ impl Store {
             return Ok(vec![]);
         }
         self.rows_as(
-            "SELECT * FROM fact WHERE (entity_id IN $eids OR object_entity IN $eids) AND status != 'rejected' ORDER BY valid_from ASC, observed_at ASC;",
+            "SELECT * FROM fact WHERE (entity_id IN $eids OR object_entity IN $eids) AND status != 'rejected' ORDER BY valid_from ASC, observed_at ASC, id;",
             binds! {"eids" => entity_ids},
         )
         .await
@@ -607,7 +608,7 @@ impl Store {
     /// Fakta aktif dengan (entity, category) yang sama: kandidat rekonsiliasi.
     pub async fn facts_in_category(&self, entity_id: &str, category: &str) -> Result<Vec<Fact>> {
         self.rows_as(
-            "SELECT * FROM fact WHERE entity_id = $e AND category = $c AND status IN ['active', 'conflict'] ORDER BY valid_from ASC;",
+            "SELECT * FROM fact WHERE entity_id = $e AND category = $c AND status IN ['active', 'conflict'] ORDER BY valid_from ASC, id;",
             binds! {"e" => entity_id, "c" => category},
         )
         .await
@@ -619,14 +620,14 @@ impl Store {
             None => ("", String::new()),
         };
         self.rows_as(
-            &format!("SELECT * FROM fact WHERE subject = $s{cond} ORDER BY created_at DESC LIMIT {limit};"),
+            &format!("SELECT * FROM fact WHERE subject = $s{cond} ORDER BY created_at DESC, id LIMIT {limit};"),
             binds! {"s" => subject, "st" => st},
         )
         .await
     }
 
     pub async fn facts_by_episode(&self, episode_id: &str) -> Result<Vec<Fact>> {
-        self.rows_as("SELECT * FROM fact WHERE evidence.episode_id CONTAINS $e;", binds! {"e" => episode_id}).await
+        self.rows_as("SELECT * FROM fact WHERE evidence.episode_id CONTAINS $e ORDER BY id;", binds! {"e" => episode_id}).await
     }
 
     /// Alihkan semua rujukan entitas `from` ke `into` (setelah merge disetujui).
@@ -651,18 +652,18 @@ impl Store {
     }
 
     pub async fn kin_for_subject(&self, subject: &str) -> Result<Vec<Kin>> {
-        self.rows_as("SELECT * FROM kin WHERE subject = $s;", binds! {"s" => subject}).await
+        self.rows_as("SELECT * FROM kin WHERE subject = $s ORDER BY id;", binds! {"s" => subject}).await
     }
 
     pub async fn kin_touching(&self, entity_id: &str) -> Result<Vec<Kin>> {
-        self.rows_as("SELECT * FROM kin WHERE from = $e OR to = $e;", binds! {"e" => entity_id}).await
+        self.rows_as("SELECT * FROM kin WHERE from = $e OR to = $e ORDER BY id;", binds! {"e" => entity_id}).await
     }
 
     pub async fn kin_touching_any(&self, entity_ids: &[String]) -> Result<Vec<Kin>> {
         if entity_ids.is_empty() {
             return Ok(vec![]);
         }
-        self.rows_as("SELECT * FROM kin WHERE from IN $eids OR to IN $eids;", binds! {"eids" => entity_ids}).await
+        self.rows_as("SELECT * FROM kin WHERE from IN $eids OR to IN $eids ORDER BY id;", binds! {"eids" => entity_ids}).await
     }
 
     // ------------------------------------------------------------- reflective
@@ -676,7 +677,7 @@ impl Store {
             None => (" AND status != 'rejected'", String::new()),
         };
         self.rows_as(
-            &format!("SELECT * FROM principle WHERE subject = $s{cond} ORDER BY confidence DESC;"),
+            &format!("SELECT * FROM principle WHERE subject = $s{cond} ORDER BY confidence DESC, id;"),
             binds! {"s" => subject, "st" => st},
         )
         .await
@@ -688,7 +689,7 @@ impl Store {
 
     pub async fn list_dispositions(&self, subject: &str) -> Result<Vec<Disposition>> {
         self.rows_as(
-            "SELECT * FROM disposition WHERE subject = $s AND status != 'rejected' ORDER BY label ASC, valid_from ASC;",
+            "SELECT * FROM disposition WHERE subject = $s AND status != 'rejected' ORDER BY label ASC, valid_from ASC, id;",
             binds! {"s" => subject},
         )
         .await
@@ -699,7 +700,7 @@ impl Store {
     }
 
     pub async fn list_life_phases(&self, subject: &str) -> Result<Vec<LifePhase>> {
-        self.rows_as("SELECT * FROM life_phase WHERE subject = $s ORDER BY start ASC;", binds! {"s" => subject}).await
+        self.rows_as("SELECT * FROM life_phase WHERE subject = $s ORDER BY start ASC, id;", binds! {"s" => subject}).await
     }
 
     pub async fn put_voice_profile(&self, v: &VoiceProfile) -> Result<()> {
@@ -725,7 +726,7 @@ impl Store {
             None => ("", String::new()),
         };
         self.rows_as(
-            &format!("SELECT * FROM review_item WHERE subject = $s AND status = $st{cond} ORDER BY created_at ASC LIMIT {limit};"),
+            &format!("SELECT * FROM review_item WHERE subject = $s AND status = $st{cond} ORDER BY created_at ASC, id LIMIT {limit};"),
             binds! {"s" => subject, "st" => status, "k" => k},
         )
         .await
@@ -734,7 +735,7 @@ impl Store {
     /// Keputusan review terbaru untuk dipakai sebagai contoh few-shot.
     pub async fn review_examples(&self, subject: &str, kind: ReviewKind, limit: usize) -> Result<Vec<ReviewItem>> {
         self.rows_as(
-            &format!("SELECT * FROM review_item WHERE subject = $s AND kind = $k AND status != 'open' ORDER BY resolved_at DESC LIMIT {limit};"),
+            &format!("SELECT * FROM review_item WHERE subject = $s AND kind = $k AND status != 'open' ORDER BY resolved_at DESC, id LIMIT {limit};"),
             binds! {"s" => subject, "k" => kind},
         )
         .await
@@ -751,7 +752,7 @@ impl Store {
 
     pub async fn list_batches(&self, subject: &str, limit: usize) -> Result<Vec<ImportBatch>> {
         self.rows_as(
-            &format!("SELECT * FROM import_batch WHERE subject = $s ORDER BY created_at DESC LIMIT {limit};"),
+            &format!("SELECT * FROM import_batch WHERE subject = $s ORDER BY created_at DESC, id LIMIT {limit};"),
             binds! {"s" => subject},
         )
         .await
@@ -841,11 +842,11 @@ impl Store {
             Some(s) => ("WHERE status = $st ", enum_str(&s)),
             None => ("", String::new()),
         };
-        self.rows_as(&format!("SELECT * FROM job {cond}ORDER BY created_at DESC LIMIT {limit};"), binds! {"st" => st}).await
+        self.rows_as(&format!("SELECT * FROM job {cond}ORDER BY created_at DESC, id LIMIT {limit};"), binds! {"st" => st}).await
     }
 
     pub async fn jobs_for_batch(&self, batch_id: &str) -> Result<Vec<Job>> {
-        self.rows_as("SELECT * FROM job WHERE batch_id = $b ORDER BY created_at;", binds! {"b" => batch_id}).await
+        self.rows_as("SELECT * FROM job WHERE batch_id = $b ORDER BY created_at, id;", binds! {"b" => batch_id}).await
     }
 
     /// Saat start: job `running` yang tertinggal (proses mati) diantre ulang.

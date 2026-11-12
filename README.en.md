@@ -158,7 +158,7 @@ Running a hub behind your existing nginx: [docker/docker-compose.yml](docker/doc
 
 ## Benchmark
 
-Numbers from `engram bench` (episode writes + vector/BM25 search latency on embedded SurrealDB RocksDB, random
+Numbers from `engram bench` (episode writes + vector/BM25 search latency on embedded SurrealDB SurrealKV (table below measured on v0.3/RocksDB; see CHANGELOG 0.4.0), random
 vectors, no LLM) on a development machine; rerun on yours with the same command:
 
 ```sh
@@ -224,6 +224,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CHANGELO
 The Indonesian [docs/PANDUAN.md](docs/PANDUAN.md) covers configuration (`memory.toml`), the desktop app and the CLI
 in depth.
 
+## Upgrading from 0.3 to 0.4
+
+engram 0.4 uses SurrealDB 4 with the SurrealKV engine; a 0.3 vault (RocksDB in `db/`) cannot be opened directly.
+
+```sh
+engram backup vault-v3.tar.gz          # with engram 0.3, before upgrading
+engram vault migrate-v3 vault-v3.tar.gz      # with engram 0.4 (needs the embedding server to re-embed)
+```
+
+The old database is moved to `db-rocksdb-v3.bak/`; delete it once everything works.
+
 ## License
 
-[GNU Affero General Public License v3.0 or later](LICENSE). Commercial licensing on request.
+Dual licence: [GNU Affero General Public License v3.0 or later](LICENSE), or the [internal commercial licence](LICENSE-COMMERCIAL). Commercial licensing for others on request.

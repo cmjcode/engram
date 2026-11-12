@@ -64,7 +64,7 @@ pub async fn create(State(st): State<HubState>, user: HubUser, Json(b): Json<Tok
 }
 
 pub async fn list(State(st): State<HubState>, user: HubUser) -> Api<Vec<TokenOutRow>> {
-    let rows: Vec<PatRow> = st.store.rows_as("SELECT * FROM hub_token WHERE user_id = $u ORDER BY created_at DESC;", binds! {"u" => user.id}).await?;
+    let rows: Vec<PatRow> = st.store.rows_as("SELECT * FROM hub_token WHERE user_id = $u ORDER BY created_at DESC, id;", binds! {"u" => user.id}).await?;
     Ok(Json(rows.iter().filter(|r| r.revoked_at.is_none()).map(row_out).collect()))
 }
 

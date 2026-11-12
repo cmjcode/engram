@@ -80,7 +80,7 @@ fn set_progress(app: &AppHandle, p: UpdateProgress) {
         };
         let _ = w.set_progress_bar(bar);
         if let Ok(json) = serde_json::to_string(&p) {
-            let _ = w.eval(&format!(
+            let _ = w.eval(format!(
                 "if (window.__onUpdateProgress) window.__onUpdateProgress({json});"
             ));
         }

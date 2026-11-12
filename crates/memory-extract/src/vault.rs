@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! vault/
-//!   db/        SurrealDB (RocksDB)
+//!   db-skv/    SurrealDB 4 (SurrealKV); `db/` = RocksDB vault v0.3 (dimigrasi, lalu jadi db-rocksdb-v3.bak/)
 //!   sources/   teks & file asli, dialamatkan dengan hash
 //!   inbox/     taruh file di sini untuk diimport otomatis
 //!   exports/   dump JSONL + markdown berversi
@@ -30,8 +30,20 @@ impl Vault {
     pub fn root(&self) -> &Path {
         &self.root
     }
+    /// Folder database SurrealKV (v0.4+).
     pub fn db_dir(&self) -> PathBuf {
+        self.root.join("db-skv")
+    }
+    /// Folder database RocksDB vault v0.3 (hanya dibaca untuk deteksi migrasi).
+    pub fn legacy_db_dir(&self) -> PathBuf {
         self.root.join("db")
+    }
+    /// `true` bila vault masih berformat v0.3 (RocksDB) dan belum dimigrasi.
+    pub fn needs_v3_migration(&self) -> bool {
+        let legacy = self.legacy_db_dir();
+        let has_legacy = legacy.join("CURRENT").exists() || std::fs::read_dir(&legacy).map(|mut d| d.next().is_some()).unwrap_or(false);
+        let has_new = std::fs::read_dir(self.db_dir()).map(|mut d| d.next().is_some()).unwrap_or(false);
+        has_legacy && !has_new
     }
     pub fn sources_dir(&self) -> PathBuf {
         self.root.join("sources")

@@ -13,6 +13,7 @@
 
 pub mod api;
 pub mod hooks;
+#[cfg(feature = "hub")]
 pub mod hub_local;
 pub mod install;
 pub mod mcp;
@@ -22,7 +23,9 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+#[cfg(feature = "ui")]
+use axum::http::HeaderValue;
+use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -51,8 +54,10 @@ pub struct AppState {
     pub hook_stats: Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     /// Mode hub tim (`engram serve --hub` / `[hub] enabled`): rute `/hub/*`, akun Google/GitHub,
     /// repo bersama. Kosong = server pribadi biasa.
+    #[cfg(feature = "hub")]
     pub hub: Option<memory_hub::HubState>,
     /// Alur login hub yang sedang ditunggu (UI lokal/desktop): tiket -> status.
+    #[cfg(feature = "hub")]
     pub hub_logins: Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
 }
 
@@ -164,7 +169,30 @@ impl AppState {
     pub fn new(rt: Runtime, importer: Importer) -> Self {
         let token = rt.cfg.server.token_env.as_deref().and_then(|k| std::env::var(k).ok()).filter(|t| !t.is_empty()).map(Arc::new);
         let subject_tokens = rt.cfg.server.subject_tokens_env.as_deref().and_then(|k| std::env::var(k).ok()).map(|v| parse_subject_tokens(&v)).unwrap_or_default();
-        Self { rt, importer, token, subject_tokens: Arc::new(subject_tokens), mcp_url: None, services: None, config_path: None, hook_stats: Arc::default(), hub: None, hub_logins: Arc::default() }
+        Self {
+            rt,
+            importer,
+            token,
+            subject_tokens: Arc::new(subject_tokens),
+            mcp_url: None,
+            services: None,
+            config_path: None,
+            hook_stats: Arc::default(),
+            #[cfg(feature = "hub")]
+            hub: None,
+            #[cfg(feature = "hub")]
+            hub_logins: Arc::default(),
+        }
+    }
+
+    /// State untuk aplikasi yang meng-embed engram dan memanggil [`router`]
+    /// in-process (tanpa socket): auth token dimatikan karena tidak ada
+    /// jaringan yang dilewati; isolasi subjek menjadi tanggung jawab pemanggil.
+    pub fn embedded(rt: Runtime, importer: Importer) -> Self {
+        let mut st = Self::new(rt, importer);
+        st.token = None;
+        st.subject_tokens = Arc::default();
+        st
     }
 
     pub fn default_subject(&self) -> String {
@@ -267,16 +295,26 @@ async fn auth(State(st): State<AppState>, mut req: Request, next: Next) -> Respo
     next.run(req).await
 }
 
+#[cfg(feature = "ui")]
 const INDEX_HTML: &str = include_str!("../ui/index.html");
+#[cfg(feature = "ui")]
 const APP_JS: &str = include_str!("../ui/app.js");
+#[cfg(feature = "ui")]
 const APP_CSS: &str = include_str!("../ui/app.css");
+#[cfg(feature = "ui")]
 const I18N_JS: &str = include_str!("../ui/i18n.js");
+#[cfg(feature = "ui")]
 const LIQUID_GLASS_JS: &str = include_str!("../ui/liquid-glass.js");
+#[cfg(feature = "ui")]
 const GRAPH_JS: &str = include_str!("../ui/graph.js");
+#[cfg(feature = "ui")]
 const HUB_JS: &str = include_str!("../ui/hub.js");
+#[cfg(all(feature = "ui", feature = "hub"))]
 const HUB_HTML: &str = include_str!("../ui/hub.html");
+#[cfg(feature = "ui")]
 const LOGO_PNG: &[u8] = include_bytes!("../ui/logo.png");
 
+#[cfg(feature = "ui")]
 fn asset(body: &'static str, ctype: &'static str) -> Response {
     let mut r = body.into_response();
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(ctype));
@@ -286,13 +324,17 @@ fn asset(body: &'static str, ctype: &'static str) -> Response {
 
 pub fn router(state: AppState) -> Router {
     let max = state.rt.cfg.server.max_upload_mb * 1024 * 1024;
-    let protected = api::routes()
-        .merge(hooks::routes())
-        .merge(hub_local::routes())
+    let protected = api::routes().merge(hooks::routes());
+    #[cfg(feature = "hub")]
+    let protected = protected.merge(hub_local::routes());
+    let protected = protected
         .route("/mcp", post(mcp::http_handler).get(mcp::http_get))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(axum::extract::DefaultBodyLimit::max(max));
     let r: Router<AppState> = Router::new()
+        .route("/api/health", get(|| async { axum::Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})) }));
+    #[cfg(feature = "ui")]
+    let r = r
         .route("/", get(|| async { asset(INDEX_HTML, "text/html; charset=utf-8") }))
         .route("/app.js", get(|| async { asset(APP_JS, "text/javascript; charset=utf-8") }))
         .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8") }))
@@ -303,18 +345,29 @@ pub fn router(state: AppState) -> Router {
             "/logo.png",
             get(|| async { ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=86400")], LOGO_PNG) }),
         )
-        .route("/api/health", get(|| async { axum::Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})) }))
-        .route("/hub.js", get(|| async { asset(HUB_JS, "text/javascript; charset=utf-8") }))
-        .merge(protected);
+        .route("/hub.js", get(|| async { asset(HUB_JS, "text/javascript; charset=utf-8") }));
+    let r = r.merge(protected);
+    #[cfg(feature = "hub")]
     let r = match state.hub.clone() {
         // Rute hub di luar middleware `MEMORY_TOKEN`: tiap handler memeriksa JWT/PAT sendiri.
-        Some(hub) => r.nest("/hub", memory_hub::router(hub, HUB_HTML)),
+        Some(hub) => r.nest("/hub", memory_hub::router(hub, hub_html())),
         None => r,
     };
     r.with_state(state)
 }
 
+#[cfg(all(feature = "hub", feature = "ui"))]
+fn hub_html() -> &'static str {
+    HUB_HTML
+}
+
+#[cfg(all(feature = "hub", not(feature = "ui")))]
+fn hub_html() -> &'static str {
+    "<!doctype html><title>engram hub</title><p>UI hub tidak dibangun (fitur `ui` mati).</p>"
+}
+
 /// Hub tim di atas store vault ini (tabel `hub_*`, migrasi sendiri). Rahasia dari env.
+#[cfg(feature = "hub")]
 pub async fn hub_state(rt: &Runtime, cfg: memory_core::config::HubConfig) -> Result<memory_hub::HubState, memory_hub::server::HubError> {
     memory_hub::HubState::init(rt.store.clone(), cfg).await
 }

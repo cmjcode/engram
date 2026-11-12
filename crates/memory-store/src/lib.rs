@@ -1,5 +1,6 @@
-//! Lapisan penyimpanan di atas SurrealDB embedded (RocksDB untuk produksi,
-//! memori untuk uji).
+//! Lapisan penyimpanan di atas SurrealDB 4 embedded (SurrealKV untuk produksi,
+//! memori untuk uji). Sejak v0.4 RocksDB tidak didukung (dihapus di SurrealDB 4);
+//! vault v0.3 dimigrasi lewat `engram backup` (v0.3) lalu `engram vault migrate-v3`.
 //!
 //! Semua record disimpan sebagai dokumen JSON dengan ID ULID sebagai kunci
 //! record. Relasi (fakta, kekerabatan, sebutan entitas) disimpan sebagai field
@@ -18,7 +19,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use surrealdb::Surreal;
-use surrealdb::engine::local::{Db, Mem, RocksDb};
+use surrealdb::engine::local::{Db, Mem, SurrealKv};
 
 use memory_core::config::IndexConfig;
 
@@ -97,16 +98,23 @@ pub struct Store {
 }
 
 impl Store {
-    /// Buka database persisten RocksDB di `dir`.
+    /// Buka database persisten SurrealKV di `dir`.
     pub async fn open(dir: &Path, dim: usize, index: &IndexConfig) -> Result<Self> {
         std::fs::create_dir_all(dir).map_err(|e| StoreError::Invalid(e.to_string()))?;
-        let db = Surreal::new::<RocksDb>(dir.to_string_lossy().as_ref()).await?;
+        let db = Surreal::new::<SurrealKv>(dir.to_string_lossy().as_ref()).await?;
         Self::init(db, dim, index).await
     }
 
     /// Database in-memory (uji).
     pub async fn memory(dim: usize, index: &IndexConfig) -> Result<Self> {
         let db = Surreal::new::<Mem>(()).await?;
+        Self::init(db, dim, index).await
+    }
+
+    /// Bangun store di atas koneksi SurrealDB yang sudah dibuka pemanggil
+    /// (aplikasi yang meng-embed engram). Namespace/database `memory`/`main`
+    /// dipilih pada handle ini, jadi jangan berbagi handle dengan pemakai lain.
+    pub async fn from_db(db: Surreal<Db>, dim: usize, index: &IndexConfig) -> Result<Self> {
         Self::init(db, dim, index).await
     }
 
@@ -264,7 +272,7 @@ impl Store {
 
     /// Buka vault yang dimensinya berbeda tanpa validasi (hanya untuk reembed).
     pub async fn open_for_reembed(dir: &Path, dim: usize, index: &IndexConfig) -> Result<Self> {
-        let db = Surreal::new::<RocksDb>(dir.to_string_lossy().as_ref()).await?;
+        let db = Surreal::new::<SurrealKv>(dir.to_string_lossy().as_ref()).await?;
         db.use_ns(NAMESPACE).use_db(DATABASE).await?;
         Ok(Self { db, dim, index: index.clone() })
     }

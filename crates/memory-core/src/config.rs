@@ -32,13 +32,13 @@ pub struct VaultConfig {
     pub path: PathBuf,
     /// Subjek default bila perintah tidak menyebut `--subject`.
     pub default_subject: String,
-    /// Backend KV: "rocksdb" (default) atau "mem" (uji).
+    /// Backend KV: "surrealkv" (default) atau "mem" (uji). "rocksdb" (v0.3) = alias surrealkv.
     pub engine: String,
 }
 
 impl Default for VaultConfig {
     fn default() -> Self {
-        Self { path: PathBuf::from("vault"), default_subject: "default".into(), engine: "rocksdb".into() }
+        Self { path: PathBuf::from("vault"), default_subject: "default".into(), engine: "surrealkv".into() }
     }
 }
 

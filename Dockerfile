@@ -4,7 +4,7 @@
 #   docker run -i --rm -v engram-data:/data ghcr.io/cmjcode/engram mcp --profile coding   # stdio
 #   Hub tim (login Google/GitHub, memori repo bersama): lihat docker/docker-compose.yml + docker/nginx-engram.conf
 FROM rust:1-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev \
  && apt-get clean
 WORKDIR /src
 COPY . .

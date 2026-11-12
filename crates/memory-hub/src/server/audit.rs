@@ -27,5 +27,5 @@ pub async fn log(st: &HubState, actor: &str, actor_name: &str, repo_id: Option<&
 
 pub async fn list(st: &HubState, repo_id: &str, limit: usize) -> Result<Vec<AuditRow>> {
     let limit = limit.clamp(1, 500);
-    Ok(st.store.rows_as(&format!("SELECT * FROM hub_audit WHERE repo_id = $r ORDER BY at DESC LIMIT {limit};"), binds! {"r" => repo_id}).await?)
+    Ok(st.store.rows_as(&format!("SELECT * FROM hub_audit WHERE repo_id = $r ORDER BY at DESC, id LIMIT {limit};"), binds! {"r" => repo_id}).await?)
 }

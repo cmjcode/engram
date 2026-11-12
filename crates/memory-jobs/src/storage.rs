@@ -12,10 +12,11 @@ pub const VAULT_DIR_NAME: &str = "engram-vault";
 
 /// Folder ini berisi vault engram (ada database-nya).
 pub fn is_vault(dir: &Path) -> bool {
-    dir.join("db").is_dir()
+    // `db-skv/` = vault v0.4 (SurrealKV); `db/` = vault v0.3 (RocksDB) yang belum dimigrasi.
+    dir.join("db-skv").is_dir() || dir.join("db").is_dir()
 }
 
-/// Folder yang disinkron layanan cloud. Database RocksDB rusak bila disinkron
+/// Folder yang disinkron layanan cloud. Database embedded rusak bila disinkron
 /// berkas-per-berkas (salinan setengah jadi, dua komputer menulis bersamaan).
 pub fn looks_like_cloud_folder(path: &Path) -> bool {
     // Pisah manual agar path gaya Windows juga dikenali di macOS/Linux (dan sebaliknya).
