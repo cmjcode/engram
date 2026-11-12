@@ -181,7 +181,7 @@ pub async fn me(State(st): State<HubState>, user: HubUser) -> Api<MeOut> {
 
 /// Keanggotaan aktif seorang pengguna di semua repo.
 pub(crate) async fn memberships_of(st: &HubState, user_id: &str) -> Result<Vec<MemberRow>> {
-    let rows: Vec<MemberRow> = st.store.rows_as("SELECT * FROM hub_member WHERE user_id = $u ORDER BY created_at ASC;", memory_store::binds! {"u" => user_id}).await?;
+    let rows: Vec<MemberRow> = st.store.rows_as("SELECT * FROM hub_member WHERE user_id = $u ORDER BY created_at ASC, id;", memory_store::binds! {"u" => user_id}).await?;
     Ok(rows.into_iter().filter(|m| m.revoked_at.is_none()).collect())
 }
 

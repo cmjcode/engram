@@ -50,7 +50,7 @@ pub async fn load_repo(st: &HubState, repo_id: &str) -> Result<RepoRow> {
 }
 
 pub async fn members_of(st: &HubState, repo_id: &str) -> Result<Vec<MemberRow>> {
-    let rows: Vec<MemberRow> = st.store.rows_as("SELECT * FROM hub_member WHERE repo_id = $r ORDER BY created_at ASC;", binds! {"r" => repo_id}).await?;
+    let rows: Vec<MemberRow> = st.store.rows_as("SELECT * FROM hub_member WHERE repo_id = $r ORDER BY created_at ASC, id;", binds! {"r" => repo_id}).await?;
     Ok(rows.into_iter().filter(|m| m.revoked_at.is_none()).collect())
 }
 

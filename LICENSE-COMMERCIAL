@@ -1,0 +1,27 @@
+engram — Lisensi Komersial Internal
+===================================
+
+Hak cipta (c) 2025-2026 Y.N Pamungkas Jayuda / cmjcode. Seluruh hak dilindungi.
+
+engram tersedia dengan dua lisensi (dual licence). Penerima boleh memilih salah satu:
+
+1. GNU Affero General Public License v3.0 atau versi lebih baru (lihat `LICENSE`), atau
+2. Lisensi komersial internal ini.
+
+Lisensi komersial internal ini diberikan oleh pemilik hak cipta kepada produk
+OPERON dan entitas yang dimiliki atau dikendalikan oleh pemilik hak cipta yang
+sama. Di bawah lisensi ini, penerima boleh menautkan (statis atau dinamis),
+memodifikasi, dan mendistribusikan engram sebagai bagian dari produk OPERON,
+termasuk dalam bentuk biner tertutup, tanpa kewajiban AGPL untuk membuka kode
+sumber produk tersebut.
+
+Lisensi ini tidak dapat dialihkan dan tidak memberi hak kepada pihak ketiga.
+Pihak lain yang ingin memakai engram di luar ketentuan AGPL-3.0 harus
+menghubungi pemilik hak cipta untuk perjanjian tertulis tersendiri.
+
+PERANGKAT LUNAK INI DISEDIAKAN "APA ADANYA", TANPA JAMINAN APA PUN.
+
+Catatan: teks ini adalah pernyataan lisensi dari pemilik hak cipta, bukan
+nasihat hukum. Untuk distribusi ke pihak ketiga, tinjau bersama penasihat hukum.
+
+SPDX: LicenseRef-Engram-Commercial

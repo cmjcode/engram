@@ -105,7 +105,7 @@ Apa saja yang dipasang oleh `scripts/install-mcp.sh`:
 ## Benchmark
 
 Angka di bawah dari `engram bench` (penyimpanan episode + latensi pencarian vektor/BM25 pada SurrealDB
-embedded RocksDB, vektor acak, tanpa LLM) di mesin pengembangan; jalankan ulang di mesin Anda dengan
+embedded SurrealKV (angka di bawah dari v0.3/RocksDB; lihat CHANGELOG 0.4.0), vektor acak, tanpa LLM) di mesin pengembangan; jalankan ulang di mesin Anda dengan
 perintah yang sama:
 
 ```sh
@@ -248,6 +248,17 @@ cargo test --workspace --exclude memory-desktop
 Lihat [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), dan [CHANGELOG.md](CHANGELOG.md).
 Panduan konfigurasi (`memory.toml`), aplikasi desktop, dan CLI ada di [docs/PANDUAN.md](docs/PANDUAN.md).
 
+## Upgrade dari 0.3 ke 0.4
+
+engram 0.4 memakai SurrealDB 4 dengan engine SurrealKV; vault 0.3 (RocksDB di `db/`) tidak bisa dibuka langsung.
+
+```sh
+engram backup vault-v3.tar.gz          # dengan engram 0.3, sebelum upgrade
+engram vault migrate-v3 vault-v3.tar.gz      # dengan engram 0.4 (butuh server embedding untuk reembed)
+```
+
+Database lama dipindah ke `db-rocksdb-v3.bak/`; hapus setelah semuanya berjalan baik.
+
 ## Lisensi
 
-[GNU Affero General Public License v3.0 atau lebih baru](LICENSE). Lisensi komersial tersedia atas permintaan.
+Dual licence: [GNU Affero General Public License v3.0 atau lebih baru](LICENSE), atau [lisensi komersial internal](LICENSE-COMMERCIAL). Lisensi komersial untuk pihak lain tersedia atas permintaan.

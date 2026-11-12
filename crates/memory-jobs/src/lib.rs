@@ -57,6 +57,17 @@ pub enum JobError {
 
 pub type Result<T> = std::result::Result<T, JobError>;
 
+/// Pesan untuk vault v0.3 (RocksDB) yang belum dimigrasi ke SurrealKV.
+pub fn legacy_vault_message(root: &std::path::Path) -> String {
+    format!(
+        "vault {} masih berformat engram v0.3 (RocksDB di db/), yang tidak bisa dibuka SurrealDB 4. \
+         Migrasi: (1) dengan engram 0.3 jalankan `engram backup vault-v3.tar.gz`; \
+         (2) dengan engram 0.4 jalankan `engram vault migrate-v3 vault-v3.tar.gz`. \
+         Embedding dihitung ulang dan db/ lama diarsipkan sebagai db-rocksdb-v3.bak/.",
+        root.display()
+    )
+}
+
 /// Hasil proses ulang sumber yang gagal.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RetryReport {
@@ -100,11 +111,48 @@ impl Runtime {
         llm: Arc<dyn LlmProvider>,
         embedder: Arc<dyn Embedder>,
     ) -> Result<Self> {
+        Self::open_inner(cfg, llm, embedder, false).await
+    }
+
+    /// Seperti [`Runtime::open`] tetapi tetap membuka vault yang masih berisi
+    /// database RocksDB v0.3 di `db/` (dipakai `engram vault migrate-v3`, yang
+    /// mengisi `db-skv/` dari backup lalu mengarsipkan `db/`).
+    pub async fn open_for_migration(cfg: MemoryConfig) -> Result<Self> {
+        let llm = memory_llm::llm_from_config(&cfg);
+        let embedder = memory_llm::embedder_from_config(&cfg);
+        Self::open_for_migration_with(cfg, llm, embedder).await
+    }
+
+    /// [`Runtime::open_for_migration`] dengan provider yang diberikan pemanggil.
+    pub async fn open_for_migration_with(
+        cfg: MemoryConfig,
+        llm: Arc<dyn LlmProvider>,
+        embedder: Arc<dyn Embedder>,
+    ) -> Result<Self> {
+        Self::open_inner(cfg, llm, embedder, true).await
+    }
+
+    async fn open_inner(
+        cfg: MemoryConfig,
+        llm: Arc<dyn LlmProvider>,
+        embedder: Arc<dyn Embedder>,
+        allow_legacy: bool,
+    ) -> Result<Self> {
         let vault = Vault::new(&cfg.vault.path);
         vault.init()?;
         let store = match cfg.vault.engine.as_str() {
             "mem" => Store::memory(cfg.embedding.dimension, &cfg.index).await?,
-            _ => Store::open(&vault.db_dir(), cfg.embedding.dimension, &cfg.index).await?,
+            engine => {
+                if engine == "rocksdb" {
+                    tracing::warn!("vault.engine = \"rocksdb\" tidak didukung lagi (SurrealDB 4); dipakai \"surrealkv\"");
+                } else if engine != "surrealkv" {
+                    return Err(JobError::Invalid(format!("vault.engine tidak dikenal: {engine} (pakai \"surrealkv\" atau \"mem\")")));
+                }
+                if !allow_legacy && vault.needs_v3_migration() {
+                    return Err(JobError::Invalid(legacy_vault_message(vault.root())));
+                }
+                Store::open(&vault.db_dir(), cfg.embedding.dimension, &cfg.index).await?
+            }
         };
         Ok(Self::from_parts(cfg, store, llm, embedder, vault))
     }

@@ -1,5 +1,5 @@
 //! Benchmark: kecepatan tulis episode dan latensi pencarian vektor / BM25
-//! pada SurrealDB embedded (RocksDB), untuk keputusan go/no-go skala besar.
+//! pada SurrealDB embedded (SurrealKV), untuk keputusan go/no-go skala besar.
 
 use std::path::PathBuf;
 use std::time::Instant;

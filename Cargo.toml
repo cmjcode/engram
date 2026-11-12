@@ -3,9 +3,9 @@ resolver = "3"
 members = ["crates/*", "apps/memory-cli", "apps/memory-desktop"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
-license = "AGPL-3.0-or-later"
+license = "AGPL-3.0-or-later OR LicenseRef-Engram-Commercial"
 rust-version = "1.94"
 
 [workspace.dependencies]
@@ -32,10 +32,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid = "1"
 blake3 = "1"
 whatlang = "0.16"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
-surrealdb = { version = "3.3.5", default-features = false, features = ["kv-mem", "kv-rocksdb"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls", "multipart"] }
+surrealdb = { version = "4.0.1", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
 axum = { version = "0.8", features = ["multipart"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.9"
 tempfile = "3"

@@ -103,7 +103,7 @@ async fn dimension_mismatch_is_detected_on_reopen() {
     {
         let _s = Store::open(dir.path(), 4, &IndexConfig::default()).await.unwrap();
     }
-    // RocksDB melepas LOCK secara asinkron setelah drop.
+    // Engine KV bisa melepas LOCK secara asinkron setelah drop.
     let mut last = String::new();
     for _ in 0..50 {
         match Store::open(dir.path(), 8, &IndexConfig::default()).await {
@@ -118,7 +118,7 @@ async fn dimension_mismatch_is_detected_on_reopen() {
             Ok(_) => panic!("dimensi berbeda seharusnya ditolak"),
         }
     }
-    panic!("LOCK RocksDB tidak terlepas: {last}");
+    panic!("LOCK database tidak terlepas: {last}");
 }
 
 mod repo_tests {

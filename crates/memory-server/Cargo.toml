@@ -5,6 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["ui", "hub"]
+# UI web lokal (index.html, app.js, ...) di `/`. Aplikasi yang meng-embed engram
+# (mis. OPERON) mematikannya: hanya `/api/*`, `/mcp`, `/api/health`.
+ui = []
+# Hub tim (`/hub/*`, `/api/hub/*`, tabel `hub_*`).
+hub = ["memory-hub/server"]
+
 [dependencies]
 memory-core.workspace = true
 memory-store.workspace = true
@@ -13,7 +21,7 @@ memory-extract.workspace = true
 memory-retrieve.workspace = true
 memory-jobs.workspace = true
 memory-import.workspace = true
-memory-hub = { workspace = true, features = ["server"] }
+memory-hub = { workspace = true, default-features = false }
 axum.workspace = true
 tower-http.workspace = true
 serde.workspace = true

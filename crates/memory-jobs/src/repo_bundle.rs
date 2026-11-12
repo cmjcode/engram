@@ -624,6 +624,9 @@ pub(crate) async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[St
 
     if cfg.shares("decisions") {
         let mut n = 0;
+        // Keputusan yang sama dari beberapa episode: judul & tanggal diambil dari episode
+        // tertua (tempat keputusan pertama dibuat), deterministik terlepas dari urutan query.
+        let mut first_ep: std::collections::HashMap<String, (usize, (String, String))> = std::collections::HashMap::new();
         'eps: for e in &eps {
             for d in &e.decisions {
                 if n >= cap {
@@ -641,9 +644,19 @@ pub(crate) async fn collect(rt: &Runtime, subject: &str, t: &Target, names: &[St
                     continue;
                 }
                 let id = det_id(&["repo-decision", &normalize(&sit), &normalize(&act)]);
+                let age = (e.created_at.clone(), e.id.clone());
+                if let Some((idx, best)) = first_ep.get_mut(&id) {
+                    if age < *best {
+                        *best = age;
+                        out[*idx].body["date"] = json!(date_of(e));
+                        out[*idx].body["title"] = json!(title);
+                    }
+                    continue;
+                }
                 if !seen.insert(id.clone()) {
                     continue;
                 }
+                first_ep.insert(id.clone(), (out.len(), age));
                 out.push(Record {
                     kind: "decisions",
                     id,
@@ -1895,7 +1908,9 @@ mod tests {
         assert_eq!((im.decisions_new, im.facts_new, im.episodes_new), (1, 1, 1), "{im:?}");
         let eps = b.store.list_episodes("sari", &EpisodeFilter { projects: vec!["svc".into()], limit: 20, ..Default::default() }).await.unwrap();
         assert_eq!(eps.iter().filter(|e| e.concepts.iter().any(|c| c == SHARED_CONCEPT)).count(), 3, "{}", eps.len());
-        assert!(eps.iter().any(|e| e.title == "Antrean" && e.text.contains("dibagikan Budi lewat repositori git")));
+        // Dua episode keputusan dalam detik yang sama: judul diambil dari salah satunya
+        // (tertua, lalu id), deterministik per vault tetapi tidak bisa diprediksi di tes.
+        assert!(eps.iter().any(|e| e.title.starts_with("Antrean") && e.text.contains("dibagikan Budi lewat repositori git")));
     }
 
     #[test]

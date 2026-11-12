@@ -27,7 +27,7 @@ pub async fn user_by_email(st: &HubState, email: &str) -> Result<Option<UserRow>
 }
 
 pub async fn identities_of(st: &HubState, user_id: &str) -> Result<Vec<IdentityRow>> {
-    Ok(st.store.rows_as("SELECT * FROM hub_identity WHERE user_id = $u ORDER BY created_at ASC;", binds! {"u" => user_id}).await?)
+    Ok(st.store.rows_as("SELECT * FROM hub_identity WHERE user_id = $u ORDER BY created_at ASC, id;", binds! {"u" => user_id}).await?)
 }
 
 fn domain_allowed(st: &HubState, email: &str) -> bool {

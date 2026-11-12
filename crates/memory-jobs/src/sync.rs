@@ -1,7 +1,7 @@
 //! Sinkronisasi antar komputer lewat folder bersama (Google Drive for desktop,
 //! atau layanan lain yang menyediakan folder lokal).
 //!
-//! Database (RocksDB) TIDAK ditaruh langsung di folder Drive: Drive menyalin
+//! Database (SurrealKV) TIDAK ditaruh langsung di folder Drive: Drive menyalin
 //! berkas setengah jadi dan dua komputer bisa menulis bersamaan. Sebagai gantinya
 //! tiap komputer menulis snapshot miliknya sendiri:
 //!

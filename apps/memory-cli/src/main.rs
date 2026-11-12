@@ -540,6 +540,15 @@ enum VaultCmd {
     /// Pindahkan vault ke folder lain (disalin; vault lama tidak dihapus) dan perbarui memory.toml.
     /// Hentikan dulu `engram serve`/`worker`/aplikasi desktop yang memakai vault ini.
     Move { to: PathBuf },
+    /// Migrasi vault engram 0.3 (RocksDB) ke 0.4 (SurrealKV) dari backup `engram backup` versi 0.3.
+    /// Embedding dihitung ulang (butuh server embedding), lalu `db/` lama diarsipkan.
+    MigrateV3 {
+        /// Berkas backup v0.3 (`.tar.gz` atau `.tar.gz.age`).
+        backup: PathBuf,
+        /// Identitas age untuk backup terenkripsi.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -774,6 +783,20 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             VaultCmd::Move { to } => move_vault(&cli.config, &cfg, to),
+            VaultCmd::MigrateV3 { backup, identity } => {
+                let rt = Runtime::open_for_migration(cfg).await?;
+                let rep = memory_jobs::archive::migrate_v3(&rt, backup, identity.as_deref()).await?;
+                print(cli.json, &rep, || {
+                    format!(
+                        "Migrasi selesai: {} record, {} berkas sumber, {} embedding dihitung ulang.{}",
+                        rep.restore.rows,
+                        rep.restore.source_files,
+                        rep.restore.reembedded,
+                        rep.archived_legacy_db.as_ref().map(|p| format!("\nDatabase RocksDB lama diarsipkan di {} (hapus bila semuanya berjalan baik).", p.display())).unwrap_or_default()
+                    )
+                });
+                Ok(())
+            }
         };
     }
     if let Cmd::Bench { cmd, episodes, queries, index, dir } = &cli.cmd {

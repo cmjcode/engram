@@ -296,7 +296,7 @@ async fn episode(
         .rt
         .store
         .rows_as::<Episode>(
-            "SELECT * OMIT embedding FROM episode WHERE retelling_of = $id ORDER BY created_at;",
+            "SELECT * OMIT embedding FROM episode WHERE retelling_of = $id ORDER BY created_at, id;",
             memory_store::binds! {"id" => id},
         )
         .await?;
