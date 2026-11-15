@@ -7,258 +7,234 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.cmjcode%2Fengram-6f42c1)](https://registry.modelcontextprotocol.io/?q=io.github.cmjcode/engram)
 
-🇮🇩 Bahasa Indonesia · [🇬🇧 English](README.en.md)
+🇬🇧 English · [🇮🇩 Bahasa Indonesia](README.id.md)
 
-**Engram** adalah memori jangka panjang lintas-tool untuk agent AI dan untuk manusia di belakangnya:
-keputusan arsitektur, akar masalah bug, konvensi kerja, sampai kisah hidup dan silsilah keluarga,
-tersimpan lokal (SurrealDB embedded, satu binary Rust) dan diakses lewat MCP dari Claude Code,
-Codex, Cursor, Antigravity, Gemini CLI, Windsurf, atau VS Code.
+**engram** is cross-tool long-term memory for AI coding agents and for the humans behind them:
+architecture decisions, bug root causes, working conventions, down to life stories and family trees.
+Everything is stored locally (embedded SurrealDB, one Rust binary) and served over MCP to
+Claude Code, Codex CLI, Cursor, Windsurf, Antigravity, Gemini CLI and VS Code.
 
 > *Bitemporal, evidence-backed, local-first memory for coding agents and life stories.*
-> Bukan proyek yang sama dengan "Engram" versi Go/SQLite di registry MCP; yang ini berfokus pada
-> fakta bertanda waktu, graf entitas, dan prinsip yang didukung bukti.
+> Not the same project as the Go/SQLite "Engram" in the MCP registry; this one focuses on
+> time-stamped facts, an entity graph and principles backed by evidence.
 
-## Mengapa engram (pembeda dari memory server MCP lain)
+## Why engram (what sets it apart from other MCP memory servers)
 
-| Kemampuan | engram | Memory server pada umumnya |
+| Capability | engram | Typical memory server |
 | --- | --- | --- |
-| **Fakta bitemporal** | Setiap fakta punya `valid_from`/`valid_to`; hasil tool memisahkan *berlaku sekarang* vs *dulu*, dan `as_of` menampilkan memori sebagaimana pada tanggal itu | Fakta menimpa fakta lama tanpa jejak, atau hanya *timestamp* penyimpanan |
-| **Graf entitas + silsilah** | Orang, proyek, komponen, tool, organisasi, tempat sebagai entitas beralias; relasi kekerabatan turunan (sepupu, mertua, ipar) dihitung dari relasi yang diceritakan | Potongan teks ber-embedding, tanpa entitas atau relasi |
-| **Prinsip berbukti** | `principles` hanya mengembalikan pola keputusan yang didukung beberapa episode nyata, dengan sitasi `[ep:ID]` | Tidak ada lapisan "kebijaksanaan"; hanya fakta |
-| **Pemadatan non-destruktif** | `compact` merangkum klaster episode menjadi episode kanonik; episode asli ditandai *retelling*, bukti tetap utuh dan bisa ditelusuri | Ringkasan menimpa sumber, atau tidak ada pemadatan |
-| **Graf proyek bergaya Obsidian** | Proyek saling ditautkan dengan `[[Nama-Proyek]]` (di catatan proyek atau teks `remember` agent), plus sebutan otomatis, tag grup, dan tool bersama; halaman *Graf proyek* menampilkannya sebagai bola 3D yang bisa diputar (atau 2D) dengan panel detail, warna per tag grup, filter aktivitas, dan backlink | Daftar memori datar tanpa relasi antar proyek |
-| **Konteks proyek siap pakai** | `project_context` merangkai fakta arsitektur aktif, keputusan, bug fix, prinsip, dan sesi terkait satu repositori untuk awal sesi koding (disuntik otomatis lewat hook `SessionStart`) | Agent harus merangkai sendiri dari hasil pencarian |
-| **Penyaringan sebelum simpan** | Pipeline skor memilah basa-basi dari keputusan/fakta penting; evaluasinya terukur dengan `engram bench eval` | Semua pesan masuk apa adanya |
-| **Kedaulatan data** | Lokal, format terbuka, AGPL; sinkronisasi opsional ke Google Drive milik sendiri | Cloud vendor, langganan |
+| **Bitemporal facts** | Every fact has `valid_from`/`valid_to`; tool results separate *current* from *past*, and `as_of` shows memory as it was on a given date | New facts overwrite old ones without a trace, or only a storage timestamp |
+| **Entity graph + kinship** | People, projects, components, tools, organisations and places are aliased entities; derived kinship (cousin, in-law) is computed from told relations | Embedded text chunks, no entities or relations |
+| **Evidence-backed principles** | `principles` only returns decision patterns supported by several real episodes, cited as `[ep:ID]` | No "wisdom" layer, only facts |
+| **Non-destructive compaction** | `compact` summarises clusters of episodes into a canonical one; originals are marked *retelling*, evidence stays intact and traceable | Summaries overwrite sources, or no compaction at all |
+| **Obsidian-style project graph** | Projects link to each other with `[[Project-Name]]` (in project notes or an agent's `remember` text), plus automatic mentions, group tags and shared tools; the *Project graph* page shows them as a rotatable 3D globe (or 2D) with a detail panel, group-tag colours, an activity filter and backlinks | A flat memory list with no relations between projects |
+| **Ready-made project context** | `project_context` assembles active architecture facts, decisions, bug fixes, principles and related sessions for one repository at the start of a coding session (injected automatically by a `SessionStart` hook) | The agent has to assemble it from search results |
+| **Filtering before storage** | A scoring pipeline separates chit-chat from decisions and important facts; its quality is measured with `engram bench eval` | Everything goes in as is |
+| **Data sovereignty** | Local, open format, AGPL; optional sync to your own Google Drive | Vendor cloud, subscription |
 
-Kepatuhan MCP: Streamable HTTP tanpa sesi (spesifikasi 2026-07-28; klien 2024-11-05 s/d 2025-11-25 tetap diterima),
-`tools/list` dengan `title`, `annotations` (`readOnlyHint` dkk.) dan `outputSchema` untuk tiap tool, `structuredContent`
-pada hasil, plus profil tool `coding` agar sesi koding tidak dipenuhi tool memori hidup dan profil `operon` untuk
-lapisan memori multi-tenant (satu subjek per tenant, token per subjek).
+MCP compliance: stateless Streamable HTTP (spec 2026-07-28; clients speaking 2024-11-05 through 2025-11-25 are
+accepted), `tools/list` with `title`, `annotations` (`readOnlyHint` etc.) and `outputSchema` for every tool,
+`structuredContent` in results, plus a `coding` tool profile so coding sessions are not flooded with life-memory tools
+and an `operon` profile for multi-tenant memory layers (one subject per tenant, per-subject tokens).
 
-## Instalasi
+## Install
 
-macOS / Linux — memasang CLI `engram` dan aplikasi desktop `engram`:
+macOS / Linux, installs the `engram` CLI and the `engram` desktop app:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cmjcode/engram/main/install.sh | sh
 ```
 
-Opsi: `--cli-only`, `--desktop-only`, `--version 0.0.2`, `--bin-dir ~/bin`, `--appimage` (Linux), misalnya
-`curl -fsSL .../install.sh | sh -s -- --cli-only`. CLI dipasang ke `~/.local/bin`; aplikasi macOS ke `/Applications`,
-Linux lewat `.deb`/`.rpm` (atau AppImage bila tanpa sudo). Windows: unduh `.exe`/`.msi` dari
+Options: `--cli-only`, `--desktop-only`, `--version 0.1.2`, `--bin-dir ~/bin`, `--appimage` (Linux), e.g.
+`curl -fsSL .../install.sh | sh -s -- --cli-only`. The CLI goes to `~/.local/bin`; the macOS app to `/Applications`,
+Linux via `.deb`/`.rpm` (or AppImage without sudo). Windows: download the `.exe`/`.msi` from
 [Releases](https://github.com/cmjcode/engram/releases).
 
-**Docker / MCP Registry.** Binary yang sama diterbitkan sebagai image `ghcr.io/cmjcode/engram` dan terdaftar di
-MCP Registry resmi sebagai `io.github.cmjcode/engram` (`server.json`), sehingga client yang membaca registry bisa
-memasangnya langsung.
+**Docker / MCP Registry.** The same binary is published as `ghcr.io/cmjcode/engram` and listed in the official
+MCP Registry as `io.github.cmjcode/engram` (`server.json`), so registry-aware clients can install it directly.
 
 ```sh
-# server: UI, REST API, dan MCP Streamable HTTP di :7878
+# server: UI, REST API and MCP Streamable HTTP on :7878
 docker run -d --name engram -p 127.0.0.1:7878:7878 -v engram-data:/data -e MEMORY_TOKEN="$(openssl rand -hex 24)" ghcr.io/cmjcode/engram
-# server MCP stdio untuk client yang menjalankan prosesnya sendiri
+# stdio MCP server for a client that spawns its own process
 docker run -i --rm -v engram-data:/data ghcr.io/cmjcode/engram mcp --profile coding
 ```
 
-Saat pertama jalan, container menyalin `memory.toml.example` ke `/data/memory.toml`; arahkan `[llm]` dan `[embedding]`
-ke server OpenAI-compatible Anda (vLLM, TEI, Ollama, …) atau set `provider = "hash"` untuk uji coba offline.
+On first start the container copies `memory.toml.example` to `/data/memory.toml`; point `[llm]` and `[embedding]`
+at your OpenAI-compatible servers (vLLM, TEI, Ollama, …) or set `provider = "hash"` for an offline trial.
 
-**Update otomatis.** Aplikasi desktop memeriksa rilis baru tak lama setelah dibuka dan setiap 6 jam, atau
-lewat menu tray **Periksa update**. Update dipasang setelah disetujui, lalu aplikasi dibuka ulang. Paket update
-ditandatangani; kunci privatnya `~/.tauri/engram.key` (dipakai `build.sh`, dan harus disimpan juga
-sebagai secret GitHub `TAURI_SIGNING_PRIVATE_KEY`). Manifest `latest.json` disusun oleh
-`scripts/updater-manifest.sh`. CLI `engram` belum ikut update otomatis; jalankan ulang `install.sh`.
+**Auto update.** The desktop app checks for a new release shortly after launch and every 6 hours, or via the tray
+menu **Check for updates**. Update packages are signed (Tauri updater key). The CLI does not self-update yet; re-run
+`install.sh`.
 
-## Integrasi Agent AI (MCP, Rule & Hook Otomatis)
+## Agent integration (MCP, rules and hooks)
 
-`engram` dapat dihubungkan ke **Antigravity (IDE & CLI)**, **Gemini CLI**, **Claude Code**, **Cursor**, **Codex CLI**,
-**Windsurf**, dan **VS Code** sehingga setiap percakapan penting otomatis tersimpan ke engram dan konteks masa lalu dapat diambil kapan saja:
+`engram` connects to **Antigravity (IDE & CLI)**, **Gemini CLI**, **Claude Code**, **Cursor**, **Codex CLI**,
+**Windsurf** and **VS Code**, so every important conversation is stored automatically and past context can be
+pulled back at any time:
 
 ```sh
-# Pasang MCP server, Global Rule, dan Hook otomatis ke semua client yang terinstal
+# Install the MCP server, a global rule and hooks into every client found on this machine
 ./scripts/install-mcp.sh --client all
 
-# Atau pilih client tertentu: antigravity | gemini | claude | cursor | codex | windsurf
+# Or one client: antigravity | gemini | claude | cursor | codex | windsurf
 ./scripts/install-mcp.sh --client codex
 
-# Timpa profil tool (bawaan: coding untuk cursor/codex/windsurf, full untuk yang lain)
+# Override the tool profile (default: coding for cursor/codex/windsurf, full for the rest)
 ./scripts/install-mcp.sh --client cursor --profile full
 
-# Hapus integrasi dari semua client
+# Remove the integration from every client
 ./scripts/install-mcp.sh --uninstall --client all
 ```
 
-Skrip berjalan di macOS dan Linux. Di Windows pakai panel **Integrasi** di aplikasi desktop, yang melakukan hal yang
-sama lewat installer bawaan `engram` (`crates/memory-server/src/install.rs`, juga tersedia sebagai
+The script runs on macOS and Linux. On Windows use the **Integrations** panel in the desktop app, which does the
+same through `engram`'s built-in installer (`crates/memory-server/src/install.rs`, also exposed as
 `POST /api/mcp/clients/{id}/install`).
 
-Apa saja yang dipasang oleh `scripts/install-mcp.sh`:
+What `scripts/install-mcp.sh` sets up:
 
-1. **Server MCP (`engram`)**: Menyediakan tool `project_context`, `recall`, `remember`, `who_is`, `timeline`, `principles`, `persona_context`, `family_tree`, `memory_gaps`, `list_subjects`, dan `compact` lewat Streamable HTTP (`http://127.0.0.1:7878/mcp`) dengan token tetap `MEMORY_TOKEN` (`LaunchAgent` `id.engram.ai.token`). Tambahkan `?profile=coding` (atau `engram mcp --profile coding` untuk stdio) agar hanya tujuh tool sesi koding yang dimuat: `project_context`, `recall`, `get_episodes`, `remember`, `who_is`, `timeline`, `principles`. Profil `operon` (`?profile=operon` / `engram mcp --profile operon`) ditujukan untuk aplikasi multi-tenant seperti OPERON yang memakai satu subjek engram per tenant: hanya `recall`, `remember`, `who_is`, `timeline`, `principles`, `project_context`, `get_episodes` (tanpa `family_tree`, `compact`, `memory_gaps`, `list_subjects`, `persona_context`); padukan dengan token per subjek (lihat [Keamanan](#keamanan)). Codex memakai `~/.codex/config.toml` (`[mcp_servers.engram]`), Windsurf `~/.codeium/windsurf/mcp_config.json`.
-2. **Global Rule (`GEMINI.md`, `CLAUDE.md`, `AGENTS.md`, `global_rules.md`)**: Menginstruksikan agent di `~/.gemini/GEMINI.md`, `~/.gemini/config/GEMINI.md`, `~/.claude/CLAUDE.md` (rule penuh), serta `~/.codex/AGENTS.md` dan `~/.codeium/windsurf/memories/global_rules.md` (rule ringkas profil coding) agar proaktif memanggil `project_context`/`recall` di awal tugas dan `remember` setelah keputusan penting.
-3. **Hook Otomatis (`~/.local/bin/engram-auto-remember`)**:
-   * Dipasang pada event `Stop` di Antigravity (`~/.gemini/config/hooks.json`) dan Claude Code (`~/.claude/settings.json`), serta `AfterAgent` di Gemini CLI (`~/.gemini/settings.json`).
-   * **Hook `SessionStart`** untuk Claude Code dan Gemini CLI: saat sesi dibuka, konteks proyek (indeks ber-ID dari `GET /api/subjects/{s}/context/inject`, batas `inject.max_chars`) disuntik sebagai konteks awal. Installer memakai `engram hook <client> context` bila binary `engram` tersedia; `scripts/session-context-hook.py` (`~/.local/bin/engram-session-context`) adalah cadangan Python yang memanggil endpoint yang sama, dan jatuh ke `project_context` pada server lama. Bila server mati atau proyek belum punya catatan, hook diam.
-   * Setiap giliran percakapan selesai, script `scripts/auto-remember-hook.py` otomatis mengekstrak pesan pengguna & balasan asisten dari transkrip, menyaring duplikat, lalu mengirimnya ke pipeline `remember` (yang akan menyaring obrolan basa-basi lewat konfigurasi `[score]`).
-   * **Fallback Offline**: Bila aplikasi desktop / `engram serve` sedang tidak aktif, percakapan otomatis disimpan sebagai berkas `.md` ke `vault/inbox/` untuk diimpor otomatis begitu aplikasi dibuka kembali.
+1. **MCP server (`engram`)** exposing `project_context`, `recall`, `remember`, `who_is`, `timeline`, `get_episodes`,
+   `principles`, `persona_context`, `family_tree`, `memory_gaps`, `list_subjects` and `compact` over Streamable HTTP
+   (`http://127.0.0.1:7878/mcp`) with a fixed `MEMORY_TOKEN`. Append `?profile=coding` (or `engram mcp --profile coding`
+   for stdio) to load only the seven coding-session tools: `project_context`, `recall`, `get_episodes`, `remember`,
+   `who_is`, `timeline`, `principles`. The `operon` profile (`?profile=operon` / `engram mcp --profile operon`) is
+   meant for multi-tenant applications that keep one engram subject per tenant: only `recall`, `remember`, `who_is`,
+   `timeline`, `principles`, `project_context`, `get_episodes` (no `family_tree`, `compact`, `memory_gaps`,
+   `list_subjects`, `persona_context`); pair it with per-subject tokens (see [Security](#security)). Codex uses `~/.codex/config.toml` (`[mcp_servers.engram]`), Windsurf
+   `~/.codeium/windsurf/mcp_config.json`.
+2. **Global rule** (`GEMINI.md`, `CLAUDE.md`, `AGENTS.md`, `global_rules.md`): instructs the agent to call
+   `project_context`/`recall` at the start of a task and `remember` after important decisions. Coding clients get a
+   compact variant of the rule.
+3. **Hooks**: `Stop` in Antigravity and Claude Code, `AfterAgent` in Gemini CLI store each turn; `SessionStart` in
+   Claude Code and Gemini CLI injects the project's memory index as initial context. When the server is down, events
+   are spooled and replayed on the next call; conversations fall back to `vault/inbox/*.md` for later import.
+
+### Agent session memory (`engram hook`)
+
+Beyond MCP tools, engram records **work sessions** automatically through the thin hook
+`engram hook <client> <event>` (same binary, never opens the vault, always exits 0):
+
+| Claude Code hook | engram event | Purpose |
+|---|---|---|
+| `SessionStart` | `context` | injects the project's memory **index** (ID, date, type, title, token estimate), ≤ `inject.max_chars` |
+| `UserPromptSubmit` | `session-init` | records the session, prompt number and prompt (after the privacy filter) |
+| `PreToolUse` (Read/Edit/Write) | `file-context` | file history from memory, once per session per file; never blocks |
+| `PostToolUse` / `PostToolUseFailure` | `observation` | one tool call into the turn spool (trimmed to 64 KB, images dropped, secrets redacted) |
+| `Stop` / `PreCompact` | `summarize` | the turn becomes an `agent_session` source; the LLM extracts typed observations (`decision`, `bugfix`, `discovery`, `feature`, `refactor`, `change`), a session summary and project **lessons** |
+| `SessionEnd` | `session-end` | closes the session |
+
+The project is identified from the **git repository root** (worktrees map to their parent repo), not the folder name.
+Agents retrieve memory progressively: `recall` (compact index) → `timeline(anchor)` → `get_episodes(ids)`; every tool
+honours a token `budget`. `<private>…</private>` spans in prompts are never stored, and secrets (API keys, tokens, PEM
+blocks, credentials in URLs) are replaced by `<redacted type='…'/>` before they reach the vault.
+
+```sh
+engram import-claude-memory --all --apply   # Claude Code auto-memory (~/.claude/projects/*/memory/*.md) -> episodes, no LLM
+engram login --hub https://engram.team.dev  # sign in to the team hub in the browser (Google / GitHub)
+engram repo init                            # connect this repo to the hub; commit .engram/repo.toml
+engram repo join [--github]                 # join a repo that already has .engram/repo.toml
+engram repo push | pull | status            # send / fetch / inspect (automatic every session & 15 min)
+engram repo migrate                         # move the old .engram/members/ bundle to the hub, clean the repo
+```
+
+### Team memory through the hub
+
+Everyone with access to a repository shares its project memory: conventions and pitfalls, decisions,
+architecture facts and episode summaries. Memory lives on a **team hub** (`engram serve --hub`, sign in
+with Google or GitHub), not in git: the only file in the repo is `.engram/repo.toml`, so `git status`
+stays clean.
+
+- **Access follows the repo**: `repo.toml` carries a join key; anyone who can clone the repo and sign in
+  joins automatically on their first agent session. Optional: require a GitHub permission check,
+  invite/remove members, owner / maintainer / member / reader roles, join-key rotation.
+- **Incremental**: the hub keeps a per-repo change log (`seq`); each device sends only changed records
+  and pulls from its last cursor. Record IDs derive from content, so fact supersedes or episode
+  compaction do not create new records.
+- **Vaults stay local**: recall still runs on each member's embedded SurrealDB; the hub never stores raw
+  transcripts or embeddings. Secrets and `<private>` blocks are filtered before sending, and the hub
+  rejects records that still contain redaction markers.
+- **CI & cloud agents**: personal access tokens (`ENGRAM_HUB_URL` + `ENGRAM_HUB_TOKEN`).
+
+Running a hub behind your existing nginx: [docker/docker-compose.yml](docker/docker-compose.yml) (built from source) and [docker/nginx-engram.conf](docker/nginx-engram.conf).
 
 ## Benchmark
 
-Angka di bawah dari `engram bench` (penyimpanan episode + latensi pencarian vektor/BM25 pada SurrealDB
-embedded SurrealKV (angka di bawah dari v0.3/RocksDB; lihat CHANGELOG 0.4.0), vektor acak, tanpa LLM) di mesin pengembangan; jalankan ulang di mesin Anda dengan
-perintah yang sama:
+Numbers from `engram bench` (episode writes + vector/BM25 search latency on embedded SurrealDB SurrealKV (table below measured on v0.3/RocksDB; see CHANGELOG 0.4.0), random
+vectors, no LLM) on a development machine; rerun on yours with the same command:
 
 ```sh
 engram --config memory.toml bench --episodes 20000 --queries 200
 ```
 
-<!-- BENCH_START -->
-Hasil 5 Nov 2026, Apple Silicon (macOS), engram 0.0.16, 20.000 episode, dimensi vektor 1024, index HNSW:
+5 Nov 2026, Apple Silicon (macOS), engram 0.0.16, 20,000 episodes, 1024-dim vectors, HNSW index:
 
-| Ukuran | Hasil |
+| Measure | Result |
 | --- | --- |
-| Tulis episode | 16,8 dtk total, 1.188 episode/detik (menurun dari 1.728/detik pada 5.000 pertama karena pemadatan indeks) |
-| Pencarian vektor top-10 | p50 33,0 ms, p95 45,7 ms, p99 1.836 ms (p99 terjadi saat indeks HNSW masih mengejar tulisan) |
-| BM25 top-10 | p50 998 ms, p95 1.320 ms |
-| Ukuran di disk | 470,9 MB |
-<!-- BENCH_END -->
+| Episode writes | 16.8 s total, 1,188 episodes/s (down from 1,728/s over the first 5,000 as the index compacts) |
+| Vector search top-10 | p50 33.0 ms, p95 45.7 ms, p99 1,836 ms (p99 while HNSW was still catching up with writes) |
+| BM25 top-10 | p50 998 ms, p95 1,320 ms |
+| Size on disk | 470.9 MB |
 
-Kualitas penyaringan (apakah potongan penting lolos dan basa-basi terbuang) diukur terpisah dengan set emas
-buatan sendiri: `engram bench export-gold --out kasus/` untuk mengekspor kandidat dari vault, beri label
-`important` di `gold.toml`, lalu `engram bench eval kasus/` (presisi/recall/leak) dan `engram bench tune kasus/`
-untuk mencari ambang `[score]` terbaik secara offline dari cache segmentasi.
+Filtering quality (do important fragments pass and chit-chat get dropped) is measured separately with a self-made
+gold set: `engram bench export-gold --out cases/`, label `important` in `gold.toml`, then `engram bench eval cases/`
+(precision/recall/leak) and `engram bench tune cases/` to search for the best `[score]` thresholds offline.
 
-## Lanskap produk sejenis
+## Related products
 
-**1\. Kategori "AI Legacy & Biographer" (Fokus ke Konsumen/Keluarga)** Platform ini memang dibuat khusus untuk merekam kisah hidup, suara, dan kenangan seseorang untuk diwariskan ke anak-cucu.
+- **AI legacy & biographer apps** (HereAfter AI, StoryFile, Eternos, Personal.ai) record life stories for families,
+  but run as proprietary cloud services with simple Q&A retrieval and no temporal model of how a person changes.
+- **Lifelogging** (Limitless, Omi) captures everything in real time; great for "what did I discuss this morning",
+  poor at distilling decades of history or extracting principles from the noise.
+- **Developer memory infrastructure** (Zep/Graphiti, Cognee, Mem0, Letta, Supermemory) is the closest technically.
+  Zep and Cognee have temporal knowledge graphs; Mem0 and Letta are strong at agent state. None combine a bitemporal
+  graph, evidence-backed principles, local-first storage and ready-made coding-session context in one self-hosted binary.
 
-> * **HereAfter AI & StoryFile:** Mengambil pendekatan wawancara interaktif. Pengguna menjawab ratusan pertanyaan tentang hidup mereka (via audio/video). Nantinya, keluarga bisa "mengobrol" dengan rekaman tersebut. *Kelemahannya:* Arsitektur di belakangnya masih sangat kaku (mirip sistem pencocokan Q\&A berbasis RAG sederhana), belum menjadi *cognitive engine* yang benar-benar bisa berpikir dengan pola pikir orang tersebut.  
-> * **Eternos.life & Personal.ai:** Lebih maju karena membangun *Personal Language Model* dan *Memory Stack* dari kisah hidup pengguna. *Kelemahannya:* Semuanya berbasis *cloud proprietary* (data hidupmu dikunci di server mereka dengan biaya langganan mahal) dan kurang mendalam dalam memetakan perubahan sifat manusia secara kronologis (*temporal graph*).
+engram's niche: data sovereignty for 50+ years, a *wisdom layer* (principles, not just facts), and first-class support
+for Indonesian storytelling and extended-family kinship, while remaining a drop-in MCP memory for coding agents.
 
-**2\. Kategori "Active Lifelogging" (Perekam Aktivitas Real-Time)** Platform yang fokus merekam semua yang dilihat dan didengar pengguna sehari-hari.
+## Security
 
-> * **Limitless (dulunya Rewind.ai) & Omi (Friend):** Menggunakan perangkat *wearable* (kalung/pendant) dan perekam layar untuk mencatat seluruh rapat, obrolan, dan aktivitas harian ke dalam database vektor lokal/cloud.  
-> * *Kelemahannya:* Sistem ini hebat untuk menjawab *"Tadi pagi aku ngobrol apa sama Budi?"*, tapi buruk untuk merangkum masa lalu. Mereka kebanjiran data sampah harian (*noise*) dan tidak punya arsitektur untuk mengekstrak kebijaksanaan (*wisdom*), nilai hidup, atau menyusun cerita masa kecil 30 tahun lalu.
-
-**3\. Kategori "Developer Memory Infrastructure" (Engine di Balik Layar)** Jika melihat dari sisi *engine* pembangunnya (bukan aplikasi jadi untuk konsumen), beberapa *startup* infrastruktur AI sedang berlomba di area ini:
-
-> * **Zep (dengan engine *Graphiti*\-nya) & Cognee:** Dua *framework* ini paling mendekati secara teknis karena sudah menggunakan **Temporal Knowledge Graph**. Mereka bisa melacak kapan sebuah fakta mulai berlaku dan kapan kedaluwarsa.  
-> * **Mem0 & Letta (MemGPT):** Sangat kuat di manajemen *state* dan memori jangka panjang untuk *enterprise agent*, tapi didesain untuk asisten kerja/komersial, bukan untuk memodelkan psikologi, emosi, dan fase kehidupan manusia.  
-> * **Evermind (EverOS) & Supermemory:** Fokus pada *Memory OS* yang menggabungkan dokumen, chat, dan *multi-modal retrieval* untuk memori jangka panjang.
-
-**Celah Besar yang Belum Terpecahkan (Peluang Kalau Mau Bangun Sendiri)**
-
-Jika kamu ingin membangun ini sendiri, kamu tidak sedang membuat ulang roda—kamu justru bisa mengisi lubang besar yang belum disentuh pemain di atas:
-
-> 1. **Kedaulatan Data (*Self-Hosted & Sovereign* untuk 50+ Tahun):** Kisah hidup dan warisan pemikiran keluarga adalah data paling sensitif. Menyimpannya di *startup SaaS* luar negeri sangat berisiko (kalau *startup*\-nya bangkrut 5 tahun lagi, arsip memori itu hilang). Sistem *local-first* atau *self-hosted* dengan format penyimpanan terbuka adalah keharusan untuk *legacy system*.  
-> 2. **Pemodelan Karakter & Prinsip Hidup (*Wisdom Layer*):** Platform yang ada sekarang baru sebatas menyimpan **Fakta** (*"Dia pernah merintis usaha di Jogja tahun 2015"*). Belum ada yang secara khusus mengekstrak **Pola Keputusan/Prinsip** (*"Setiap kali menghadapi krisis bisnis, orang ini selalu memprioritaskan kesejahteraan timnya dulu baru menghitung rugi materi, karena dipengaruhi didikan ibunya"*).  
-> 3. **Konteks Budaya & Bahasa Lokal:** Orang Indonesia bercerita dengan struktur yang unik—banyak kiasan, percampuran bahasa daerah (Jawa/Sunda/dll), dan struktur silsilah keluarga besar yang rumit. Platform Barat sering gagal menangkap nuansa emosional dan relasi kekerabatan ini.
-
-
-
-
-## Memori sesi kerja agent (hook `engram hook`)
-
-Selain tool MCP, engram merekam **sesi kerja** agent AI secara otomatis lewat hook tipis
-`engram hook <client> <event>` (binary yang sama, tidak membuka vault, selalu keluar 0,
-menyimpan event ke spool `hook-spool/` bila server mati dan mengirim ulang pada panggilan
-berikutnya). `scripts/install-mcp.sh --client claude` memasangnya ke Claude Code:
-
-| Hook Claude Code | Event engram | Fungsi |
-|---|---|---|
-| `SessionStart` | `context` | menyuntik **indeks** memori proyek (ID, tanggal, jenis, judul, perkiraan token), ≤ `inject.max_chars` |
-| `UserPromptSubmit` | `session-init` | mencatat sesi, nomor prompt, dan prompt (setelah penyaring privasi) |
-| `PreToolUse` (Read/Edit/Write) | `file-context` | riwayat berkas dari memori, sekali per sesi per berkas; tidak pernah memblokir |
-| `PostToolUse` / `PostToolUseFailure` | `observation` | satu pemanggilan tool ke spool giliran (dipangkas 64 KB, gambar dibuang, rahasia diredaksi) |
-| `Stop` / `PreCompact` | `summarize` | giliran menjadi sumber `agent_session`; LLM mengekstrak observasi bertipe (`decision`, `bugfix`, `discovery`, `feature`, `refactor`, `change`) + ringkasan sesi (permintaan, diselidiki, dipelajari, selesai, langkah berikut) + **pelajaran** proyek |
-| `SessionEnd` | `session-end` | menutup sesi |
-
-Gemini CLI (`AfterAgent`) dan Antigravity (`Stop`) memakai event `turn` (prompt + jawaban tanpa tool).
-Proyek ditentukan dari **akar repositori git** (worktree dipetakan ke repo induknya), bukan sekadar nama folder.
-
-Agent mengambil memori secara bertahap: `recall` (indeks ringkas) → `timeline(anchor)` → `get_episodes(ids)`;
-semua tool MCP dibatasi anggaran token (`budget`). Tag `<private>…</private>` di prompt tidak pernah disimpan,
-dan rahasia (API key, token, PEM, kredensial URL) diganti `<redacted type='…'/>` sebelum masuk vault
-(`[privacy]` di `memory.toml`).
-
-Perintah terkait:
-
-```sh
-engram import-claude-memory --all --apply   # auto-memory Claude Code (~/.claude/projects/*/memory/*.md) -> episode, tanpa LLM
-engram login --hub https://engram.tim.id     # login hub tim lewat browser (Google / GitHub)
-engram repo init                            # hubungkan repo ini ke hub; commit .engram/repo.toml
-engram repo join [--github]                 # bergabung ke repo yang sudah punya .engram/repo.toml
-engram repo push | pull | status            # kirim / tarik / lihat status (otomatis tiap sesi & 15 menit)
-engram repo migrate                         # pindahkan bundel .engram/members/ lama ke hub, bersihkan repo
-```
-
-### Memori tim lewat hub
-
-Siapa pun yang punya akses ke repo otomatis berbagi memori proyeknya: konvensi & jebakan, keputusan,
-fakta arsitektur, dan ringkasan episode. Memori disimpan di **hub tim** (`engram serve --hub`, login
-Google atau GitHub), bukan di git: satu-satunya berkas di repo adalah `.engram/repo.toml`, jadi
-`git status` tetap bersih.
-
-- **Akses mengikuti repo**: `repo.toml` memuat join key; siapa pun yang bisa clone repo dan login ke
-  hub otomatis bergabung saat sesi agent pertama. Opsional: wajib verifikasi izin GitHub, undang/cabut
-  anggota, peran owner / maintainer / member / reader, rotasi join key.
-- **Inkremental**: hub menyimpan change log per repo (`seq`); tiap perangkat hanya mengirim record
-  yang berubah dan menarik sejak cursor terakhir. ID record diturunkan dari isinya, jadi supersede
-  fakta atau kompaksi episode tidak menimbulkan record baru.
-- **Vault tetap lokal**: recall tetap di SurrealDB embedded masing-masing; hub tidak pernah menyimpan
-  transkrip mentah maupun embedding. Rahasia dan blok `<private>` disaring sebelum dikirim, dan hub
-  menolak record yang masih memuat penanda redaksi.
-- **CI & agent cloud**: personal access token (`ENGRAM_HUB_URL` + `ENGRAM_HUB_TOKEN`).
-
-Menjalankan hub di balik nginx yang sudah ada: [docker/docker-compose.yml](docker/docker-compose.yml) (dibangun dari source) dan [docker/nginx-engram.conf](docker/nginx-engram.conf).
-Panduan lengkap ada di [docs/PANDUAN.md](docs/PANDUAN.md#memori-tim-lewat-hub).
-
-Tampilan **Sesi & pelajaran** di UI memperlihatkan sesi, observasi, dan konvensi/koreksi/jebakan per proyek.
-Pelajaran yang berulang di ≥ 2 proyek diangkat `engram distill` menjadi kandidat prinsip kerja (menunggu konfirmasi di Review).
-
-## Keamanan
-
-- Server hanya mendengarkan di `127.0.0.1:7878`. Bila env `MEMORY_TOKEN` (nama env diatur `server.token_env`) diisi,
-  semua `/api` dan `/mcp` wajib `Authorization: Bearer <token>`. Token ini **global**: boleh menyentuh semua subjek
-  dan semua endpoint.
-- **Token per subjek (isolasi tenant).** Env `MEMORY_SUBJECT_TOKENS` (nama env diatur `server.subject_tokens_env`)
-  berisi `subjekA=tokenA,subjekB=tokenB`. Request dengan token subjek hanya boleh menyentuh subjek itu:
-  `/api/subjects/{s}/...` dengan `s` yang sama, `POST /api/subjects` hanya untuk id yang sama (`GET` hanya
-  memperlihatkan subjeknya), `/mcp` dengan argumen `subject` yang dipaksa ke subjek itu (`list_subjects` ditolak),
-  serta `/api/reviews/{id}` dan `/api/sources/{id}` milik subjek itu. Endpoint lain (settings, storage, update,
-  services, pick-folder, hooks) dijawab `403`. Token global tetap berlaku untuk semua. Contoh untuk dua tenant OPERON:
+- The server listens on `127.0.0.1:7878` only. When `MEMORY_TOKEN` (env name set by `server.token_env`) is set,
+  every `/api` and `/mcp` request must carry `Authorization: Bearer <token>`. That token is **global**: it may touch
+  every subject and every endpoint.
+- **Per-subject tokens (tenant isolation).** `MEMORY_SUBJECT_TOKENS` (env name set by `server.subject_tokens_env`)
+  holds `subjectA=tokenA,subjectB=tokenB`. A request with a subject token may only touch that subject:
+  `/api/subjects/{s}/...` with the same `s`, `POST /api/subjects` only for the same id (`GET` shows only that
+  subject), `/mcp` with the `subject` argument forced to it (`list_subjects` is refused), and `/api/reviews/{id}` /
+  `/api/sources/{id}` owned by it. Everything else (settings, storage, update, services, pick-folder, hooks) answers
+  `403`. The global token keeps working for everything.
 
   ```bash
   MEMORY_TOKEN="$(openssl rand -hex 24)" \
   MEMORY_SUBJECT_TOKENS="tenant_a=$(openssl rand -hex 24),tenant_b=$(openssl rand -hex 24)" \
   engram serve
-  # agen tenant_a memakai POST /mcp?profile=operon dengan Bearer token tenant_a
+  # tenant_a's agent calls POST /mcp?profile=operon with tenant_a's bearer token
   ```
 
-- Rahasia (API key, token, PEM, kredensial URL) disamarkan sebelum masuk vault (`[privacy]`), sinkronisasi Drive
-  dienkripsi `age`. Kebijakan lengkap: [SECURITY.md](SECURITY.md).
+- Secrets (API keys, tokens, PEM blocks, URL credentials) are redacted before anything reaches the vault
+  (`[privacy]`); Drive sync is `age`-encrypted. Full policy: [SECURITY.md](SECURITY.md).
 
-## Pengembangan
+## Development
 
 ```sh
 cargo build --release -p memory-cli
 cargo test --workspace --exclude memory-desktop
 ```
 
-Lihat [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), dan [CHANGELOG.md](CHANGELOG.md).
-Panduan konfigurasi (`memory.toml`), aplikasi desktop, dan CLI ada di [docs/PANDUAN.md](docs/PANDUAN.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CHANGELOG.md](CHANGELOG.md).
+The Indonesian [docs/PANDUAN.md](docs/PANDUAN.md) covers configuration (`memory.toml`), the desktop app and the CLI
+in depth.
 
-## Upgrade dari 0.3 ke 0.4
+## Upgrading from 0.3 to 0.4
 
-engram 0.4 memakai SurrealDB 4 dengan engine SurrealKV; vault 0.3 (RocksDB di `db/`) tidak bisa dibuka langsung.
+engram 0.4 uses SurrealDB 4 with the SurrealKV engine; a 0.3 vault (RocksDB in `db/`) cannot be opened directly.
 
 ```sh
-engram backup vault-v3.tar.gz          # dengan engram 0.3, sebelum upgrade
-engram vault migrate-v3 vault-v3.tar.gz      # dengan engram 0.4 (butuh server embedding untuk reembed)
+engram backup vault-v3.tar.gz          # with engram 0.3, before upgrading
+engram vault migrate-v3 vault-v3.tar.gz      # with engram 0.4 (needs the embedding server to re-embed)
 ```
 
-Database lama dipindah ke `db-rocksdb-v3.bak/`; hapus setelah semuanya berjalan baik.
+The old database is moved to `db-rocksdb-v3.bak/`; delete it once everything works.
 
-## Lisensi
+## License
 
-Dual licence: [GNU Affero General Public License v3.0 atau lebih baru](LICENSE), atau [lisensi komersial internal](LICENSE-COMMERCIAL). Lisensi komersial untuk pihak lain tersedia atas permintaan.
+Dual licence: [GNU Affero General Public License v3.0 or later](LICENSE), or the [internal commercial licence](LICENSE-COMMERCIAL). Commercial licensing for others on request.
