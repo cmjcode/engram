@@ -670,8 +670,7 @@ function hubLoginForm(account, onDone) {
   return {
     html: `<div class="proj-hub-login">
       <input type="url" class="hub-url" placeholder="https://engram.team.example" value="${esc(hub)}" spellcheck="false" aria-label="${t("Team hub URL")}">
-      <button type="button" data-login="github">${PROVIDER_ICON.github} ${t("Sign in with GitHub")}</button>
-      <button type="button" data-login="google">${PROVIDER_ICON.google} ${t("Sign in with Google")}</button></div>`,
+      <button type="button" data-login="github">${PROVIDER_ICON.github} ${t("Sign in with GitHub")}</button></div>`,
     wire(box) {
       box.querySelectorAll("[data-login]").forEach((b) => {
         b.onclick = async () => {

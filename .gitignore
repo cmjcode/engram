@@ -25,3 +25,4 @@ vault/db/MANIFEST-000005
 vault/db/OPTIONS-000007
 # Rahasia hub tim (lihat docker/hub.env.example)
 docker/hub.env
+docker/env.example
