@@ -118,6 +118,16 @@ const mount = (g, p, hooks = {}) => { const c = canvasEl(), tip = el(); return {
   ok(vis.every((n) => Math.abs(Math.hypot(n.x, n.y, n.z) - v.R) < 1e-6 * v.R + 1e-6), "simpul tepat di permukaan bola");
   ok(finiteOnScreen(vis), "posisi layar finit dan di dalam kanvas (3D)");
   ok(vis.some((n) => n.depth < 0) && vis.some((n) => n.depth > 0), "ada sisi depan dan belakang bola");
+  const projs3d = vis.filter((n) => n.kind === "project");
+  const cDist = Math.hypot(projs3d.reduce((s, n) => s + n.x, 0) / projs3d.length, projs3d.reduce((s, n) => s + n.y, 0) / projs3d.length, projs3d.reduce((s, n) => s + n.z, 0) / projs3d.length);
+  ok(cDist < 0.35 * v.R, `proyek menyebar ke seluruh bola (rasio pusat ${(cDist / v.R).toFixed(2)})`);
+  const clusterColors = new Set(projs3d.filter((n) => !n.missing).map((n) => ctl.colorOf(n.id)));
+  ok(ctl.model.clusters.length >= 4 && clusterColors.size >= 4, `klaster & warna proyek beragam (${ctl.model.clusters.length} klaster, ${clusterColors.size} warna)`);
+  ok(ctl.setCluster(0) === 0 && ctl.setCluster(0) === null, "sorot klaster bisa dinyalakan & dimatikan");
+  ctl.setColor("node");
+  const nodeColors = new Set(projs3d.filter((n) => !n.missing).map((n) => ctl.colorOf(n.id)));
+  ok(nodeColors.size === projs3d.filter((n) => !n.missing).length, `mode tiap simpul memberi warna unik (${nodeColors.size})`);
+  ctl.setColor("cluster");
   ok(c.ctxCalls > 100 && c.texts.length > 0, "kanvas digambar dengan label");
   ok(rafQ.length > 0, "putar otomatis menjaga animasi tetap jalan");
   const yaw0 = v.yaw; pump(5);
@@ -257,7 +267,7 @@ const mount = (g, p, hooks = {}) => { const c = canvasEl(), tip = el(); return {
   aside.querySelector("[data-gfocus]").onclick();
   ok(focused === "Project 3", "Fokus di sini memanggil onFocus dengan nama proyek");
   const legend = el();
-  for (const color of ["kind", "tag", "activity"]) { G("graphLegend")(legend, ctl, { color }); ok(legend.innerHTML.length > 20, `legenda mode ${color}`); }
+  for (const color of ["cluster", "node", "kind", "tag", "activity"]) { G("graphLegend")(legend, ctl, { color }); ok(legend.innerHTML.length > 20, `legenda mode ${color}`); }
   // Graf kosong menampilkan petunjuk.
   graphData = { nodes: [], edges: [], focus: null, truncated: false, total_nodes: 0 };
   const box3 = el();

@@ -7,16 +7,141 @@
 "use strict";
 
 const GRAPH_KINDS = [["link", t("Links [[ ]]")], ["mention", t("Mentions")], ["tag", t("Tags")], ["entity", t("Entities")]];
-const GRAPH_DEFAULTS = { link: true, mention: true, tag: true, entity: true, orphans: true, mode: "3d", rotate: true, color: "kind", days: 0 };
+const GRAPH_DEFAULTS = { v: 2, link: true, mention: true, tag: true, entity: true, orphans: true, mode: "3d", rotate: true, color: "cluster", days: 0 };
 const GRAPH_DAY_MS = 864e5;
+const GRAPH_CLUSTER_HUES = [202, 352, 265, 28, 145, 322, 178, 48, 228, 95, 12, 290, 162, 72];
 
 function graphPrefs() {
-  try { return { ...GRAPH_DEFAULTS, ...JSON.parse(localStorage.getItem("graph-filters") || "{}") }; } catch (e) { return { ...GRAPH_DEFAULTS }; }
+  try {
+    const raw = JSON.parse(localStorage.getItem("graph-filters") || "{}");
+    if (!raw.v && raw.color === "kind") delete raw.color;
+    return { ...GRAPH_DEFAULTS, ...raw, v: GRAPH_DEFAULTS.v };
+  } catch (e) { return { ...GRAPH_DEFAULTS }; }
 }
-function saveGraphPrefs(p) { try { localStorage.setItem("graph-filters", JSON.stringify(p)); } catch (e) { /* storage diblokir */ } }
+function saveGraphPrefs(p) { try { localStorage.setItem("graph-filters", JSON.stringify({ ...p, v: GRAPH_DEFAULTS.v })); } catch (e) { /* storage diblokir */ } }
 
 const graphRadius = (n) => (n.kind === "project" ? 5 + 2.2 * Math.sqrt(n.degree + n.weight / 8) : n.kind === "tag" ? 4 + 1.4 * Math.sqrt(n.degree) : 3 + Math.sqrt(n.degree));
 const graphClamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// Prefiks bermakna nama proyek (mis. "api-master-kandang" -> "api-master", "BACKEND/foo" -> "backend").
+function graphPrefix(label) {
+  const s = String(label || "").trim().toLowerCase();
+  const slash = s.indexOf("/");
+  if (slash > 1) return s.slice(0, slash);
+  const parts = s.split(/[-_\s]+/).filter(Boolean);
+  if (parts.length >= 3) return `${parts[0]}-${parts[1]}`;
+  if (parts.length === 2 && parts[0].length >= 3) return parts[0];
+  return "";
+}
+
+// Pengelompokan klaster otomatis berbasis hub proyek + kedekatan graf, agar proyek besar
+// menyebar ke klaster berbeda dan satelit (tag/entitas) mengikuti klaster proyek induknya.
+function graphClusters(nodes, edges, groupOf) {
+  const projects = nodes.filter((n) => n.kind === "project");
+  const clusterOf = new Map();
+  if (!projects.length) return { clusters: [], clusterOf };
+
+  // Afinitas antar proyek: tautan langsung kuat, tag/entitas bersama moderat (abaikan hub terlalu umum).
+  const aff = new Map(projects.map((p) => [p.id, new Map()]));
+  const addAff = (a, b, w) => {
+    if (a === b) return;
+    const ma = aff.get(a), mb = aff.get(b);
+    if (!ma || !mb) return;
+    ma.set(b, (ma.get(b) || 0) + w);
+    mb.set(a, (mb.get(a) || 0) + w);
+  };
+  const satToProj = new Map();
+  for (const e of edges) {
+    if (e.s.kind === "project" && e.t.kind === "project") {
+      addAff(e.s.id, e.t.id, 3 + Math.log(1 + Math.max(1, e.weight)));
+    } else if (e.s.kind === "project" && e.t.kind !== "project") {
+      if (!satToProj.has(e.t.id)) satToProj.set(e.t.id, []);
+      satToProj.get(e.t.id).push({ id: e.s.id, w: Math.max(1, e.weight) });
+    } else if (e.t.kind === "project" && e.s.kind !== "project") {
+      if (!satToProj.has(e.s.id)) satToProj.set(e.s.id, []);
+      satToProj.get(e.s.id).push({ id: e.t.id, w: Math.max(1, e.weight) });
+    }
+  }
+  for (const [, list] of satToProj) {
+    if (list.length < 2 || list.length > 14) continue;
+    const share = 1.2 / list.length;
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) addAff(list[i].id, list[j].id, share);
+  }
+
+  // Pilih K jangkar (proyek hub paling menonjol yang saling berjauhan di graf).
+  const K = projects.length <= 6 ? projects.length : graphClamp(Math.round(Math.sqrt(projects.length) * 1.6), 4, 14);
+  const ranked = projects.slice().sort((a, b) => b.degree - a.degree || b.weight - a.weight || (a.id < b.id ? -1 : 1));
+  const anchors = [ranked[0]];
+  const anchorIds = new Set([ranked[0].id]);
+  while (anchors.length < K) {
+    let best = null, bestScore = -1;
+    for (const p of ranked) {
+      if (anchorIds.has(p.id)) continue;
+      const base = 1 + p.degree + Math.log(1 + Math.max(0, p.weight));
+      const ma = aff.get(p.id);
+      let pen = 0;
+      const pg = groupOf.get(p.id), pp = graphPrefix(p.label);
+      for (const a of anchors) {
+        if (ma && ma.has(a.id)) pen += 1.6 + Math.min(3, ma.get(a.id) * 0.4);
+        if (pg && pg === groupOf.get(a.id)) pen += 0.35;
+        if (pp && pp === graphPrefix(a.label)) pen += 0.45;
+      }
+      const sc = base / (1 + pen);
+      if (sc > bestScore) { bestScore = sc; best = p; }
+    }
+    if (!best) break;
+    anchors.push(best);
+    anchorIds.add(best.id);
+  }
+
+  const members = anchors.map((a) => [a]);
+  const anchorIdx = new Map(anchors.map((a, i) => [a.id, i]));
+  anchors.forEach((a, i) => clusterOf.set(a.id, i));
+
+  // Masukkan proyek lain ke jangkar terdekat (afinitas 1-hop + 2-hop + prefiks + keseimbangan ukuran).
+  for (const p of ranked) {
+    if (anchorIdx.has(p.id)) continue;
+    const ma = aff.get(p.id) || new Map();
+    const pg = groupOf.get(p.id), pp = graphPrefix(p.label);
+    let bestI = 0, bestS = -1;
+    for (let i = 0; i < anchors.length; i++) {
+      const a = anchors[i];
+      let s = ma.get(a.id) || 0;
+      // 2-hop melalui tetangga yang sudah masuk klaster i.
+      for (const [nid, w] of ma) if (clusterOf.get(nid) === i) s += w * 0.35;
+      if (pg && pg === groupOf.get(a.id)) s += 0.5;
+      if (pp && pp === graphPrefix(a.label)) s += 0.85;
+      const balanced = (s + 0.01) / (1 + 0.16 * members[i].length);
+      if (balanced > bestS) { bestS = balanced; bestI = i; }
+    }
+    clusterOf.set(p.id, bestI);
+    members[bestI].push(p);
+  }
+
+  // Satelit (tag & entitas) ikut klaster proyek yang paling kuat terhubung dengannya.
+  for (const n of nodes) {
+    if (n.kind === "project") continue;
+    const list = satToProj.get(n.id) || [];
+    const votes = new Map();
+    for (const { id, w } of list) {
+      const ci = clusterOf.get(id);
+      if (ci != null) votes.set(ci, (votes.get(ci) || 0) + w);
+    }
+    let bestI = 0, bestW = -1;
+    for (const [ci, w] of votes) if (w > bestW) { bestW = w; bestI = ci; }
+    if (bestW >= 0) clusterOf.set(n.id, bestI);
+  }
+
+  // Urutkan klaster dari terbesar agar warna & legenda stabil dan rapi.
+  const counts = anchors.map((_, i) => 0);
+  for (const ci of clusterOf.values()) counts[ci]++;
+  const order = anchors.map((a, i) => ({ old: i, anchor: a, size: counts[i] }))
+    .sort((x, y) => y.size - x.size || x.anchor.label.localeCompare(y.anchor.label));
+  const remap = new Map(order.map((o, i) => [o.old, i]));
+  for (const [id, ci] of clusterOf) clusterOf.set(id, remap.get(ci));
+  const clusters = order.map((o, i) => ({ id: i, label: o.anchor.label, anchor: o.anchor, size: o.size }));
+  return { clusters, clusterOf };
+}
 
 // ---------------------------------------------------------------- model
 // Simpul & sisi + filter. Posisi (x, y, z) diisi layout; cache layar (sx, sy, sr, depth, fade) diisi proyeksi.
@@ -41,8 +166,11 @@ function graphModel(g, prefs) {
   for (const [id, list] of tagsOf) { list.sort(bySize); groupOf.set(id, list[0]); }
   const groups = [...new Set(groupOf.values())].sort(bySize);
   for (const n of nodes) if (n.kind === "tag" && groups.includes(n.label)) groupOf.set(n.id, n.label);
+  const { clusters, clusterOf } = graphClusters(nodes, edges, groupOf);
+  const sortedIds = nodes.slice().sort((a, b) => (a.kind === b.kind ? (a.id < b.id ? -1 : 1) : a.kind === "project" ? -1 : b.kind === "project" ? 1 : a.kind < b.kind ? -1 : 1));
+  const nodeIndex = new Map(sortedIds.map((n, i) => [n.id, i]));
 
-  const m = { nodes, edges, byId, groups, groupOf, tagsOf: (id) => tagsOf.get(id) || [], focus: nodes.find((n) => n.focus) || null, visN: [], visE: [], neigh: new Map(), rank: new Map() };
+  const m = { nodes, edges, byId, groups, groupOf, clusters, clusterOf, nodeIndex, tagsOf: (id) => tagsOf.get(id) || [], focus: nodes.find((n) => n.focus) || null, visN: [], visE: [], neigh: new Map(), rank: new Map() };
   m.apply = (p) => {
     const cut = p.days ? Date.now() - p.days * GRAPH_DAY_MS : 0;
     const alive = (n) => n.focus || !cut || n.lastMs >= cut;
@@ -93,12 +221,27 @@ function graphStyle(canvas) {
   return {
     project: v("--graph-project", "#0071e3"), tag: v("--graph-tag", "#0d9488"), entity: v("--graph-entity", "#8b5cf6"),
     missing: v("--graph-missing", "#94a3b8"), ungrouped: v("--graph-ungrouped", "#94a3b8"), edge: v("--graph-edge", "rgba(100,116,139,.45)"),
-    text: v("--graph-text", "#1d1d1f"), halo: v("--graph-halo", "rgba(255,255,255,.85)"), accent: v("--accent", "#0071e3"),
+    text: v("--graph-text", "#1d1d1f"), halo: v("--graph-halo", "rgba(255,255,255,.85)"),
+    labelBg: v("--graph-label-bg", "rgba(248,250,252,.86)"), grid: v("--graph-grid", "rgba(100,116,139,.09)"),
+    accent: v("--accent", "#0071e3"),
     globe: v("--graph-globe", "rgba(0,113,227,.06)"), globeLine: v("--graph-globe-line", "rgba(100,116,139,.22)"),
     groupS: v("--graph-group-s", "58%"), groupL: v("--graph-group-l", "44%"),
   };
 }
 const graphHue = (i) => Math.round((210 + i * 137.508) % 360);
+const graphClusterHue = (ci) => (ci < GRAPH_CLUSTER_HUES.length ? GRAPH_CLUSTER_HUES[ci] : graphHue(ci));
+function graphClusterColor(c, ci, variant = null) {
+  if (ci == null || ci < 0) return c.ungrouped;
+  const baseH = graphClusterHue(ci);
+  const baseS = parseFloat(c.groupS) || 60;
+  const baseL = parseFloat(c.groupL) || 56;
+  if (variant == null) return `hsl(${baseH}, ${Math.round(baseS)}%, ${Math.round(baseL)}%)`;
+  const dh = ((variant % 5) - 2) * 5;
+  const dl = ((variant % 3) - 1) * 6;
+  const h = (baseH + dh + 360) % 360;
+  const l = graphClamp(Math.round(baseL + dl), 28, 78);
+  return `hsl(${h}, ${Math.round(baseS)}%, ${l}%)`;
+}
 function graphGroupColor(m, c, label) {
   const i = m.groups.indexOf(label);
   return i < 0 ? c.ungrouped : `hsl(${graphHue(i)}, ${c.groupS}, ${c.groupL})`;
@@ -113,30 +256,54 @@ function graphAgeAlpha(n) {
 }
 function graphNodeColor(m, c, n, mode) {
   if (n.missing) return c.missing;
+  if (mode === "cluster") return graphClusterColor(c, m.clusterOf.get(n.id), m.nodeIndex.get(n.id) || 0);
+  if (mode === "node") return `hsl(${graphHue(m.nodeIndex.get(n.id) || 0)}, ${c.groupS}, ${c.groupL})`;
   if (mode === "tag" && n.kind !== "entity") return graphGroupColor(m, c, m.groupOf.get(n.id));
   return c[n.kind] || c.entity;
 }
 
 // ---------------------------------------------------------------- fisika
-// Tolak-menolak antar simpul + pegas pada sisi; mengakumulasi kecepatan (3D bila `three`).
-function graphForces(m, alpha, three) {
+// Tolak-menolak sadar-klaster & ukuran + pegas ternormalisasi derajat agar hub besar menyebar
+// merata di seluruh bola (3D) atau membentuk pulau klaster rapi (2D).
+function graphForces(m, alpha, three, R = 220) {
   const N = m.visN, n = N.length;
+  const repBase = three ? (R * R * 1.45) / Math.max(8, n) : 2200;
+  const maxD2 = three ? Infinity : 640000;
   for (let i = 0; i < n; i++) {
-    const a = N[i];
+    const a = N[i], ra = graphRadius(a), ca = m.clusterOf.get(a.id);
     for (let j = i + 1; j < n; j++) {
-      const b = N[j];
+      const b = N[j], rb = graphRadius(b), cb = m.clusterOf.get(b.id);
       let dx = a.x - b.x, dy = a.y - b.y, dz = three ? a.z - b.z : 0, d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 < 0.01) { dx = (i - j) * 0.1; dy = 0.1; dz = 0; d2 = dx * dx + 0.01; }
-      if (d2 > 250000) continue;
-      const d = Math.sqrt(d2), f = (1800 * alpha) / d2 / d;
+      if (d2 < 0.01) { dx = (i - j) * 0.1; dy = 0.1; dz = three ? 0.05 : 0; d2 = dx * dx + dy * dy + dz * dz; }
+      if (d2 > maxD2) continue;
+      const d = Math.sqrt(d2);
+      const sameC = ca != null && ca === cb;
+      const bothProj = a.kind === "project" && b.kind === "project";
+      const mult = sameC ? (bothProj ? 0.85 : 0.55) : (bothProj ? 3.4 : 2.2);
+      let f = (repBase * mult * alpha) / d2 / d;
+      // Hindari tumpang-tindih simpul besar.
+      const minD = (ra + rb) * (bothProj ? 2.5 : 1.9);
+      if (d < minD) f += ((minD - d) / d) * 0.42 * alpha;
       a.vx += dx * f; a.vy += dy * f; a.vz += dz * f; b.vx -= dx * f; b.vy -= dy * f; b.vz -= dz * f;
     }
   }
   for (const e of m.visE) {
-    const L = e.kind === "link" || e.kind === "mention" ? 90 : 55;
-    const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y, dz = three ? e.t.z - e.s.z : 0, d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 0.1;
-    const k = ((d - L) / d) * 0.06 * alpha * Math.min(3, 1 + Math.log(Math.max(1, e.weight)));
-    e.s.vx += dx * k; e.s.vy += dy * k; e.s.vz += dz * k; e.t.vx -= dx * k; e.t.vy -= dy * k; e.t.vz -= dz * k;
+    const a = e.s, b = e.t;
+    const sameC = m.clusterOf.get(a.id) != null && m.clusterOf.get(a.id) === m.clusterOf.get(b.id);
+    const ra = graphRadius(a), rb = graphRadius(b);
+    const L = sameC
+      ? Math.max((ra + rb) * 2.3, three ? R * 0.15 : 52)
+      : (three ? R * 0.88 : 240);
+    const dx = b.x - a.x, dy = b.y - a.y, dz = three ? b.z - a.z : 0, d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 0.1;
+    const degA = m.neigh.get(a.id)?.size || 1, degB = m.neigh.get(b.id)?.size || 1;
+    const degScale = 1 / Math.sqrt(Math.max(1, Math.min(degA, degB)));
+    const baseK = sameC ? 0.048 : 0.008;
+    const k = ((d - L) / d) * baseK * alpha * degScale * Math.min(2.5, 1 + Math.log(Math.max(1, e.weight)) * 0.5);
+    // Satelit (tag/entitas) lebih ringan agar tidak menyedot semua proyek ke satu titik.
+    const wa = a.kind === "project" && b.kind !== "project" ? 0.25 : b.kind === "project" && a.kind !== "project" ? 0.75 : 0.5;
+    const wb = 1 - wa;
+    a.vx += dx * k * wa * 2; a.vy += dy * k * wa * 2; a.vz += dz * k * wa * 2;
+    b.vx -= dx * k * wb * 2; b.vy -= dy * k * wb * 2; b.vz -= dz * k * wb * 2;
   }
 }
 
@@ -154,25 +321,37 @@ function graphPositions(m) {
 }
 
 // ---------------------------------------------------------------- layout 2D
-// Bidang datar: layar = dunia * scale + (tx, ty). Semantik sama dengan graf 2D lama.
+// Bidang datar: layar = dunia * scale + (tx, ty). Klaster tersebar sebagai pulau terpisah.
 function layout2d(m, scr) {
   const pos = graphPositions(m);
   const v = { mode: "2d", scale: 1, tx: 0, ty: 0 };
   v.activate = () => {
     if (pos.restore()) return false;
-    m.nodes.forEach((n, i) => {
-      // Spiral deterministik agar tata letak stabil antar muat.
-      const a = i * 2.399963, r = 30 * Math.sqrt(i + 1);
-      n.x = n.focus ? 0 : Math.cos(a) * r; n.y = n.focus ? 0 : Math.sin(a) * r; n.z = 0; n.vx = n.vy = n.vz = 0;
-    });
+    const K = Math.max(1, m.clusters.length);
+    const centers = [];
+    for (let ci = 0; ci < K; ci++) {
+      const a = ci * 2.399963, r = K <= 1 ? 0 : 175 * Math.sqrt(ci + 0.6);
+      centers.push([Math.cos(a) * r, Math.sin(a) * r]);
+    }
+    const localIdx = new Map();
+    const list = m.nodes.slice().sort((a, b) => (a.kind === "project" ? 0 : 1) - (b.kind === "project" ? 0 : 1) || (a.id < b.id ? -1 : 1));
+    for (const n of list) {
+      if (n.focus) { n.x = 0; n.y = 0; n.z = 0; n.vx = n.vy = n.vz = 0; continue; }
+      const ci = m.clusterOf.get(n.id) ?? 0;
+      const [cx, cy] = centers[ci] || [0, 0];
+      const idx = localIdx.get(ci) || 0;
+      localIdx.set(ci, idx + 1);
+      const a = idx * 2.399963, r = idx === 0 ? 0 : 20 * Math.sqrt(idx);
+      n.x = cx + Math.cos(a) * r; n.y = cy + Math.sin(a) * r; n.z = 0; n.vx = n.vy = n.vz = 0;
+    }
     return true;
   };
   v.deactivate = () => pos.save();
   v.refilter = () => {};
   v.tick = (alpha) => {
-    graphForces(m, alpha, false);
+    graphForces(m, alpha, false, 220);
     for (const a of m.visN) {
-      a.vx -= a.x * 0.012 * alpha; a.vy -= a.y * 0.012 * alpha;
+      a.vx -= a.x * 0.008 * alpha; a.vy -= a.y * 0.008 * alpha;
       if (a.fixed || a.focus) { a.vx = 0; a.vy = 0; if (!a.fixed) { a.x *= 0.9; a.y *= 0.9; } continue; }
       a.vx *= 0.6; a.vy *= 0.6;
       a.x += graphClamp(a.vx, -40, 40); a.y += graphClamp(a.vy, -40, 40);
@@ -183,7 +362,7 @@ function layout2d(m, scr) {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of m.visN) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); }
     const pad = 60;
-    v.scale = graphClamp(Math.min((scr.W - pad * 2) / Math.max(1, x1 - x0), (scr.H - pad * 2) / Math.max(1, y1 - y0)), 0.2, 2);
+    v.scale = graphClamp(Math.min((scr.W - pad * 2) / Math.max(1, x1 - x0), (scr.H - pad * 2) / Math.max(1, y1 - y0)), 0.15, 2);
     v.tx = scr.W / 2 - ((x0 + x1) / 2) * v.scale; v.ty = scr.H / 2 - ((y0 + y1) / 2) * v.scale;
   };
   v.project = () => {
@@ -195,7 +374,7 @@ function layout2d(m, scr) {
   v.orbit = v.pan;
   v.spin = () => false;
   v.zoomAt = (f, sx, sy) => {
-    const ns = graphClamp(v.scale * f, 0.2, 4);
+    const ns = graphClamp(v.scale * f, 0.15, 4);
     v.tx = sx - ((sx - v.tx) * ns) / v.scale; v.ty = sy - ((sy - v.ty) * ns) / v.scale; v.scale = ns;
   };
   v.center = (n) => { v.scale = Math.max(v.scale, 1.2); v.tx = scr.W / 2 - n.x * v.scale; v.ty = scr.H / 2 - n.y * v.scale; };
@@ -205,25 +384,47 @@ function layout2d(m, scr) {
 }
 
 // ---------------------------------------------------------------- layout 3D (bola)
-// Simpul dikunci di permukaan bola radius R: gaya diproyeksikan ke bidang singgung lalu posisi
-// dinormalkan kembali ke R. Kamera di sumbu -z sejauh D = 3R; rotasi yaw (sumbu y) lalu pitch (sumbu x).
+// Simpul dikunci di permukaan bola radius R: pusat klaster disebar merata dengan Fibonacci sphere,
+// lalu gaya tolak-menolak + koreksi pusat massa mencegah klaster mengumpul ke satu sisi bola.
 function layout3d(m, scr) {
   const pos = graphPositions(m);
-  const v = { mode: "3d", scale: 1, tx: 0, ty: 0, yaw: m.focus ? 0 : 0.6, pitch: m.focus ? 0 : -0.3, R: 160 };
+  const v = { mode: "3d", scale: 1, tx: 0, ty: 0, yaw: m.focus ? 0 : 0.6, pitch: m.focus ? 0 : -0.3, R: 180 };
   let anim = null;
-  const radiusFor = (k) => graphClamp(120 + 9 * Math.sqrt(k), 140, 420);
+  const radiusFor = (k) => graphClamp(150 + 11 * Math.sqrt(k), 170, 440);
   const toSphere = (n, R) => { const l = Math.hypot(n.x, n.y, n.z) || 1; n.x *= R / l; n.y *= R / l; n.z *= R / l; };
   v.activate = () => {
     const R = radiusFor(m.visN.length);
     if (pos.restore()) { for (const n of m.nodes) toSphere(n, R); v.R = R; return false; }
     v.R = R;
-    // Fibonacci sphere atas simpul terurut id: deterministik dan merata.
-    const list = m.nodes.filter((n) => !n.focus).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    list.forEach((n, i) => {
-      const y = 1 - (2 * (i + 0.5)) / list.length, r = Math.sqrt(Math.max(0, 1 - y * y)), phi = i * 2.399963;
-      n.x = Math.cos(phi) * r * R; n.y = y * R; n.z = Math.sin(phi) * r * R; n.vx = n.vy = n.vz = 0;
-    });
-    if (m.focus) { m.focus.x = 0; m.focus.y = 0; m.focus.z = -R; }
+    const K = Math.max(1, m.clusters.length);
+    // Pusat klaster disebar merata di seluruh bola (Fibonacci sphere).
+    const centers = [];
+    for (let ci = 0; ci < K; ci++) {
+      const y = K === 1 ? 0 : 1 - (2 * (ci + 0.5)) / K;
+      const r = Math.sqrt(Math.max(0, 1 - y * y)), phi = ci * 2.399963;
+      centers.push([Math.cos(phi) * r, y, Math.sin(phi) * r]);
+    }
+    const localIdx = new Map();
+    const list = m.nodes.filter((n) => !n.focus).sort((a, b) => (a.kind === "project" ? 0 : 1) - (b.kind === "project" ? 0 : 1) || b.degree - a.degree || (a.id < b.id ? -1 : 1));
+    for (const n of list) {
+      const ci = m.clusterOf.get(n.id) ?? 0;
+      const [ux, uy, uz] = centers[ci] || [0, 1, 0];
+      // Basis ortonormal di bidang singgung pusat klaster.
+      const ax = Math.abs(uy) < 0.9 ? 0 : 1, ay = Math.abs(uy) < 0.9 ? 1 : 0, az = 0;
+      let tx = uy * az - uz * ay, ty = uz * ax - ux * az, tz = ux * ay - uy * ax;
+      const tl = Math.hypot(tx, ty, tz) || 1; tx /= tl; ty /= tl; tz /= tl;
+      const bx = uy * tz - uz * ty, by = uz * tx - ux * tz, bz = ux * ty - uy * tx;
+      const idx = localIdx.get(ci) || 0;
+      localIdx.set(ci, idx + 1);
+      const ang = idx * 2.399963, rad = idx === 0 ? 0 : Math.min(0.32, 0.065 * Math.sqrt(idx));
+      const ox = Math.cos(ang) * rad, oy = Math.sin(ang) * rad;
+      n.x = (ux + tx * ox + bx * oy) * R;
+      n.y = (uy + ty * ox + by * oy) * R;
+      n.z = (uz + tz * ox + bz * oy) * R;
+      toSphere(n, R);
+      n.vx = n.vy = n.vz = 0;
+    }
+    if (m.focus) { m.focus.x = 0; m.focus.y = 0; m.focus.z = -R; m.focus.vx = m.focus.vy = m.focus.vz = 0; }
     return true;
   };
   v.deactivate = () => pos.save();
@@ -235,9 +436,17 @@ function layout3d(m, scr) {
     v.R = R;
   };
   v.tick = (alpha) => {
-    graphForces(m, alpha, true);
+    graphForces(m, alpha, true, v.R);
+    // Koreksi pusat massa agar simpul tidak mengumpul di satu sisi bola.
+    let mx = 0, my = 0, mz = 0, mw = 0;
+    if (!m.focus) {
+      for (const a of m.visN) { const w = a.kind === "project" ? 2 : 1; mx += a.x * w; my += a.y * w; mz += a.z * w; mw += w; }
+      if (mw > 0) { mx /= mw; my /= mw; mz /= mw; }
+    }
+    const recenter = !m.focus && Math.hypot(mx, my, mz) > 0.04 * v.R ? 0.14 * alpha : 0;
     for (const a of m.visN) {
       if (a.fixed || a.focus) { a.vx = a.vy = a.vz = 0; if (a.focus && !a.fixed) { a.x = 0; a.y = 0; a.z = -v.R; } continue; }
+      if (recenter) { a.vx -= mx * recenter; a.vy -= my * recenter; a.vz -= mz * recenter; }
       const l = Math.hypot(a.x, a.y, a.z) || 1, nx = a.x / l, ny = a.y / l, nz = a.z / l;
       const dot = a.vx * nx + a.vy * ny + a.vz * nz;
       a.vx = (a.vx - dot * nx) * 0.6; a.vy = (a.vy - dot * ny) * 0.6; a.vz = (a.vz - dot * nz) * 0.6;
@@ -297,10 +506,23 @@ function layout3d(m, scr) {
 // ---------------------------------------------------------------- render (ruang layar, kedua mode)
 function drawGraph(ctx, m, v, order, c, ui, W, H) {
   ctx.clearRect(0, 0, W, H);
+  // Kisi latar halus untuk membantu pembacaan ruang & klaster.
+  const step = 48;
+  ctx.globalAlpha = 1; ctx.lineWidth = 1; ctx.strokeStyle = c.grid; ctx.setLineDash([]);
+  ctx.beginPath();
+  for (let x = (W / 2) % step; x < W; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = (H / 2) % step; y < H; y += step) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
   const hot = ui.hover || ui.selected;
   const lit = hot ? m.neigh.get(hot.id) || new Set() : null;
   const matches = (n) => ui.query && n.label.toLowerCase().includes(ui.query);
-  const dim = (n) => (lit && n !== hot && !lit.has(n.id)) || (ui.query && !matches(n) && n !== hot) || (ui.group && m.groupOf.get(n.id) !== ui.group && n !== hot);
+  const dim = (n) => (lit && n !== hot && !lit.has(n.id))
+    || (ui.query && !matches(n) && n !== hot)
+    || (ui.group && m.groupOf.get(n.id) !== ui.group && n !== hot)
+    || (ui.cluster !== null && m.clusterOf.get(n.id) !== ui.cluster && n !== hot);
+  for (const n of order) n._col = graphNodeColor(m, c, n, ui.color);
+
   const g = v.globe();
   if (g && g.r > 0) {
     // Bola samar sebagai latar agar bentuk 3D terbaca.
@@ -311,22 +533,60 @@ function drawGraph(ctx, m, v, order, c, ui, W, H) {
     ctx.lineWidth = 1; ctx.strokeStyle = c.globeLine; ctx.setLineDash([]); ctx.stroke();
   }
   const edges = v.mode === "3d" ? m.visE.slice().sort((a, b) => b.s.depth + b.t.depth - a.s.depth - a.t.depth) : m.visE;
-  const zw = graphClamp(Math.sqrt(v.scale), 0.6, 1.6);
+  // Pusat layar tiap klaster untuk mengikat (edge bundling) sisi antar-klaster menjadi berkas kurva rapi.
+  const cSum = new Map();
+  for (const n of order) {
+    const ci = m.clusterOf.get(n.id);
+    if (ci == null) continue;
+    let st = cSum.get(ci);
+    if (!st) { st = { x: 0, y: 0, w: 0 }; cSum.set(ci, st); }
+    const w = n.kind === "project" ? 2 : 1;
+    st.x += n.sx * w; st.y += n.sy * w; st.w += w;
+  }
+  const cPos = new Map();
+  for (const [ci, st] of cSum) cPos.set(ci, { x: st.x / st.w, y: st.y / st.w });
+
+  const zw = graphClamp(Math.sqrt(v.scale), 0.6, 1.5);
+  const coloredEdges = ui.color === "cluster" || ui.color === "node" || ui.color === "tag";
+  const hasFilter = !!(hot || ui.query || ui.group || ui.cluster !== null);
   for (const e of edges) {
     const on = (hot && (e.s === hot || e.t === hot)) || e === ui.hoverEdge;
-    const base = (hot || ui.query || ui.group) && !on ? 0.12 : e.kind === "link" || e.kind === "mention" ? 0.9 : 0.55;
+    const ca = m.clusterOf.get(e.s.id), cb = m.clusterOf.get(e.t.id);
+    const sameC = ca != null && ca === cb;
+    const base = hasFilter && !on ? 0.08 : on ? 0.92 : sameC ? (e.kind === "link" || e.kind === "mention" ? 0.55 : 0.32) : (e.kind === "link" || e.kind === "mention" ? 0.48 : 0.24);
     ctx.globalAlpha = base * Math.min(e.s.fade, e.t.fade);
-    ctx.strokeStyle = on ? c.accent : c.edge;
-    ctx.lineWidth = Math.min(4, 0.8 + Math.log(1 + e.weight) * 0.7) * zw * (e === ui.hoverEdge ? 1.8 : 1);
+    ctx.lineWidth = Math.min(3.5, 0.65 + Math.log(1 + e.weight) * 0.55) * zw * (e === ui.hoverEdge ? 1.8 : on ? 1.35 : 1);
     ctx.setLineDash(e.kind === "mention" ? [5, 4] : e.kind === "tag" ? [1.5, 3] : []);
-    const dx = e.t.sx - e.s.sx, dy = e.t.sy - e.s.sy, d = Math.hypot(dx, dy) || 1, rt = e.t.sr + 2;
-    if (d <= rt) continue;
-    const ex = e.t.sx - (dx / d) * rt, ey = e.t.sy - (dy / d) * rt;
-    ctx.beginPath(); ctx.moveTo(e.s.sx, e.s.sy); ctx.lineTo(ex, ey); ctx.stroke();
+    const dx0 = e.t.sx - e.s.sx, dy0 = e.t.sy - e.s.sy, d = Math.hypot(dx0, dy0) || 1, rt = e.t.sr + 2;
+    if (d <= rt) { e._q = null; continue; }
+    // Kurva Bézier terikat untuk sisi antar-klaster yang cukup panjang.
+    let qx = null, qy = null;
+    if (!sameC && d > 36 && cPos.has(ca) && cPos.has(cb)) {
+      const pA = cPos.get(ca), pB = cPos.get(cb);
+      const mx = (pA.x + pB.x) * 0.5, my = (pA.y + pB.y) * 0.5;
+      const exm = (e.s.sx + e.t.sx) * 0.5, eym = (e.s.sy + e.t.sy) * 0.5;
+      qx = exm * 0.35 + mx * 0.65; qy = eym * 0.35 + my * 0.65;
+    }
+    e._q = qx !== null ? [qx, qy] : null;
+    const tx = qx !== null ? e.t.sx - qx : dx0, ty = qy !== null ? e.t.sy - qy : dy0, td = Math.hypot(tx, ty) || 1;
+    const ex = e.t.sx - (tx / td) * rt, ey = e.t.sy - (ty / td) * rt;
+    let stroke = on ? c.accent : c.edge;
+    if (!on && coloredEdges && e.s._col && e.t._col) {
+      if (sameC || d < 28) stroke = e.s._col;
+      else {
+        const lg = ctx.createLinearGradient(e.s.sx, e.s.sy, ex, ey);
+        lg.addColorStop(0, e.s._col); lg.addColorStop(1, e.t._col);
+        stroke = lg;
+      }
+    }
+    ctx.strokeStyle = stroke;
+    ctx.beginPath(); ctx.moveTo(e.s.sx, e.s.sy);
+    if (qx !== null) ctx.quadraticCurveTo(qx, qy, ex, ey); else ctx.lineTo(ex, ey);
+    ctx.stroke();
     if (e.kind === "link" || e.kind === "mention") {
       // Panah arah tautan, ukuran tetap di layar.
-      const ah = 7, ang = Math.atan2(dy, dx);
-      ctx.setLineDash([]); ctx.fillStyle = on ? c.accent : c.edge;
+      const ah = 6.5, ang = Math.atan2(ty, tx);
+      ctx.setLineDash([]); ctx.fillStyle = on ? c.accent : (coloredEdges && e.t._col ? e.t._col : c.edge);
       ctx.beginPath(); ctx.moveTo(ex, ey);
       ctx.lineTo(ex - ah * Math.cos(ang - 0.4), ey - ah * Math.sin(ang - 0.4));
       ctx.lineTo(ex - ah * Math.cos(ang + 0.4), ey - ah * Math.sin(ang + 0.4));
@@ -335,8 +595,8 @@ function drawGraph(ctx, m, v, order, c, ui, W, H) {
   }
   ctx.setLineDash([]);
   for (const n of order) {
-    const r = n.sr, col = graphNodeColor(m, c, n, ui.color);
-    ctx.globalAlpha = (dim(n) ? 0.18 : 1) * n.fade * (ui.color === "activity" ? graphAgeAlpha(n) : 1);
+    const r = n.sr, col = n._col;
+    ctx.globalAlpha = (dim(n) ? 0.16 : 1) * n.fade * (ui.color === "activity" ? graphAgeAlpha(n) : 1);
     ctx.beginPath(); ctx.arc(n.sx, n.sy, r, 0, Math.PI * 2);
     if (n.missing) { ctx.lineWidth = 1.5; ctx.strokeStyle = col; ctx.stroke(); }
     else {
@@ -344,7 +604,7 @@ function drawGraph(ctx, m, v, order, c, ui, W, H) {
       if (v.mode === "3d" && r > 2.5) {
         // Kilau kecil di kiri atas agar simpul tampak seperti bola.
         const sh = ctx.createRadialGradient(n.sx - r * 0.35, n.sy - r * 0.35, r * 0.1, n.sx, n.sy, r);
-        sh.addColorStop(0, "rgba(255,255,255,0.55)"); sh.addColorStop(1, "rgba(255,255,255,0)");
+        sh.addColorStop(0, "rgba(255,255,255,0.52)"); sh.addColorStop(1, "rgba(255,255,255,0)");
         ctx.fillStyle = sh; ctx.fill();
       }
     }
@@ -354,24 +614,28 @@ function drawGraph(ctx, m, v, order, c, ui, W, H) {
       ctx.beginPath(); ctx.arc(n.sx, n.sy, r + 3, 0, Math.PI * 2); ctx.stroke();
     }
   }
-  // Label: yang disorot selalu tampil; selain itu proyek penting di sisi depan, dengan peredam tumpukan.
-  ctx.font = "12px -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
+  // Label: yang disorot selalu tampil; selain itu proyek penting di sisi depan, dengan lencana latar kontras.
+  ctx.font = "11.5px -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
   ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.lineJoin = "round";
-  const K = Math.round(12 + 30 * v.scale), taken = new Set();
+  const K = Math.round(14 + 28 * v.scale), taken = new Set();
   const forced = (n) => n === hot || (lit && lit.has(n.id)) || matches(n) || n.focus;
   const front = (n) => v.mode === "2d" || n.depth < 0;
-  const wanted = (n) => n.kind === "project" ? (v.mode === "2d" ? v.scale >= 0.45 : front(n) && (m.rank.get(n.id) ?? 1e9) < K) : v.scale >= 1.4 && front(n);
+  const wanted = (n) => n.kind === "project" ? (v.mode === "2d" ? v.scale >= 0.4 : front(n) && (m.rank.get(n.id) ?? 1e9) < K) : v.scale >= 1.4 && front(n);
   const labels = order.filter((n) => forced(n) || wanted(n)).sort((a, b) => (forced(b) ? 1 : 0) - (forced(a) ? 1 : 0) || a.depth - b.depth || (m.rank.get(a.id) ?? 1e9) - (m.rank.get(b.id) ?? 1e9));
   for (const n of labels) {
     const sx = n.sx, sy = n.sy + n.sr + 4;
     if (sx < -100 || sx > W + 100 || sy < -20 || sy > H + 20) continue;
-    const key = `${Math.round(sx / 70)}:${Math.round(sy / 16)}`;
+    const key = `${Math.round(sx / 84)}:${Math.round(sy / 20)}`;
     if (taken.has(key) && !forced(n)) continue;
     taken.add(key);
-    ctx.globalAlpha = dim(n) ? 0.25 : Math.max(0.55, n.fade);
-    const label = n.label.length > 32 ? n.label.slice(0, 31) + "..." : n.label;
-    ctx.lineWidth = 3; ctx.strokeStyle = c.halo; ctx.strokeText(label, sx, sy);
-    ctx.fillStyle = n.missing ? c.missing : c.text; ctx.fillText(label, sx, sy);
+    ctx.globalAlpha = dim(n) ? 0.22 : Math.max(0.65, n.fade);
+    const label = n.label.length > 30 ? n.label.slice(0, 29) + "..." : n.label;
+    const tw = ctx.measureText ? ctx.measureText(label).width : label.length * 6.5;
+    const px = 5, py = 2;
+    ctx.fillStyle = c.labelBg;
+    ctx.fillRect(sx - tw / 2 - px, sy - py, tw + px * 2, 15 + py);
+    ctx.fillStyle = n.missing ? c.missing : c.text;
+    ctx.fillText(label, sx, sy);
   }
   ctx.globalAlpha = 1;
 }
@@ -383,11 +647,19 @@ function hitNode(order, px, py) {
 }
 function hitEdge(m, px, py) {
   let best = null, bd = 5;
-  for (const e of m.visE) {
-    const ax = e.s.sx, ay = e.s.sy, bx = e.t.sx, by = e.t.sy, l2 = (bx - ax) ** 2 + (by - ay) ** 2;
-    if (!l2) continue;
+  const segDist = (ax, ay, bx, by) => {
+    const l2 = (bx - ax) ** 2 + (by - ay) ** 2;
+    if (!l2) return Infinity;
     const k = graphClamp(((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / l2, 0, 1);
-    const d = Math.hypot(px - ax - k * (bx - ax), py - ay - k * (by - ay));
+    return Math.hypot(px - ax - k * (bx - ax), py - ay - k * (by - ay));
+  };
+  for (const e of m.visE) {
+    const ax = e.s.sx, ay = e.s.sy, bx = e.t.sx, by = e.t.sy;
+    let d;
+    if (e._q) {
+      const mx = 0.25 * ax + 0.5 * e._q[0] + 0.25 * bx, my = 0.25 * ay + 0.5 * e._q[1] + 0.25 * by;
+      d = Math.min(segDist(ax, ay, mx, my), segDist(mx, my, bx, by));
+    } else d = segDist(ax, ay, bx, by);
     if (d < bd) { bd = d; best = e; }
   }
   return best;
@@ -465,7 +737,7 @@ function mountGraph(canvas, g, prefs, tip, hooks = {}) {
   const layouts = { "2d": layout2d(m, scr), "3d": layout3d(m, scr) };
   let v = layouts[prefs.mode === "2d" ? "2d" : "3d"];
   v.activate();
-  const ui = { hover: null, hoverEdge: null, selected: null, query: "", group: "", color: prefs.color };
+  const ui = { hover: null, hoverEdge: null, selected: null, query: "", group: "", cluster: null, color: prefs.color };
   let alpha = 1, raf = 0, everConnected = false, userMoved = false, interacted = false, destroyed = false, order = m.visN;
   let style = graphStyle(canvas);
 
@@ -614,8 +886,9 @@ function mountGraph(canvas, g, prefs, tip, hooks = {}) {
       draw();
     },
     setRotate(b) { prefs.rotate = !!b; if (b) interacted = false; request(); },
-    setColor(c) { prefs.color = c; ui.color = c; draw(); },
-    setGroup(gr) { ui.group = ui.group === gr ? "" : gr || ""; draw(); return ui.group; },
+    setColor(c) { prefs.color = c; ui.color = c; ui.group = ""; ui.cluster = null; draw(); },
+    setGroup(gr) { ui.cluster = null; ui.group = ui.group === gr ? "" : gr || ""; draw(); return ui.group; },
+    setCluster(ci) { ui.group = ""; ui.cluster = ui.cluster === ci ? null : (ci ?? null); draw(); return ui.cluster; },
     zoom(k) { if (k === "in") zoomAt(1.25); else if (k === "out") zoomAt(0.8); else refit(); },
     search(s) { ui.query = s.trim().toLowerCase(); draw(); },
     focusMatch() { const n = m.visN.find((x) => x.label.toLowerCase().includes(ui.query)); if (ui.query && n) select(n); },
@@ -626,6 +899,7 @@ function mountGraph(canvas, g, prefs, tip, hooks = {}) {
     hitTest: (x, y) => hitNode(order, x, y),
     colorOf: (id) => { const n = m.byId.get(id); return n ? graphNodeColor(m, style, n, ui.color) : ""; },
     groupColor: (gr) => graphGroupColor(m, style, gr),
+    clusterColor: (ci) => graphClusterColor(style, ci, null),
     style: () => style,
     redraw: draw,
     destroy() {
@@ -684,7 +958,21 @@ function graphNodePanel(aside, n, ctl, ctx) {
 function graphLegend(el, ctl, prefs) {
   const m = ctl.model, c = ctl.style();
   const dot = (color, extra = "") => `<span class="graph-dot${extra}" style="background:${color}" aria-hidden="true"></span>`;
-  if (prefs.color === "tag") {
+  if (prefs.color === "cluster") {
+    const shown = m.clusters.slice(0, 14);
+    el.innerHTML = shown.map((cl) => `<button type="button" class="graph-legend-item" data-cluster="${cl.id}" aria-pressed="false">${dot(ctl.clusterColor(cl.id))}${esc(cl.label)}</button>`).join("")
+      + `<span class="graph-legend-item static"><span class="graph-dot hollow" style="border-color:${c.missing}" aria-hidden="true"></span>${t("Linked, no memory yet")}</span>`;
+    el.querySelectorAll("[data-cluster]").forEach((b) => {
+      b.onclick = () => {
+        const ci = Number(b.dataset.cluster);
+        const on = ctl.setCluster(ci);
+        el.querySelectorAll("[data-cluster]").forEach((x) => { const a = Number(x.dataset.cluster) === on; x.classList.toggle("active", a); x.setAttribute("aria-pressed", String(a)); });
+      };
+    });
+  } else if (prefs.color === "node") {
+    el.innerHTML = `<span class="graph-legend-item static">${t("Each node has its own color")}</span>`
+      + `<span class="graph-legend-item static"><span class="graph-dot hollow" style="border-color:${c.missing}" aria-hidden="true"></span>${t("Linked, no memory yet")}</span>`;
+  } else if (prefs.color === "tag") {
     if (!m.groups.length) { el.innerHTML = `<span class="small muted">${t("No group tags yet. Add tags on a project page to color groups.")}</span>`; return; }
     const shown = m.groups.slice(0, 16);
     el.innerHTML = `${shown.map((gr) => `<button type="button" class="graph-legend-item" data-group="${esc(gr)}" aria-pressed="false">${dot(ctl.groupColor(gr))}${esc(gr)}</button>`).join("")}
@@ -736,7 +1024,7 @@ async function graphPanel(box, { project = "", depth = 1, page = false } = {}) {
         <button type="button" data-gmode="2d" class="${prefs.mode === "2d" ? "active" : ""}" aria-pressed="${prefs.mode === "2d"}" title="${t("Flat: drag to pan")}">2D</button>
       </span>
       ${project ? "" : `<button type="button" class="ghost graph-rotate${prefs.rotate ? " active" : ""}" data-grotate aria-pressed="${!!prefs.rotate}" title="${t("Auto-rotate (R)")}" aria-label="${t("Auto-rotate")}">${icon("orbit")}</button>`}
-      <label class="small graph-select">${t("Color")} <select data-gcolor>${opt("kind", t("Node kind"), prefs.color)}${opt("tag", t("Group tag"), prefs.color)}${opt("activity", t("Activity"), prefs.color)}</select></label>
+      <label class="small graph-select">${t("Color")} <select data-gcolor>${opt("cluster", t("Cluster"), prefs.color)}${opt("node", t("Each node"), prefs.color)}${opt("kind", t("Node kind"), prefs.color)}${opt("tag", t("Group tag"), prefs.color)}${opt("activity", t("Activity"), prefs.color)}</select></label>
       <label class="small graph-select">${t("Active within")} <select data-gdays>${opt(0, t("All time"), prefs.days)}${opt(7, t("7 days"), prefs.days)}${opt(30, t("30 days"), prefs.days)}${opt(90, t("90 days"), prefs.days)}</select></label>
       ${project ? `<label class="small graph-select">${t("Depth")} <select data-depth>${[1, 2, 3].map((d) => opt(d, d, depth)).join("")}</select></label>` : ""}
       <div class="graph-zoom">
