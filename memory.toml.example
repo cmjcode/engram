@@ -12,6 +12,8 @@ engine = "surrealkv"        # "surrealkv" (produksi, v0.4+) | "mem" (uji); "rock
 base_url = "http://localhost:5211/v1"
 extract_model = "/models/Qwen3.6-35B-A3B-FP8"   # ekstraksi, distilasi, verifikasi, jawaban
 light_model = "/models/gemma-4-12B-it"          # segmentasi, klasifikasi, adjudikasi
+# Isi "auto" pada extract_model/light_model agar mengikuti model pertama di GET /v1/models.
+# Bila server ganti model, engram memilih ulang otomatis (saat 404 atau cek berkala) tanpa restart.
 # light_base_url = "http://localhost:5212/v1"   # bila model ringan di server lain
 # api_key_env = "OPENAI_API_KEY"
 # api_key = "sk-..."          # dipakai bila env var kosong (bisa diisi dari Pengaturan di UI)

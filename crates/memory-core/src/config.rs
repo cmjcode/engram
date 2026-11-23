@@ -52,9 +52,10 @@ pub struct LlmConfig {
     /// API key langsung (dipakai bila env var kosong). Untuk aplikasi desktop yang tidak
     /// mewarisi env shell; disimpan apa adanya di memory.toml.
     pub api_key: Option<String>,
-    /// Model besar: ekstraksi, distilasi, verifikasi.
+    /// Model besar: ekstraksi, distilasi, verifikasi. `"auto"` (atau kosong) =
+    /// pakai model pertama di `GET /models` server, dipilih ulang bila server ganti model.
     pub extract_model: String,
-    /// Model ringan: segmentasi, klasifikasi, adjudikasi.
+    /// Model ringan: segmentasi, klasifikasi, adjudikasi. Mendukung `"auto"`.
     pub light_model: String,
     /// Base URL khusus model ringan bila beda server.
     pub light_base_url: Option<String>,
@@ -496,6 +497,15 @@ pub fn resolve_api_key(env: Option<&str>, direct: Option<&str>) -> Option<String
     env.and_then(|k| std::env::var(k).ok())
         .filter(|k| !k.trim().is_empty())
         .or_else(|| direct.map(str::trim).filter(|k| !k.is_empty()).map(String::from))
+}
+
+/// Nilai model yang berarti "ikuti model yang sedang dilayani server".
+pub const AUTO_MODEL: &str = "auto";
+
+/// `true` bila nama model adalah `"auto"` (tanpa beda huruf besar/kecil) atau kosong.
+pub fn is_auto_model(name: &str) -> bool {
+    let n = name.trim();
+    n.is_empty() || n.eq_ignore_ascii_case(AUTO_MODEL)
 }
 
 impl LlmConfig {

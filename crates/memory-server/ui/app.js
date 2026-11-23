@@ -1834,8 +1834,8 @@ const settings = { tab: "umum", about: null, data: null, update: null, updatePro
 // [bagian, kunci, label, jenis, petunjuk, pilihan]
 const F_LLM = [
   ["llm", "base_url", t("LLM server URL"), "text", t("OpenAI-compatible endpoint, e.g. http://localhost:5211/v1 or https://api.openai.com/v1")],
-  ["llm", "extract_model", t("Main model"), "model", t("Story extraction, distillation, and answers.")],
-  ["llm", "light_model", t("Light model"), "model", t("Segmentation and classification; may be the same as the main model.")],
+  ["llm", "extract_model", t("Main model"), "model", t("Story extraction, distillation, and answers. Type \"auto\" to follow whatever model the server is serving.")],
+  ["llm", "light_model", t("Light model"), "model", t("Segmentation and classification; may be the same as the main model. \"auto\" also works here.")],
   ["llm", "light_base_url", t("Light model server URL"), "text", t("Leave empty if it is the same as the LLM server.")],
   ["llm", "api_key", t("API key"), "secret", t("Leave empty for a local server without a key.")],
 ];
@@ -2026,12 +2026,15 @@ function tabGeneral() {
   $("#st-body").querySelectorAll("[data-open]").forEach((b) => { b.onclick = () => openTarget(b.dataset.open); });
 }
 
+// "auto" = ikuti model yang sedang dilayani server (dipilih ulang bila server ganti model).
+const modelOptions = (models) => ["auto", ...models.filter((m) => m !== "auto")].map((m) => `<option value="${esc(m)}">`).join("");
+
 function tabModels() {
   const ed = settings.data.editable;
   const testBtn = (kind, label) => `<div class="row"><button type="button" data-test="${kind}">${icon("refresh")} ${label}</button></div><div class="small" data-test-msg="${kind}"></div>`;
   $("#st-body").innerHTML = `
     <form id="st-models-form">
-      <datalist id="st-models">${settings.models.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
+      <datalist id="st-models">${modelOptions(settings.models)}</datalist>
       <h2 style="margin-top:0">${t("Language model (LLM)")}</h2>
       <div class="card">
         ${F_LLM.map(fieldHtml).join("")}
@@ -2065,7 +2068,7 @@ function tabModels() {
         out.innerHTML = `<span class="${r.ok ? "ok-text" : "bad-text"}">${icon(r.ok ? "check" : "alert")} ${esc(r.message)}</span>`;
         if (r.models?.length) {
           settings.models = r.models;
-          $("#st-models").innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join("");
+          $("#st-models").innerHTML = modelOptions(r.models);
           out.innerHTML += `<div class="hint">${t("Models on server: {models}", { models: r.models.map(esc).join(", ") })}</div>`;
         }
       } catch (e) { out.innerHTML = errLine(e.message); }

@@ -324,12 +324,15 @@ impl Runtime {
         }
     }
 
-    /// Cek singkat bahwa server embedding dan LLM (kedua peran) bisa dihubungi.
+    /// Cek singkat bahwa server embedding dan LLM (kedua peran) bisa dihubungi
+    /// dan model yang dikonfigurasi tersedia (model `"auto"` dipilih ulang di sini).
     pub async fn check_backends(&self) -> std::result::Result<(), String> {
         let p = &self.pipeline;
-        let light_separate = self.cfg.llm.light_base_url.as_deref().is_some_and(|u| {
-            u.trim_end_matches('/') != self.cfg.llm.base_url.trim_end_matches('/')
-        });
+        let llm = &self.cfg.llm;
+        // Cek peran ringan bila servernya beda, atau modelnya beda (bisa hilang sendiri).
+        let light_separate = llm.light_base_url.as_deref().is_some_and(|u| {
+            !u.trim().is_empty() && u.trim_end_matches('/') != llm.base_url.trim_end_matches('/')
+        }) || llm.light_model.trim() != llm.extract_model.trim();
         let emb_fut = async {
             p.embedder
                 .embed_one("ping")

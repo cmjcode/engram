@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use memory_core::MemoryConfig;
+use memory_core::config::is_auto_model;
 
 pub const REPO_URL: &str = "https://github.com/cmjcode/engram";
 const LATEST_JSON: &str = "https://github.com/cmjcode/engram/releases/latest/download/latest.json";
@@ -355,11 +356,16 @@ pub async fn test_llm(cfg: &MemoryConfig) -> Value {
             Err(e) => return json!({"ok": false, "message": format!("Model ringan: {e}"), "models": models}),
         }
     }
-    if !models.is_empty() && !models.contains(&cfg.llm.extract_model) {
-        warnings.push(format!("Model utama \"{}\" tidak ada di server.", cfg.llm.extract_model));
-    }
-    if !light_models.is_empty() && !light_models.contains(&cfg.llm.light_model) {
-        warnings.push(format!("Model ringan \"{}\" tidak ada di server.", cfg.llm.light_model));
+    let mut picked = vec![];
+    for (label, name, list) in [("Model utama", &cfg.llm.extract_model, &models), ("Model ringan", &cfg.llm.light_model, &light_models)] {
+        if is_auto_model(name) {
+            match list.first() {
+                Some(m) => picked.push(format!("{label} otomatis: {m}.")),
+                None => warnings.push(format!("{label} \"auto\": server tidak melayani model apa pun.")),
+            }
+        } else if !list.is_empty() && !list.contains(name) {
+            warnings.push(format!("{label} \"{name}\" tidak ada di server. Pilih dari daftar atau isi \"auto\"."));
+        }
     }
     let mut all = models;
     for m in light_models {
@@ -367,7 +373,17 @@ pub async fn test_llm(cfg: &MemoryConfig) -> Value {
             all.push(m);
         }
     }
-    json!({"ok": warnings.is_empty(), "message": if warnings.is_empty() { format!("Terhubung. {} model tersedia.", all.len()) } else { warnings.join(" ") }, "models": all})
+    let message = if warnings.is_empty() {
+        let mut m = format!("Terhubung. {} model tersedia.", all.len());
+        for p in &picked {
+            m.push(' ');
+            m.push_str(p);
+        }
+        m
+    } else {
+        warnings.join(" ")
+    };
+    json!({"ok": warnings.is_empty(), "message": message, "models": all})
 }
 
 /// Tes server embedding: minta satu vektor dan cocokkan dimensinya.

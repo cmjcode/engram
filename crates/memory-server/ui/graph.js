@@ -559,7 +559,7 @@ function drawGraph(ctx, m, v, order, c, ui, W, H) {
     ctx.setLineDash(e.kind === "mention" ? [5, 4] : e.kind === "tag" ? [1.5, 3] : []);
     const dx0 = e.t.sx - e.s.sx, dy0 = e.t.sy - e.s.sy, d = Math.hypot(dx0, dy0) || 1, rt = e.t.sr + 2;
     if (d <= rt) { e._q = null; continue; }
-    // Kurva Bézier terikat untuk sisi antar-klaster yang cukup panjang.
+    // Kurva Bezier terikat untuk sisi antar-klaster yang cukup panjang.
     let qx = null, qy = null;
     if (!sameC && d > 36 && cPos.has(ca) && cPos.has(cb)) {
       const pA = cPos.get(ca), pB = cPos.get(cb);
