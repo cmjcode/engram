@@ -131,6 +131,12 @@ impl HubClient {
         }
     }
 
+    /// Bearer token untuk permintaan di luar API hub (mis. sync vault ke server yang sama);
+    /// access token di-refresh bila hampir kedaluwarsa.
+    pub async fn access_token(&self) -> Result<Option<String>> {
+        self.bearer().await
+    }
+
     async fn bearer(&self) -> Result<Option<String>> {
         match &self.auth {
             Auth::None => Ok(None),

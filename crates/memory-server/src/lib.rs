@@ -18,6 +18,7 @@ pub mod hub_local;
 pub mod install;
 pub mod mcp;
 pub mod settings;
+pub mod vault_sync;
 
 use std::sync::Arc;
 
@@ -347,6 +348,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/hub.js", get(|| async { asset(HUB_JS, "text/javascript; charset=utf-8") }));
     let r = r.merge(protected);
+    // Sync vault antar komputer: auth sendiri (token global atau login hub pemilik).
+    let r = r.merge(vault_sync::routes(state.clone()));
     #[cfg(feature = "hub")]
     let r = match state.hub.clone() {
         // Rute hub di luar middleware `MEMORY_TOKEN`: tiap handler memeriksa JWT/PAT sendiri.

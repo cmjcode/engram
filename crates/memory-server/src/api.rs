@@ -104,6 +104,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pick-folder", post(pick_folder))
         .route("/api/sync", get(sync_status).put(sync_settings))
         .route("/api/sync/run", post(sync_run))
+        .route("/api/sync/server", axum::routing::put(sync_server_settings))
         .route("/api/about", get(about))
         .route("/api/update/check", post(update_check))
         .route("/api/update/install", post(update_install))
@@ -1683,6 +1684,22 @@ async fn sync_settings(
         sync::set_passphrase(&st.rt.vault, Some(p.as_str()))
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     }
+    sync::save_settings(&st.rt.vault, s).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    sync_status(State(st)).await
+}
+
+#[derive(Deserialize)]
+struct SyncServerIn {
+    /// URL server sync (mis. `engram.operon.id`); kosong/null = sync server dimatikan.
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// Atur URL server sync tanpa menyentuh pengaturan folder Google Drive.
+async fn sync_server_settings(State(st): State<AppState>, Json(b): Json<SyncServerIn>) -> ApiResult<memory_jobs::sync::SyncStatus> {
+    use memory_jobs::sync;
+    let mut s = sync::load_settings(&st.rt.vault);
+    s.server = b.url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
     sync::save_settings(&st.rt.vault, s).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     sync_status(State(st)).await
 }

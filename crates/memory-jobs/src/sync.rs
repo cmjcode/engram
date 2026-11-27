@@ -1,5 +1,6 @@
 //! Sinkronisasi antar komputer lewat folder bersama (Google Drive for desktop,
-//! atau layanan lain yang menyediakan folder lokal).
+//! atau layanan lain yang menyediakan folder lokal), dan/atau lewat server engram
+//! (lihat [`crate::sync_server`]: cukup URL + login GitHub). Keduanya boleh aktif bersamaan.
 //!
 //! Database (SurrealKV) TIDAK ditaruh langsung di folder Drive: Drive menyalin
 //! berkas setengah jadi dan dua komputer bisa menulis bersamaan. Sebagai gantinya
@@ -66,11 +67,13 @@ pub struct SyncSettings {
     pub interval_minutes: u64,
     /// Nama komputer ini di daftar perangkat (default: nama komputer).
     pub device_name: Option<String>,
+    /// URL server engram untuk sync (mis. `https://engram.operon.id`). Kosong = mati.
+    pub server: Option<String>,
 }
 
 impl Default for SyncSettings {
     fn default() -> Self {
-        Self { dir: None, interval_minutes: 10, device_name: None }
+        Self { dir: None, interval_minutes: 10, device_name: None, server: None }
     }
 }
 
@@ -92,6 +95,13 @@ pub struct SyncState {
     pub pulled: BTreeMap<String, String>,
     /// Record (tabel, id) yang embedding-nya belum dihitung.
     pub pending_embed: Vec<(String, String)>,
+    /// Hash snapshot server yang terakhir digabung (sync server).
+    pub server_pulled: Option<String>,
+    /// Hash snapshot komputer ini yang terakhir diunggah ke server.
+    pub server_push_hash: Option<String>,
+    /// URL server untuk dua hash di atas (ganti server = tarik & unggah ulang).
+    pub server_url: Option<String>,
+    pub server_sync_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +164,9 @@ pub struct SyncStatus {
     pub devices: Vec<DeviceInfo>,
     /// Folder Google Drive yang terdeteksi di komputer ini.
     pub suggestions: Vec<PathBuf>,
+    /// Sync server: akun yang sedang login ke server di `settings.server` (email), bila ada.
+    pub server_account: Option<String>,
+    pub server_sync_at: Option<String>,
 }
 
 // ---------------------------------------------------------------- berkas lokal
@@ -177,7 +190,7 @@ fn write_json<T: Serialize>(p: &Path, v: &T) -> Result<()> {
 }
 
 /// Berkas sementara di folder yang sama (`.nama.tmp`): diabaikan pembaca dan rename-nya atomik.
-fn tmp_path(p: &Path) -> PathBuf {
+pub(crate) fn tmp_path(p: &Path) -> PathBuf {
     let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     p.with_file_name(format!(".{name}.tmp"))
 }
@@ -193,6 +206,10 @@ pub fn save_settings(vault: &Vault, mut s: SyncSettings) -> Result<SyncSettings>
         s.dir = Some(prepare_sync_dir(vault.root(), &dir)?);
     }
     s.device_name = s.device_name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    s.server = match s.server.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        Some(u) => Some(crate::sync_server::normalize_url(u)?),
+        None => None,
+    };
     write_json(&vault.root().join(SETTINGS_FILE), &s)?;
     Ok(s)
 }
@@ -259,7 +276,7 @@ fn key_fingerprint(pass: Option<&str>) -> String {
     }
 }
 
-fn load_state(vault: &Vault) -> SyncState {
+pub(crate) fn load_state(vault: &Vault) -> SyncState {
     let mut st: SyncState = read_json(&vault.root().join(STATE_FILE));
     let machine = machine_id();
     if st.device_id.is_empty() || st.machine != machine {
@@ -269,11 +286,11 @@ fn load_state(vault: &Vault) -> SyncState {
     st
 }
 
-fn save_state(vault: &Vault, st: &SyncState) -> Result<()> {
+pub(crate) fn save_state(vault: &Vault, st: &SyncState) -> Result<()> {
     write_json(&vault.root().join(STATE_FILE), st)
 }
 
-fn device_name(s: &SyncSettings) -> String {
+pub(crate) fn device_name(s: &SyncSettings) -> String {
     s.device_name.clone().unwrap_or_else(host_name)
 }
 
@@ -303,6 +320,8 @@ pub fn status(rt: &Runtime) -> SyncStatus {
         pending_embed: st.pending_embed.len(),
         devices,
         suggestions: suggest_dirs(),
+        server_account: settings.server.as_deref().and_then(|u| crate::sync_server::account(&rt.vault, u)),
+        server_sync_at: st.server_sync_at,
         settings,
     }
 }
@@ -321,16 +340,41 @@ fn list_devices(dir: &Path) -> Vec<Manifest> {
 
 // ---------------------------------------------------------------- sync
 
-/// Tarik data perangkat lain, gabungkan, lalu tulis snapshot komputer ini.
+/// Tarik data perangkat lain, gabungkan, lalu tulis snapshot komputer ini; lewat folder
+/// Google Drive dan/atau server engram, mana saja yang diatur.
 pub async fn sync_now(rt: &Runtime) -> Result<SyncReport> {
     let _guard = rt.sync_lock.try_lock().map_err(|_| JobError::Invalid("sinkronisasi sedang berjalan".into()))?;
     let settings = load_settings(&rt.vault);
-    let dir = settings.dir.clone().ok_or_else(|| JobError::Invalid("folder sinkronisasi belum diatur".into()))?;
+    if settings.dir.is_none() && settings.server.is_none() {
+        return Err(JobError::Invalid("sinkronisasi belum diatur (folder Google Drive atau URL server)".into()));
+    }
     let mut st = load_state(&rt.vault);
-    let res = if dir.join("devices").is_dir() {
-        run(rt, &dir, &settings, &mut st).await
+    let mut rep = SyncReport::default();
+    let mut errors: Vec<(String, JobError)> = Vec::new();
+    if let Some(dir) = &settings.dir {
+        let r = if dir.join("devices").is_dir() {
+            run(rt, dir, &settings, &mut st, &mut rep).await
+        } else {
+            Err(JobError::Invalid(format!("folder sinkronisasi {} tidak bisa diakses; pastikan Google Drive berjalan", dir.display())))
+        };
+        if let Err(e) = r {
+            errors.push(("Google Drive".into(), e));
+        }
+    }
+    if let Some(url) = &settings.server {
+        match crate::sync_server::run(rt, url, &settings, &mut st, &mut rep).await {
+            Ok(()) => st.server_sync_at = Some(now_rfc3339()),
+            Err(e) => errors.push((format!("server {url}"), e)),
+        }
+    }
+    rep.pending_embed = st.pending_embed.len() as u64;
+    let configured = usize::from(settings.dir.is_some()) + usize::from(settings.server.is_some());
+    let res = if errors.len() == configured {
+        // Semua jalur gagal: galat aslinya dikembalikan bila hanya satu.
+        Err(if errors.len() == 1 { errors.pop().map(|(_, e)| e).unwrap_or_else(|| JobError::Invalid("sinkronisasi gagal".into())) } else { JobError::Invalid(errors.iter().map(|(k, e)| format!("{k}: {e}")).collect::<Vec<_>>().join("; ")) })
     } else {
-        Err(JobError::Invalid(format!("folder sinkronisasi {} tidak bisa diakses; pastikan Google Drive berjalan", dir.display())))
+        rep.warnings.extend(errors.iter().map(|(k, e)| format!("{k}: {e}")));
+        Ok(rep)
     };
     match &res {
         Ok(r) => {
@@ -344,9 +388,8 @@ pub async fn sync_now(rt: &Runtime) -> Result<SyncReport> {
     res
 }
 
-async fn run(rt: &Runtime, dir: &Path, settings: &SyncSettings, st: &mut SyncState) -> Result<SyncReport> {
+async fn run(rt: &Runtime, dir: &Path, settings: &SyncSettings, st: &mut SyncState, rep: &mut SyncReport) -> Result<()> {
     let pass = passphrase(&rt.vault);
-    let mut rep = SyncReport::default();
     for m in list_devices(dir) {
         if m.device_id == st.device_id || st.pulled.get(&m.device_id) == Some(&m.hash) {
             continue;
@@ -355,7 +398,7 @@ async fn run(rt: &Runtime, dir: &Path, settings: &SyncSettings, st: &mut SyncSta
             rep.warnings.push(format!("{}: dibuat engram versi lebih baru; perbarui aplikasi di komputer ini", m.device_name));
             continue;
         }
-        match pull_device(rt, dir, &m, pass.as_deref(), st, &mut rep).await {
+        match pull_device(rt, dir, &m, pass.as_deref(), st, rep).await {
             Ok(true) => {
                 st.pulled.insert(m.device_id.clone(), m.hash.clone());
                 rep.pulled_from.push(m.device_name.clone());
@@ -365,12 +408,11 @@ async fn run(rt: &Runtime, dir: &Path, settings: &SyncSettings, st: &mut SyncSta
             Err(e) => rep.warnings.push(format!("{}: {e}", m.device_name)),
         }
     }
-    rep.source_files_in = copy_missing(&dir.join("sources"), &rt.vault.sources_dir())?;
-    embed_pending(rt, st, &mut rep).await;
-    push(rt, dir, settings, pass.as_deref(), st, &mut rep).await?;
-    rep.source_files_out = copy_missing(&rt.vault.sources_dir(), &dir.join("sources"))?;
-    rep.pending_embed = st.pending_embed.len() as u64;
-    Ok(rep)
+    rep.source_files_in += copy_missing(&dir.join("sources"), &rt.vault.sources_dir())?;
+    embed_pending(rt, st, rep).await;
+    push(rt, dir, settings, pass.as_deref(), st, rep).await?;
+    rep.source_files_out += copy_missing(&rt.vault.sources_dir(), &dir.join("sources"))?;
+    Ok(())
 }
 
 /// Gabungkan snapshot satu perangkat. `Ok(false)` bila isinya tidak cocok dengan manifest.
@@ -383,6 +425,11 @@ async fn pull_device(rt: &Runtime, dir: &Path, m: &Manifest, pass: Option<&str>,
         return Ok(false);
     }
     let reader = open_snapshot(&path, pass)?;
+    Ok(apply_lines(rt, reader, st, rep).await? == m.hash)
+}
+
+/// Gabungkan isi snapshot (jsonl, sudah didekompresi) ke store; mengembalikan hash isinya.
+pub(crate) async fn apply_lines(rt: &Runtime, reader: impl Read, st: &mut SyncState, rep: &mut SyncReport) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     for line in BufReader::new(reader).lines() {
         let line = line.map_err(|e| JobError::Invalid(format!("snapshot rusak/belum lengkap: {e}")))?;
@@ -398,7 +445,7 @@ async fn pull_device(rt: &Runtime, dir: &Path, m: &Manifest, pass: Option<&str>,
         }
         apply_row(rt, table, row, st, rep).await?;
     }
-    Ok(hasher.finalize().to_hex().to_string() == m.hash)
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn open_snapshot(path: &Path, pass: Option<&str>) -> Result<Box<dyn Read + Send>> {
@@ -523,7 +570,7 @@ pub(crate) fn merge(local: &Value, remote: &Value) -> Value {
     out
 }
 
-async fn embed_pending(rt: &Runtime, st: &mut SyncState, rep: &mut SyncReport) {
+pub(crate) async fn embed_pending(rt: &Runtime, st: &mut SyncState, rep: &mut SyncReport) {
     let mut items = std::mem::take(&mut st.pending_embed);
     items.sort();
     items.dedup();
@@ -621,7 +668,7 @@ async fn push(rt: &Runtime, dir: &Path, settings: &SyncSettings, pass: Option<&s
 }
 
 /// Tulis semua record yang disinkron ke `path` (jsonl.gz). Mengembalikan (hash isi, jumlah record).
-async fn write_snapshot(rt: &Runtime, path: &Path) -> Result<(String, u64)> {
+pub(crate) async fn write_snapshot(rt: &Runtime, path: &Path) -> Result<(String, u64)> {
     let mut gz = flate2::write::GzEncoder::new(std::io::BufWriter::new(std::fs::File::create(path)?), flate2::Compression::default());
     let mut hasher = blake3::Hasher::new();
     let mut n = 0u64;

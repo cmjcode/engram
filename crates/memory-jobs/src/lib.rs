@@ -10,6 +10,7 @@ pub mod repo_hub;
 mod repo_hub_tests;
 pub mod storage;
 pub mod sync;
+pub mod sync_server;
 pub mod watch;
 
 use std::sync::Arc;
@@ -505,10 +506,10 @@ impl Runtime {
         }
     }
 
-    /// Sinkronisasi otomatis bila folder sync diatur dan intervalnya sudah lewat.
+    /// Sinkronisasi otomatis bila folder sync atau server sync diatur dan intervalnya sudah lewat.
     async fn sync_if_due(&self, last: &mut Option<std::time::Instant>) {
         let s = sync::load_settings(&self.vault);
-        if s.dir.is_none()
+        if (s.dir.is_none() && s.server.is_none())
             || s.interval_minutes == 0
             || last.is_some_and(|t| t.elapsed() < Duration::from_secs(s.interval_minutes * 60))
         {

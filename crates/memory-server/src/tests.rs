@@ -885,3 +885,141 @@ async fn hub_routes_mount_only_when_enabled_and_bypass_memory_token() {
     // Google tidak dikonfigurasi: pesan jelas.
     assert_eq!(nr.get(format!("{base}/hub/auth/login/google")).send().await.unwrap().status(), 400);
 }
+
+#[tokio::test]
+async fn vault_sync_through_server_with_hub_login() {
+    use memory_core::model::SourceKind;
+    use memory_extract::ingest::IngestDoc;
+    use memory_hub::client::HubCreds;
+    use memory_hub::server::auth::users;
+    use memory_hub::server::{Provider, ProviderIdentity};
+    use memory_jobs::sync::{self, SyncSettings};
+    use memory_jobs::sync_server as ss;
+
+    // Server pusat: hub (login GitHub) + vault sendiri; hanya budi@example.com pemilik sync.
+    let sdir = tempfile::tempdir().unwrap();
+    let mut cfg = MemoryConfig::for_tests(DIM);
+    cfg.vault.path = sdir.path().to_path_buf();
+    cfg.server.token_env = None;
+    cfg.server.sync_owners = vec!["Budi@Example.com".into()];
+    let srt = Runtime::open_with(cfg, Arc::new(ScriptedLlm::new(llm)), Arc::new(HashEmbedder::new(DIM))).await.unwrap();
+    let http = reqwest::Client::new();
+    let hub_cfg = memory_core::config::HubConfig { enabled: true, base_url: "http://127.0.0.1:1".into(), github_client_id: "gh".into(), ..Default::default() };
+    let hub = memory_hub::HubState::with_parts(
+        srt.store.clone(),
+        hub_cfg,
+        memory_hub::HubSecrets::for_tests(),
+        http.clone(),
+        Arc::new(memory_hub::server::ReqwestProviderClient::new(http.clone())),
+        Arc::new(memory_hub::server::ReqwestGithub::new(http)),
+    )
+    .await
+    .unwrap();
+    let importer = Importer::new(srt.pipeline.clone(), None);
+    let mut st = AppState::new(srt.clone(), importer);
+    st.token = Some(Arc::new("rahasia-lokal".into()));
+    st.hub = Some(hub.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(st);
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
+    let base = format!("http://{addr}");
+    let host = base.trim_start_matches("http://").to_string();
+
+    let token_for = |name: &'static str| {
+        let hub = hub.clone();
+        async move {
+            let ident = ProviderIdentity { provider_id: format!("gh-{name}"), email: format!("{name}@example.com"), email_verified: true, name: Some(name.into()), avatar_url: None };
+            let u = users::login_identity(&hub, Provider::GitHub, &ident).await.unwrap();
+            users::issue_tokens(&hub, &u, "uji").await.unwrap()
+        }
+    };
+    let laptop = |dir: std::path::PathBuf, name: &'static str| {
+        let base = base.clone();
+        async move {
+            let mut cfg = MemoryConfig::for_tests(DIM);
+            cfg.vault.path = dir;
+            let r = Runtime::open_with(cfg, Arc::new(ScriptedLlm::new(llm)), Arc::new(HashEmbedder::new(DIM))).await.unwrap();
+            // Pengguna hanya mengisi URL (tanpa skema pun boleh untuk https; di sini loopback http).
+            let s = sync::save_settings(&r.vault, SyncSettings { server: Some(format!("{base}/")), interval_minutes: 0, device_name: Some(name.into()), ..Default::default() }).unwrap();
+            assert_eq!(s.server.as_deref(), Some(base.as_str()));
+            r
+        }
+    };
+    let ingest = |r: Runtime, text: &'static str| async move {
+        r.pipeline.ingest(IngestDoc { subject: "budi".into(), kind: SourceKind::Memoir, text: text.into(), ..Default::default() }).await.unwrap();
+        r.drain().await.unwrap();
+    };
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = laptop(da.path().to_path_buf(), "Laptop").await;
+    let b = laptop(db.path().to_path_buf(), "PC kantor").await;
+
+    // Belum login: pesan "perlu login" agar UI memulai login GitHub.
+    let err = sync::sync_now(&a).await.unwrap_err().to_string();
+    assert!(err.contains(ss::NEED_LOGIN), "{err}");
+    assert_eq!(sync::status(&a).server_account, None);
+
+    // Login (di aplikasi: browser GitHub; di sini token langsung).
+    let budi = token_for("budi").await;
+    for r in [&a, &b] {
+        HubCreds::from_token(&base, &budi).save_to(&ss::creds_path(&r.vault)).unwrap();
+    }
+    assert_eq!(sync::status(&a).server_account.as_deref(), Some("budi@example.com"));
+
+    // A mengunggah ceritanya; server menggabungkan ke vault-nya sendiri.
+    ingest(a.clone(), "Waktu kecil saya tinggal di rumah kayu dekat sungai bersama simbah di desa.").await;
+    let ra = sync::sync_now(&a).await.unwrap();
+    assert!(ra.pushed && ra.source_files_out >= 1, "{ra:?}");
+    assert_eq!(srt.store.count_episodes("budi").await.unwrap(), 1);
+    assert!(!ss::list_sources(&srt.vault.sources_dir()).is_empty());
+
+    // B menarik dari server dan bisa langsung mencari (embedding dihitung di B).
+    let rb = sync::sync_now(&b).await.unwrap();
+    assert_eq!(rb.pulled_from, vec![host.clone()], "{rb:?}");
+    assert!(rb.added > 0 && rb.embedded > 0 && rb.source_files_in >= 1, "{rb:?}");
+    assert_eq!(b.store.count_episodes("budi").await.unwrap(), 1);
+    assert!(b.retriever.recall(&memory_retrieve::RecallQuery::new("budi", "rumah kayu dekat sungai")).await.unwrap().found);
+
+    // B menambah cerita; A menerimanya lewat server. Tidak ada yang hilang.
+    ingest(b.clone(), "Tahun 1998 saya merantau ke Jakarta dan bekerja di pabrik tekstil di Tangerang.").await;
+    sync::sync_now(&b).await.unwrap();
+    sync::sync_now(&a).await.unwrap();
+    for r in [&a, &b, &srt] {
+        assert_eq!(r.store.count_episodes("budi").await.unwrap(), 2);
+    }
+
+    // Setelah stabil: sync tanpa perubahan tidak mengunggah maupun menarik ulang (304).
+    sync::sync_now(&a).await.unwrap();
+    sync::sync_now(&b).await.unwrap();
+    let quiet = sync::sync_now(&a).await.unwrap();
+    assert!(!quiet.pushed && quiet.pulled_from.is_empty() && quiet.added + quiet.updated == 0, "{quiet:?}");
+
+    // Akun lain yang login lewat hub yang sama ditolak (bukan pemilik).
+    let dc = tempfile::tempdir().unwrap();
+    let c = laptop(dc.path().to_path_buf(), "Orang lain").await;
+    HubCreds::from_token(&base, &token_for("sari").await).save_to(&ss::creds_path(&c.vault)).unwrap();
+    let err = sync::sync_now(&c).await.unwrap_err().to_string();
+    assert!(err.contains("tidak diizinkan"), "{err}");
+    assert_eq!(c.store.count_episodes("budi").await.unwrap(), 0);
+
+    // Langsung lewat HTTP: tanpa token 401, token global boleh, path sumber jahat ditolak.
+    let hc = reqwest::Client::new();
+    assert_eq!(hc.get(format!("{base}/api/vault-sync/info")).send().await.unwrap().status(), 401);
+    let info: Value = hc.get(format!("{base}/api/vault-sync/info")).bearer_auth("rahasia-lokal").send().await.unwrap().json().await.unwrap();
+    assert_eq!(info["account"], "token");
+    let bad = hc.put(format!("{base}/api/vault-sync/sources/.ssh%2Fid_rsa")).bearer_auth("rahasia-lokal").body("x").send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    let bad = hc.put(format!("{base}/api/vault-sync/sources/a/%2E%2E/%2E%2E/x")).bearer_auth("rahasia-lokal").body("x").send().await.unwrap();
+    assert!(bad.status().is_client_error(), "{}", bad.status());
+    assert!(!sdir.path().join("x").exists());
+
+    // Sync Google Drive tetap jalan berdampingan dengan server.
+    let drive = tempfile::tempdir().unwrap();
+    let mut s = sync::load_settings(&a.vault);
+    s.dir = Some(drive.path().to_path_buf());
+    sync::save_settings(&a.vault, s).unwrap();
+    let both = sync::sync_now(&a).await.unwrap();
+    assert!(both.pushed, "snapshot pertama ke folder Drive: {both:?}");
+    assert_eq!(sync::status(&a).devices.len(), 1);
+    assert!(sync::load_settings(&a.vault).server.is_some());
+}

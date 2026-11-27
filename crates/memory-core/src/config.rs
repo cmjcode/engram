@@ -297,6 +297,18 @@ pub struct ServerConfig {
     /// ditolak 403. Boleh dipakai tanpa `token_env` (hanya token subjek yang berlaku).
     pub subject_tokens_env: Option<String>,
     pub max_upload_mb: usize,
+    /// Email akun hub (login GitHub/Google) yang boleh menyinkronkan vault dengan server ini
+    /// lewat `/api/vault-sync/*` (aplikasi desktop: isi URL server lalu klik Sync). Kosong =
+    /// hanya token global (`token_env`). Ditambah env `ENGRAM_SYNC_OWNERS` (pisah koma).
+    pub sync_owners: Vec<String>,
+}
+
+impl ServerConfig {
+    /// Email pemilik sync (config + env `ENGRAM_SYNC_OWNERS`), huruf kecil.
+    pub fn sync_owner_emails(&self) -> Vec<String> {
+        let env = std::env::var("ENGRAM_SYNC_OWNERS").unwrap_or_default();
+        self.sync_owners.iter().map(String::as_str).chain(env.split(',')).map(|e| e.trim().to_ascii_lowercase()).filter(|e| e.contains('@')).collect()
+    }
 }
 
 impl Default for ServerConfig {
@@ -306,6 +318,7 @@ impl Default for ServerConfig {
             token_env: Some("MEMORY_TOKEN".into()),
             subject_tokens_env: Some("MEMORY_SUBJECT_TOKENS".into()),
             max_upload_mb: 512,
+            sync_owners: vec![],
         }
     }
 }

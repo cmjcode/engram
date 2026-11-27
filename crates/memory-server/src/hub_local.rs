@@ -26,6 +26,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/hub/login", post(login))
         .route("/api/hub/login/{ticket}", get(login_status))
         .route("/api/hub/logout", post(logout))
+        .route("/api/sync/server/login", post(sync_login))
+        .route("/api/sync/server/logout", post(sync_logout))
 }
 
 async fn account(State(st): State<AppState>) -> ApiResult<Value> {
@@ -78,6 +80,68 @@ async fn login(State(st): State<AppState>, Json(b): Json<LoginIn>) -> ApiResult<
     // Aplikasi desktop membuka browser sistem; UI web membuka tab sendiri dari `url`.
     let opened = st.services.as_ref().is_some_and(|sv| sv.open(&url).is_ok());
     Ok(Json(json!({"url": url, "ticket": ticket, "hub": hub, "opened": opened})))
+}
+
+#[derive(Deserialize)]
+struct SyncLoginIn {
+    /// URL server sync; kosong = yang tersimpan di pengaturan sync.
+    url: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+/// Login ke server sync vault (kredensial di `<vault>/sync_server.json`, terpisah dari login
+/// hub tim). Status dipantau lewat `GET /api/hub/login/{ticket}` seperti login hub biasa.
+async fn sync_login(State(st): State<AppState>, Json(b): Json<SyncLoginIn>) -> ApiResult<Value> {
+    use memory_jobs::sync_server as ss;
+    let raw = b
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .or_else(|| memory_jobs::sync::load_settings(&st.rt.vault).server)
+        .ok_or_else(|| ApiError::BadRequest("isi URL server sync".into()))?;
+    let url = ss::normalize_url(&raw).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let provider = b.provider.as_deref().map(str::trim).filter(|p| !p.is_empty()).unwrap_or("github").to_string();
+    let info = HubClient::anonymous(&url)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?
+        .info()
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("server {url} belum siap untuk login (mode hub mati?): {e}")))?;
+    if !info.providers.iter().any(|p| p == &provider) {
+        return Err(ApiError::BadRequest(format!("server {url} belum mengaktifkan login {provider}")));
+    }
+    let flow = LoginFlow::start(&url, &provider).map_err(|e| ApiError::BadRequest(e.to_string()))?.with_creds_path(ss::creds_path(&st.rt.vault));
+    let (login_url, ticket) = (flow.url.clone(), flow.ticket.clone());
+    if let Ok(mut m) = st.hub_logins.lock() {
+        m.retain(|_, v| v["status"] == "pending");
+        m.insert(ticket.clone(), json!({"status": "pending"}));
+    }
+    let logins = st.hub_logins.clone();
+    let t2 = ticket.clone();
+    tokio::spawn(async move {
+        let v = match flow.wait(Duration::from_secs(300)).await {
+            Ok(c) => json!({"status": "completed", "user": c.user, "hub": c.hub}),
+            Err(e) => json!({"status": "error", "error": e.to_string()}),
+        };
+        if let Ok(mut m) = logins.lock() {
+            m.insert(t2, v);
+        }
+    });
+    let opened = st.services.as_ref().is_some_and(|sv| sv.open(&login_url).is_ok());
+    Ok(Json(json!({"url": login_url, "ticket": ticket, "hub": url, "opened": opened})))
+}
+
+async fn sync_logout(State(st): State<AppState>) -> ApiResult<Value> {
+    use memory_jobs::sync_server as ss;
+    if let Some(c) = HubCreds::load_from(&ss::creds_path(&st.rt.vault))
+        && let Ok(client) = HubClient::anonymous(&c.hub)
+    {
+        let _ = client.logout(&c.refresh_token).await;
+    }
+    ss::logout(&st.rt.vault).map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn login_status(State(st): State<AppState>, Path(ticket): Path<String>) -> ApiResult<Value> {

@@ -163,7 +163,7 @@ async fn two_computers_sync_through_shared_folder() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (a, b) = (rt(da.path()).await, rt(db.path()).await);
     let setup = |r: &Runtime, name: &str| {
-        let s = sync::save_settings(&r.vault, SyncSettings { dir: Some(drive.path().to_path_buf()), interval_minutes: 0, device_name: Some(name.into()) }).unwrap();
+        let s = sync::save_settings(&r.vault, SyncSettings { dir: Some(drive.path().to_path_buf()), interval_minutes: 0, device_name: Some(name.into()), server: None }).unwrap();
         sync::set_passphrase(&r.vault, Some("rahasia-keluarga")).unwrap();
         s
     };
@@ -219,7 +219,7 @@ async fn two_computers_sync_through_shared_folder() {
     // Komputer ketiga dengan kata sandi salah: ditolak dengan pesan jelas, data tidak tercampur.
     let dc = tempfile::tempdir().unwrap();
     let c = rt(dc.path()).await;
-    sync::save_settings(&c.vault, SyncSettings { dir: Some(drive.path().to_path_buf()), interval_minutes: 0, device_name: None }).unwrap();
+    sync::save_settings(&c.vault, SyncSettings { dir: Some(drive.path().to_path_buf()), interval_minutes: 0, device_name: None, server: None }).unwrap();
     sync::set_passphrase(&c.vault, Some("kata-sandi-lain")).unwrap();
     let rc = sync::sync_now(&c).await.unwrap();
     assert!(rc.pulled_from.is_empty() && rc.warnings.iter().any(|w| w.contains("tidak cocok")), "{rc:?}");

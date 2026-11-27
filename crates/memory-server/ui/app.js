@@ -653,7 +653,16 @@ const PROVIDER_ICON = {
 };
 
 async function hubLogin(provider, hubUrl) {
-  const r = await api("/api/hub/login", { method: "POST", json: { provider, hub_url: hubUrl || null } });
+  return waitLogin(await api("/api/hub/login", { method: "POST", json: { provider, hub_url: hubUrl || null } }));
+}
+
+// Login ke server sync vault (kredensial terpisah dari login hub tim).
+async function syncServerLogin() {
+  return waitLogin(await api("/api/sync/server/login", { method: "POST", json: { provider: "github" } }));
+}
+
+// Buka browser untuk login lalu tunggu tiketnya selesai.
+async function waitLogin(r) {
   if (!r.opened) window.open(r.url, "_blank", "noopener");
   toast(t("Finish signing in in the browser…"));
   for (let i = 0; i < 200; i++) {
@@ -1701,6 +1710,12 @@ async function pickFolder(title) {
   return r.path || "";
 }
 
+function syncToast(r) {
+  const from = r.pulled_from.length ? t("Data from {devices}: {added} new, {updated} updated.", { devices: r.pulled_from.join(", "), added: r.added, updated: r.updated }) + " " : "";
+  const warn = r.warnings.length ? " " + r.warnings.join("; ") : "";
+  toast(from + (r.pushed ? t("This computer's data was uploaded.") : t("No changes.")) + warn);
+}
+
 async function showDataSync() {
   $("#st-body").innerHTML = `<div class="empty">${t("Loading...")}</div>`;
   let storage, sync;
@@ -1724,6 +1739,16 @@ async function showDataSync() {
         <button class="primary" id="mv-go">${icon("upload")} ${t("Move data")}</button>
         <div class="small msg" id="mv-msg"></div>`
       : `<p class="small muted">${t("To move it, stop the server and run <code>engram vault move &lt;folder&gt;</code>.")}</p>`}
+    </div>
+
+    <h2>${icon("server")} ${t("Sync with engram server")}</h2>
+    <p class="small muted">${t("Enter the server address and click Sync. The first time, a browser opens to sign in with GitHub. Memory is merged with the server and your other computers.")}</p>
+    <div class="card">
+      <div class="row"><input type="text" id="srv-url" style="flex:1" value="${esc(sync.settings.server || "")}" placeholder="engram.operon.id" spellcheck="false" autocapitalize="off" aria-label="${t("Server address")}">
+        <button class="primary" type="button" id="srv-run">${icon("refresh")} ${t("Sync")}</button></div>
+      ${sync.settings.server ? `<p class="small muted">${sync.server_account ? t("Signed in as {name}", { name: esc(sync.server_account) }) : t("Not signed in yet")}${sync.server_sync_at ? ` &middot; ${t("Last sync: <b>{time}</b>", { time: esc(fmtTime(sync.server_sync_at)) })}` : ""}</p>
+        <button type="button" class="ghost small" id="srv-off">${icon("x")} ${t("Disconnect")}</button>` : ""}
+      <p class="small msg" id="srv-msg"></p>
     </div>
 
     <h2>${icon("cloud")} ${t("Google Drive sync")}</h2>
@@ -1806,15 +1831,43 @@ async function showDataSync() {
     saveSync(body, t("Sync settings saved"));
   };
   if ($("#sy-off")) $("#sy-off").onclick = () => saveSync({ dir: null }, t("Sync turned off"));
+
+  // Sync server: simpan URL bila berubah, login sekali bila perlu, lalu sync.
+  const NEED_LOGIN = "perlu login ke server sync";
+  const needsLogin = (text) => String(text || "").includes(NEED_LOGIN);
+  $("#srv-run").onclick = async () => {
+    const b = $("#srv-run");
+    const url = $("#srv-url").value.trim();
+    if (!url) { msg("#srv-msg", errLine(t("Enter the server address, e.g. engram.operon.id"))); return; }
+    b.disabled = true;
+    try {
+      let st = sync;
+      if (url !== (sync.settings.server || "")) st = await api("/api/sync/server", { method: "PUT", json: { url } });
+      if (!st.server_account) { msg("#srv-msg", t("Finish signing in in the browser…")); await syncServerLogin(); }
+      msg("#srv-msg", t("Syncing..."));
+      let r;
+      try { r = await api("/api/sync/run", { method: "POST" }); }
+      catch (e) { if (!needsLogin(e.message)) throw e; await syncServerLogin(); r = await api("/api/sync/run", { method: "POST" }); }
+      if (r.warnings.some(needsLogin)) { await syncServerLogin(); r = await api("/api/sync/run", { method: "POST" }); }
+      syncToast(r);
+      await showDataSync();
+    } catch (e) { msg("#srv-msg", errLine(e.message)); b.disabled = false; }
+  };
+  if ($("#srv-off")) $("#srv-off").onclick = async () => {
+    try {
+      await api("/api/sync/server/logout", { method: "POST", json: {} });
+      await api("/api/sync/server", { method: "PUT", json: { url: null } });
+      toast(t("Server sync turned off"));
+      await showDataSync();
+    } catch (e) { msg("#srv-msg", errLine(e.message)); }
+  };
   if ($("#sy-run")) {
     $("#sy-run").onclick = async () => {
       const b = $("#sy-run");
       b.disabled = true;
       msg("#sy-msg", t("Syncing..."));
       try {
-        const r = await api("/api/sync/run", { method: "POST" });
-        const from = r.pulled_from.length ? t("Data from {devices}: {added} new, {updated} updated.", { devices: r.pulled_from.join(", "), added: r.added, updated: r.updated }) + " " : "";
-        toast(from + (r.pushed ? t("This computer's data was uploaded.") : t("No changes.")));
+        syncToast(await api("/api/sync/run", { method: "POST" }));
         await showDataSync();
       } catch (e) { msg("#sy-msg", errLine(e.message)); b.disabled = false; }
     };
